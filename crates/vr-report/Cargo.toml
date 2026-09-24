@@ -1,0 +1,7 @@
+[package]
+name = "vr-report"
+version.workspace = true
+edition.workspace = true
+description = "Markdown 报告 → 图表化 HTML 模板"
+
+[dependencies]

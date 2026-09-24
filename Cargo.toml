@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vr-core",
+    "crates/vr-asr",
+    "crates/vr-project",
+    "crates/vr-viz",
+    "crates/vr-report",
+    "crates/vr-mcp",
+    "crates/vr-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

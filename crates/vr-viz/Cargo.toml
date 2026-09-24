@@ -1,0 +1,7 @@
+[package]
+name = "vr-viz"
+version.workspace = true
+edition.workspace = true
+description = "时间线/校准对照表 HTML 渲染(含视频回跳)与本地查看服务"
+
+[dependencies]

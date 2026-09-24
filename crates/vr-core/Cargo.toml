@@ -1,0 +1,7 @@
+[package]
+name = "vr-core"
+version.workspace = true
+edition.workspace = true
+description = "差帧、变化密集区检测、精确抽帧(步 1 的算法核心)"
+
+[dependencies]

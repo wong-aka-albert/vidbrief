@@ -1,0 +1,7 @@
+[package]
+name = "vr-mcp"
+version.workspace = true
+edition.workspace = true
+description = "MCP 服务:供材料 + 存结论 + 算法动作 + 提示模板"
+
+[dependencies]

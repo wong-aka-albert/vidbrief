@@ -1,0 +1,9 @@
+# 构建产物
+/target/
+
+# whisper.cpp 二进制与模型(体积大,按需重新下载)
+/tools/whisper/models/
+/tools/whisper/Release/
+
+# 大体积中间产物(可由源视频重新生成)
+/tools/whisper/demo.wav

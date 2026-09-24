@@ -1,0 +1,11 @@
+[package]
+name = "vr-cli"
+version.workspace = true
+edition.workspace = true
+description = "独立命令行入口(不接 agent 也能自测)"
+
+[[bin]]
+name = "vr"
+path = "src/main.rs"
+
+[dependencies]
