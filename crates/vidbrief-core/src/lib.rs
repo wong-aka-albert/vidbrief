@@ -1,9 +1,34 @@
-//! 步 1 的算法核心:差帧、变化密集区、精确抽帧。
+//! 步 1 的算法核心:ffmpeg 调用、差帧、变化密集区、精确抽帧。
 //!
-//! 设计见 `docs/DESIGN.md` §5。
+//! 设计见 `docs/DESIGN.md` §5;格式见 `docs/schema/`(契约类型住在 `vidbrief-project`)。
 //!
-//! 职责(待实现):
-//! - 抽帧:ffmpeg 按 `fps`/`width` 采样为 RGB24(`§5.1 ①`)
-//! - 差帧图:颜色直方图 L1(0.75)+ 亮度差(0.25)→ `change_curve.json`(`§4.3`)
-//! - 变化密集区:滑窗累计变化量 + 双判据 → `dense_regions.json`(`§5.2`)
-//! - 精确抽帧:按时刻取单帧,供预筛选截图与补图使用(`§5.1 ③`、`§6.2 ④`)
+//! | 模块 | 干什么 | 碰进程吗 |
+//! |------|--------|:-------:|
+//! | [`ffmpeg`] | 拉起 ffmpeg / ffprobe 的**唯一入口** | ✅ |
+//! | [`probe`] | `ffprobe` → [`VideoMeta`](vidbrief_project::VideoMeta) | ✅ |
+//! | [`feature`] | 帧特征与打分 | ❌ **纯函数** |
+//! | [`regions`] | 变化密集区检测 | ❌ **纯函数** |
+//! | [`shots`] | 规划要抽哪几帧 | ❌ **纯函数** |
+//! | [`curve`] | 流式抽帧 → 差帧图 | ✅ |
+//! | [`extract`] | 按时刻抽单帧 → JPEG | ✅ |
+//! | [`pipeline`] | 把上面几步串起来并落盘 | ✅ |
+//!
+//! **纯函数占了近一半,这不是巧合**:打分口径与密集区判据是整条流水线上最需要反复调的
+//! 东西,它们的反馈环不能卡在外部进程上(60 秒测试片跑一轮 ffmpeg 要几百毫秒,
+//! 真实长视频要几十秒)。`feature` / `regions` / `shots` 都不碰文件系统,单测在毫秒级。
+
+pub mod curve;
+pub mod extract;
+pub mod feature;
+pub mod ffmpeg;
+pub mod pipeline;
+pub mod probe;
+pub mod regions;
+pub mod shots;
+
+pub use curve::{CurveOptions, build_curve};
+pub use extract::{ShotQuality, extract_frame};
+pub use feature::{FrameFeature, score};
+pub use pipeline::{VisualReport, analyze, extract_shots, plan_shots, run_visual};
+pub use probe::{has_audio_stream, probe};
+pub use regions::detect;

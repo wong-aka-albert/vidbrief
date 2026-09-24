@@ -142,8 +142,8 @@ git commit -m "feat(vidbrief-core): 实现变化密集区检测 [260925-01]"
 | [`docs/WHISPER_SETUP.md`](docs/WHISPER_SETUP.md) | 本地 Whisper:硬件要求、模型规格、实测记录 |
 | [`docs/devlog/`](docs/devlog/) | **开发过程记录**(迭代安排 / 进度 / 决策 / 问题 / 计划变更) |
 | [`docs/devlog/PLAN.md`](docs/devlog/PLAN.md) | 当前迭代安排与里程碑状态 |
-| `crates/vidbrief-core/` | 差帧、变化密集区、精确抽帧(步 1 算法核心) |
-| `crates/vidbrief-asr/` | whisper-cli 封装 → 结构化转录 |
+| `crates/vidbrief-core/` | 步 1 算法核心。**纯函数占一半**(`feature`/`regions`/`shots` 不碰进程),便于毫秒级调试 |
+| `crates/vidbrief-asr/` | ffmpeg 抽音 + whisper-cli 封装 → 结构化转录。**不做任何纠错** |
 | `crates/vidbrief-project/` | **项目目录 + 全部数据结构 + 写锁与并发控制**(格式的代码侧权威) |
 | `crates/vidbrief-viz/` | HTML 视图渲染 + 本地查看服务(视频回跳) |
 | `crates/vidbrief-report/` | Markdown → 图表化 HTML |
@@ -156,9 +156,22 @@ git commit -m "feat(vidbrief-core): 实现变化密集区检测 [260925-01]"
 
 ```bash
 cargo build --workspace          # 编译
-cargo test  --workspace          # 全部测试
-./target/debug/vidbrief init fixtures/test_sample.mp4 -p /tmp/smoke   # 冒烟:建个项目看看
+cargo test  --workspace          # 全部测试(默认不跑 whisper,见下)
+# 冒烟:建项目 → 跑步 1 → 看状态(用素材**副本**,别直接硬链仓库里的 fixtures ——
+# 硬链接会穿透,往项目里那个视频写东西等于改仓库跟踪文件)
+cp fixtures/test_sample.mp4 /tmp/smoke.mp4
+./target/debug/vidbrief init /tmp/smoke.mp4 -p /tmp/smoke-proj
+./target/debug/vidbrief preprocess /tmp/smoke-proj --no-transcribe
+./target/debug/vidbrief status /tmp/smoke-proj --verify
 ```
+
+**需要显式跑的**(要拉 whisper-cli 与 466MB 模型,约 4 秒):
+
+```bash
+cargo test -p vidbrief-asr --offline -- --ignored --nocapture
+```
+
+> 拉不到 crate 索引时加 `--offline`(依赖都在本地缓存里)。
 
 ---
 

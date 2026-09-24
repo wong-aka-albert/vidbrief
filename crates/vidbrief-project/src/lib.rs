@@ -8,7 +8,8 @@
 //! |------|---------|
 //! | [`project`] | `project.json` |
 //! | [`lock`] | `project.lock` |
-//! | [`source`] | 把源视频搬进 `source/` |
+//! | [`source`] | 把源视频搬进 `source/`;文件身份(卷/文件 ID/链接数) |
+//! | [`health`] | 项目体检:源视频还在不在、链接还可不可用 |
 //! | [`meta`] | `source/video.meta.json` |
 //! | [`curve`] | `01_preprocess/change_curve.json` |
 //! | [`regions`] | `01_preprocess/dense_regions.json` |
@@ -26,6 +27,7 @@
 //! 待实现(非 M0 范围):写锁的获取/释放逻辑见 `docs/DESIGN.md` §4.7,M3 随 MCP 多会话一起做。
 
 pub mod curve;
+pub mod health;
 pub mod ids;
 pub mod json;
 pub mod layout;
@@ -42,6 +44,7 @@ pub mod transcript;
 use chrono::{DateTime, FixedOffset, Local, Timelike};
 
 pub use curve::{ChangeCurve, ChangePoint};
+pub use health::{Health, check_source_link, verify_content};
 pub use ids::{ProjectId, ShotId};
 pub use json::{read, to_pretty_string, write_atomic, write_atomic_str};
 pub use layout::Layout;
@@ -53,7 +56,10 @@ pub use project::{
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
 pub use shots::{Confidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
-pub use source::{SourceLink, materialize, simplify_path, video_rel_for};
+pub use source::{
+    Materialized, Placement, SourceLink, materialize, plan, same_file, sha256_of, simplify_path,
+    video_rel_for, volume_of,
+};
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
 pub use transcript::{Correction, CorrectionType, Segment, Transcript};
 
@@ -66,6 +72,23 @@ pub use transcript::{Correction, CorrectionType, Segment, Transcript};
 pub fn now() -> DateTime<FixedOffset> {
     let dt = Local::now().fixed_offset();
     dt.with_nanosecond(0).unwrap_or(dt)
+}
+
+/// 人读的字节数(`512 B` / `2 KB` / `1.9 MB` / `3.00 GB`)。
+///
+/// 1024 进制;**只用于展示**,不进 JSON(JSON 里一律是精确的整数字节)。
+pub fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.2} GB", b / (KB * KB * KB))
+    }
 }
 
 #[cfg(test)]

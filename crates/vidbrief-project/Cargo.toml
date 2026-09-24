@@ -10,6 +10,9 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# 判"两个路径是不是同一份数据":Windows 要走 GetFileInformationByHandle,
+# 而 std 的对应 API(volume_serial_number / file_index)到 1.96 仍是 unstable
+same-file = "1"
 
 [dev-dependencies]
 jsonschema = { version = "0.57", default-features = false }

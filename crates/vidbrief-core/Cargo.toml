@@ -2,6 +2,10 @@
 name = "vidbrief-core"
 version.workspace = true
 edition.workspace = true
-description = "差帧、变化密集区检测、精确抽帧(步 1 的算法核心)"
+description = "步 1 的算法核心:ffmpeg 调用、差帧、变化密集区、精确抽帧"
 
 [dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+vidbrief-project.workspace = true

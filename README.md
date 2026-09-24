@@ -34,8 +34,8 @@
 
 ```
 crates/
-  vidbrief-core/     差帧、变化密集区、精确抽帧(步 1 算法核心)
-  vidbrief-asr/      whisper-cli 封装 → 结构化转录
+  vidbrief-core/     步 1 算法核心:ffmpeg 调用、差帧、密集区、精确抽帧
+  vidbrief-asr/      语音转文字:ffmpeg 抽音 + whisper-cli → transcript.json
   vidbrief-project/  项目目录 + 全部数据结构(格式的代码侧权威)+ 写锁与并发控制
   vidbrief-viz/      HTML 视图渲染 + 本地查看服务(视频回跳)
   vidbrief-report/   Markdown → 图表化 HTML
@@ -77,6 +77,12 @@ cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端�
 ./target/debug/vidbrief init <video> [-n id] [-t "中文名"] [-p 项目目录]
 ./target/debug/vidbrief init -h        # init 的全部选项
 
+# 步 1:差帧图 + 密集区 + 预筛选截图(+ 有音轨时做转录)
+./target/debug/vidbrief preprocess <项目> [--no-transcribe] [--no-shots] [-f fps] [-w 宽度]
+
+# 查看状态 + 健康检查(--verify 会重算 sha256,发现源文件被就地改写)
+./target/debug/vidbrief status <项目> [--verify]
+
 # 其余子命令待各里程碑实现
 ./target/debug/vidbrief help
 ```
@@ -96,4 +102,5 @@ cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端�
 见 [docs/DESIGN.md §13](./docs/DESIGN.md) 与 [docs/devlog/PLAN.md](./docs/devlog/PLAN.md)。
 
 - ✅ **M0** 数据模型定稿:JSON Schema + Rust 类型 + 目录骨架 + `vidbrief init`
-- ⏳ **M1**(下一步)`vidbrief-core` 差帧 / 密集区 / 抽帧 + `vidbrief-asr` 转录
+- ✅ **M1** 步 1 打通:`vidbrief-core` 差帧/密集区/抽帧 + `vidbrief-asr` 转录 + `vidbrief preprocess`
+- ⏳ **M2**(下一步)时间线视图:四层共轴 + 视频回跳 + 本地查看服务

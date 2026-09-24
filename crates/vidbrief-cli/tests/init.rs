@@ -24,11 +24,16 @@ fn fixture() -> PathBuf {
 }
 
 /// 用完自动删的临时目录。
+///
+/// **刻意放在仓库的 `target/` 下,而不是系统临时目录** —— 系统临时目录常在 `C:`,
+/// 而素材在 `E:`,跨卷会让硬链接退化成复制,于是"同卷应当硬链接"这条根本没被测到。
+/// `target/` 已被 gitignore,且与素材同卷。
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("vidbrief-cli-{tag}-{}", std::process::id()));
+        let root = repo_root().join("target").join("vidbrief-test");
+        let dir = root.join(format!("{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("无法创建临时目录");
         Self(dir)
@@ -36,6 +41,20 @@ impl TempDir {
 
     fn join(&self, rel: &str) -> PathBuf {
         self.0.join(rel)
+    }
+
+    /// 素材的**副本**。
+    ///
+    /// 不要直接用 `fixtures/` 里的原件:`init` 在同卷时会建**硬链接**,
+    /// 于是任何往"项目里那个视频"写东西的代码都会穿透改坏仓库里被跟踪的文件。
+    /// 这不是假想 —— 演示 `status --verify` 时翻转一个字节,就把
+    /// `fixtures/test_sample.mp4` 改了(靠 `git checkout` 才恢复)。
+    fn stage_video(&self) -> PathBuf {
+        // 保持**原文件名** —— 项目 id 由文件名净化而来,改名会让所有断言失效
+        let name = fixture().file_name().expect("素材没有文件名").to_owned();
+        let dst = self.0.join(name);
+        std::fs::copy(fixture(), &dst).expect("无法复制素材");
+        dst
     }
 }
 
@@ -67,7 +86,7 @@ fn stderr(out: &Output) -> String {
 #[test]
 fn init_builds_the_whole_skeleton() {
     let tmp = TempDir::new("skeleton");
-    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap()]);
+    let out = run_in(&tmp.0, &["init", tmp.stage_video().to_str().unwrap()]);
     assert!(out.status.success(), "init 失败:\n{}", stderr(&out));
 
     // 项目 id 由文件名净化而来:test_sample → test-sample;默认落在 ./projects/<id>
@@ -99,19 +118,22 @@ fn init_builds_the_whole_skeleton() {
     assert!(video.is_file(), "源视频没进项目:{}", video.display());
     assert_eq!(
         std::fs::metadata(&video).unwrap().len(),
-        std::fs::metadata(fixture()).unwrap().len(),
+        std::fs::metadata(&tmp.stage_video()).unwrap().len(),
         "项目里的源视频大小与原始文件不符"
     );
 
     let text = stdout(&out);
     assert!(text.contains("项目已建立:test-sample"), "{text}");
     assert!(text.contains("vidbrief preprocess"), "应给出下一步提示:{text}");
+    // 同卷时必须是硬链接,且要说清"不占额外磁盘" —— 这条输出曾经让人误以为复制了文件
+    assert!(text.contains("  引入     硬链接"), "{text}");
+    assert!(!text.contains("警告"), "同卷硬链接不该有警告:{text}");
 }
 
 #[test]
 fn init_dedupes_instead_of_overwriting() {
     let tmp = TempDir::new("dedupe");
-    let video = fixture();
+    let video = tmp.stage_video();
     let args = ["init", video.to_str().unwrap()];
 
     let first = run_in(&tmp.0, &args);
@@ -133,7 +155,7 @@ fn project_dir_flag_puts_the_project_exactly_there() {
 
     let out = run_in(
         &tmp.0,
-        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+        &["init", tmp.stage_video().to_str().unwrap(), "-p", exact.to_str().unwrap()],
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
@@ -156,7 +178,7 @@ fn project_dir_flag_refuses_to_overwrite() {
 
     let out = run_in(
         &tmp.0,
-        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+        &["init", tmp.stage_video().to_str().unwrap(), "-p", exact.to_str().unwrap()],
     );
     assert!(!out.status.success(), "目录已存在就该拒绝");
     assert!(stderr(&out).contains("拒绝覆盖"), "{}", stderr(&out));
@@ -171,7 +193,7 @@ fn project_dir_id_falls_back_to_video_name_when_dir_is_not_ascii() {
 
     let out = run_in(
         &tmp.0,
-        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+        &["init", tmp.stage_video().to_str().unwrap(), "-p", exact.to_str().unwrap()],
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
@@ -211,9 +233,14 @@ fn init_asks_for_name_when_stem_is_not_ascii() {
 #[test]
 fn short_flags_and_equals_forms() {
     let tmp = TempDir::new("forms");
+    let video = tmp.stage_video();
+    let video = video.to_str().unwrap();
 
     // 短选项 `-p x`
-    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "-n", "a", "-t", "T", "-p", tmp.join("a").to_str().unwrap()]);
+    let out = run_in(
+        &tmp.0,
+        &["init", video, "-n", "a", "-t", "T", "-p", tmp.join("a").to_str().unwrap()],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(Project::load(&tmp.join("a/project.json")).unwrap().name, "T");
 
@@ -222,7 +249,7 @@ fn short_flags_and_equals_forms() {
         &tmp.0,
         &[
             "init",
-            fixture().to_str().unwrap(),
+            video,
             &format!("--project-dir={}", tmp.join("b").display()),
             "--name=b",
         ],
@@ -233,7 +260,7 @@ fn short_flags_and_equals_forms() {
     // 短选项带等号 `-p=value`
     let out = run_in(
         &tmp.0,
-        &["init", fixture().to_str().unwrap(), &format!("-p={}", tmp.join("c").display())],
+        &["init", video, &format!("-p={}", tmp.join("c").display())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(tmp.join("c/project.json").is_file());
@@ -263,7 +290,7 @@ fn init_reports_errors_instead_of_panicking() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("用法"), "{}", stderr(&out));
 
-    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "--nmae", "x"]);
+    let out = run_in(&tmp.0, &["init", tmp.stage_video().to_str().unwrap(), "--nmae", "x"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("--nmae"), "{}", stderr(&out));
 
@@ -271,7 +298,7 @@ fn init_reports_errors_instead_of_panicking() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("只接受一个视频路径"), "{}", stderr(&out));
 
-    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "-p"]);
+    let out = run_in(&tmp.0, &["init", tmp.stage_video().to_str().unwrap(), "-p"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("缺少取值"), "{}", stderr(&out));
 
@@ -284,9 +311,58 @@ fn init_reports_errors_instead_of_panicking() {
 
 // ── 顶层命令 ─────────────────────────────────────────────────────────
 
+/// **回退必须自证**:输出里说"复制"时,必须跟着说明为什么没能用更省的方式。
+///
+/// 这条不变式是有来历的:早先 `materialize` 用三个 `is_ok()` 把失败原因全吞了,
+/// 用户看到"(复制)"只能猜是跨卷、权限还是文件系统——而工具本来就知道答案。
+#[test]
+fn falling_back_to_copy_always_explains_itself() {
+    // 同卷(仓库在 E:)→ 期望硬链接
+    let same = TempDir::new("vol-same");
+    let video = same.stage_video();
+    let mut seen = vec![run_in(&same.0, &["init", video.to_str().unwrap()])];
+
+    // 另一个卷(系统临时目录,本机是 C:)→ 期望复制 + 原因
+    let cross = TempDir::new("vol-cross");
+    let elsewhere = std::env::temp_dir().join(format!("vidbrief-cross-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    seen.push(run_in(
+        &cross.0,
+        &["init", video.to_str().unwrap(), "-p", elsewhere.to_str().unwrap()],
+    ));
+
+    let mut kinds = Vec::new();
+    for out in &seen {
+        assert!(out.status.success(), "{}", stderr(out));
+        let text = stdout(out);
+        let has_reason = text.lines().any(|l| l.trim_start().starts_with("└"));
+
+        if text.contains("  引入     硬链接") {
+            assert!(!has_reason, "硬链接是第一选择,不该有回退原因:\n{text}");
+            kinds.push("hardlink");
+        } else if text.contains("  引入     复制") {
+            assert!(has_reason, "退到复制必须给出原因:\n{text}");
+            assert!(text.contains("硬链接:"), "原因里应记下硬链接为何失败:\n{text}");
+            kinds.push("copy");
+        } else if text.contains("  引入     软链接") {
+            assert!(has_reason, "软链接是回退结果,必须给出原因:\n{text}");
+            assert!(text.contains("警告"), "软链接必须给出不自包含的警告:\n{text}");
+            kinds.push("symlink");
+        } else {
+            panic!("输出里没有『引入』行:\n{text}");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    assert!(
+        kinds.contains(&"hardlink"),
+        "同卷(仓库与素材都在 E:)应当用硬链接,实际:{kinds:?}"
+    );
+}
+
 #[test]
 fn unimplemented_commands_exit_two_and_say_so() {
-    for cmd in ["preprocess", "ui", "mcp", "status"] {
+    for cmd in ["ui", "mcp"] {
         let out = run_in(&std::env::temp_dir(), &[cmd]);
         assert_eq!(out.status.code(), Some(2), "{cmd} 应以退出码 2 结束");
         let err = stderr(&out);

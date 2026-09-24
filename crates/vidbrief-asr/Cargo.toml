@@ -2,6 +2,9 @@
 name = "vidbrief-asr"
 version.workspace = true
 edition.workspace = true
-description = "调用 whisper-cli 做语音转文字,解析为结构化 transcript"
+description = "语音转文字:ffmpeg 抽音 + whisper-cli → 结构化 transcript.json"
 
 [dependencies]
+anyhow.workspace = true
+vidbrief-core.workspace = true
+vidbrief-project.workspace = true
