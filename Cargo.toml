@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/vr-core",
-    "crates/vr-asr",
-    "crates/vr-project",
-    "crates/vr-viz",
-    "crates/vr-report",
-    "crates/vr-mcp",
-    "crates/vr-cli",
+    "crates/vidbrief-core",
+    "crates/vidbrief-asr",
+    "crates/vidbrief-project",
+    "crates/vidbrief-viz",
+    "crates/vidbrief-report",
+    "crates/vidbrief-mcp",
+    "crates/vidbrief-cli",
 ]
 
 [workspace.package]

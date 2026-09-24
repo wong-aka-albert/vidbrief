@@ -1,11 +1,11 @@
 [package]
-name = "vr-cli"
+name = "vidbrief-cli"
 version.workspace = true
 edition.workspace = true
 description = "独立命令行入口(不接 agent 也能自测)"
 
 [[bin]]
-name = "vr"
+name = "vidbrief"
 path = "src/main.rs"
 
 [dependencies]

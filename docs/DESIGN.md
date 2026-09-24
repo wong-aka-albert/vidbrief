@@ -1,6 +1,6 @@
 # 视频图文总结 MCP — 从零设计
 
-> 版本:v0.6(补充多会话并发:每进程单例端口不冲突;同项目并发编辑用写锁 + 修订号)
+> 版本:v0.7(项目更名 video-reader → vidbrief;crate 前缀 vr- → vidbrief-)
 > 状态:待评审
 > 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)
 
@@ -57,7 +57,7 @@
 
 ```
 ┌──────────┐   对话(自然语言)   ┌─────────────────┐   MCP 工具调用   ┌──────────────────┐
-│   用户    │ ◄────────────────► │      agent       │ ◄──────────────► │  video-reader     │
+│   用户    │ ◄────────────────► │      agent       │ ◄──────────────► │  vidbrief         │
 │          │   看视图/下指令      │ (自带多模态能力)  │  (stdio/HTTP)    │  MCP 服务         │
 └──────────┘                    └────────┬────────┘                  └────────┬─────────┘
       ▲                                  │                                     │
@@ -229,7 +229,7 @@ projects/<project-name>/
 
 ### 4.7 并发与多会话
 
-MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己的** `vr mcp` 进程,进程间相互独立。因此:
+MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己的** `vidbrief mcp` 进程,进程间相互独立。因此:
 
 - **端口天然不冲突**:每个会话 = 一个 MCP 进程 = 自己的查看服务 = 各自绑 `127.0.0.1:0` 拿到的空闲端口。所谓"单例"是**进程内单例**,不是全局单例。
 - **浏览器可多开**:查看服务是只读静态服务,任意多个标签页/会话同时看都没问题。
@@ -473,15 +473,15 @@ agent: → find_supplement_candidates() → 判断后 extract_shot 补 3 张
 ### 10.3 模块划分
 
 ```
-video-reader/
+vidbrief/
 ├── crates/
-│   ├── vr-core/     # 差帧、密集区、抽帧(重写;旧实现已不在本仓库)
-│   ├── vr-asr/      # 调 whisper-cli,解析 srt → transcript.json
-│   ├── vr-project/  # 项目目录 + 数据结构 + project.json
-│   ├── vr-viz/      # 时间线/对照表/报告 HTML 渲染(含视频回跳 + 前端脚本)
-│   ├── vr-report/   # MD → HTML 图表化模板
-│   ├── vr-mcp/      # MCP 服务:供材料 + 存结论 + 算法动作 + 提示模板
-│   └── vr-cli/      # 独立命令行(脱离 agent 也能测/用)
+│   ├── vidbrief-core/     # 差帧、密集区、抽帧(重写;旧实现已不在本仓库)
+│   ├── vidbrief-asr/      # 调 whisper-cli,解析 srt → transcript.json
+│   ├── vidbrief-project/  # 项目目录 + 数据结构 + project.json
+│   ├── vidbrief-viz/      # 时间线/对照表/报告 HTML 渲染(含视频回跳 + 前端脚本)
+│   ├── vidbrief-report/   # MD → HTML 图表化模板
+│   ├── vidbrief-mcp/      # MCP 服务:供材料 + 存结论 + 算法动作 + 提示模板
+│   └── vidbrief-cli/      # 独立命令行(脱离 agent 也能测/用)
 ├── ui/              # 视图模板 + 前端(时间线组件)
 └── docs/
 ```
@@ -542,11 +542,11 @@ video-reader/
 ### 10.5 命令行(便于不接 agent 时自测)
 
 ```bash
-vr init <video> [--name x]        # 建项目
-vr preprocess <project>           # 步 1(纯算法)
-vr ui         <project>           # 本地视图 + 视频服务
-vr mcp        [--stdio|--http]    # 启动 MCP 服务
-vr status     <project>
+vidbrief init <video> [--name x]       # 建项目
+vidbrief preprocess <project>          # 步 1(纯算法)
+vidbrief ui         <project>          # 本地视图 + 视频服务
+vidbrief mcp        [--stdio|--http]   # 启动 MCP 服务
+vidbrief status     <project>          # 查看项目状态
 ```
 
 ---
@@ -635,9 +635,9 @@ agent: → 重写 MD → build_report(html) 重渲染
 | 阶段 | 内容 | 依赖 |
 |------|------|------|
 | **M0 schema 定稿** | §4 的 JSON schema + 目录结构落成真实文件 | 本文评审 |
-| **M1 vr-core + 步1** | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 复用现有 video-reader / transcribe.sh |
+| **M1 vidbrief-core + 步1** | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
 | **M2 时间线视图** | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
-| **M3 MCP 骨架** | `vr-mcp` 服务 + 项目/材料/算法工具接上 | M1,M2 |
+| **M3 MCP 骨架** | `vidbrief-mcp` 服务 + 项目/材料/算法工具接上 | M1,M2 |
 | **M4 步2 循环** | `get_shot`/`record_shot_check`/`apply_corrections` + 提示模板 P1–P3 + 对照表视图 | M3 |
 | **M5 步3 总结** | 只读/补图/写入工具 + 提示模板 P4 | M4 |
 | **M6 步4 报告** | MD 生成 + HTML 模板 + P5 | M5 |
@@ -664,12 +664,12 @@ agent: → 重写 MD → build_report(html) 重渲染
 
 | 旧资产(已归档) | 在新设计中的去向 |
 |----------------|-----------------|
-| `src/main.rs`(video-reader) | 差帧 / 峰值 / 抽帧算法**重写进 `vr-core`**,并新增变化密集区检测(§5.2) |
-| `scripts/transcribe.sh` | 思路并入 `vr-asr`:抽 wav → whisper-cli → 结构化 `transcript.json` |
+| `src/main.rs`(vidbrief) | 差帧 / 峰值 / 抽帧算法**重写进 `vidbrief-core`**,并新增变化密集区检测(§5.2) |
+| `scripts/transcribe.sh` | 思路并入 `vidbrief-asr`:抽 wav → whisper-cli → 结构化 `transcript.json` |
 | `tools/whisper/`(二进制 + 模型) | **仍在工作区,原样复用**(体积大,不入 git) |
 | `scripts/describe_frames.py` | **废弃**(识别改由 agent 做);其提示词作 §10.4 参考 |
 | `scripts/describe_frames_with_context.py` | **废弃**;"图文联合"思路已内化为提示模板 P1 |
-| `scripts/build_report.py` | 思路并入 `vr-report`:MD → HTML,图片改相对路径 |
+| `scripts/build_report.py` | 思路并入 `vidbrief-report`:MD → HTML,图片改相对路径 |
 | `timeline_demo.json` / `report_demo.md` | 实测样例;`fixtures/test_sample.mp4` 保留作回归素材 |
 | `BRD.md` / `RESEARCH.md` / `WHISPER_SETUP.md` | 文档,已整理至 `docs/` |
 

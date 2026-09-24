@@ -1,5 +1,5 @@
 [package]
-name = "vr-project"
+name = "vidbrief-project"
 version.workspace = true
 edition.workspace = true
 description = "项目目录、数据结构、project.json 与并发控制"

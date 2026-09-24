@@ -1,11 +1,11 @@
-//! `vr` —— 独立命令行入口(脱离 agent 也能测试与使用)。
+//! `vidbrief` —— 独立命令行入口(脱离 agent 也能测试与使用)。
 //!
 //! 子命令见 `docs/DESIGN.md` §10.5。当前为骨架,子命令待各里程碑实现。
 
 const USAGE: &str = "\
-vr —— 视频图文总结 MCP 工具集
+vidbrief —— 视频图文总结 MCP 工具集
 
-Usage: vr <command> [args]
+Usage: vidbrief <command> [args]
 
 Commands:
   init <video> [--name x]   建项目
@@ -19,7 +19,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some(cmd @ ("init" | "preprocess" | "ui" | "mcp" | "status")) => {
-            eprintln!("`vr {cmd}` 尚未实现(见 docs/DESIGN.md §13 里程碑)");
+            eprintln!("`vidbrief {cmd}` 尚未实现(见 docs/DESIGN.md §13 里程碑)");
             std::process::exit(2);
         }
         _ => {

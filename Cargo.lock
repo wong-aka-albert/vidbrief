@@ -3,29 +3,29 @@
 version = 4
 
 [[package]]
-name = "vr-asr"
+name = "vidbrief-asr"
 version = "0.1.0"
 
 [[package]]
-name = "vr-cli"
+name = "vidbrief-cli"
 version = "0.1.0"
 
 [[package]]
-name = "vr-core"
+name = "vidbrief-core"
 version = "0.1.0"
 
 [[package]]
-name = "vr-mcp"
+name = "vidbrief-mcp"
 version = "0.1.0"
 
 [[package]]
-name = "vr-project"
+name = "vidbrief-project"
 version = "0.1.0"
 
 [[package]]
-name = "vr-report"
+name = "vidbrief-report"
 version = "0.1.0"
 
 [[package]]
-name = "vr-viz"
+name = "vidbrief-viz"
 version = "0.1.0"

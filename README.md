@@ -1,4 +1,4 @@
-# video-reader
+# vidbrief
 
 长知识类视频(30 分钟级)→ **图文总结**的工具集,形态是**面向 agent 的 MCP 服务**。
 
@@ -32,13 +32,13 @@
 
 ```
 crates/
-  vr-core/     差帧、变化密集区、精确抽帧(步 1 算法核心)
-  vr-asr/      whisper-cli 封装 → 结构化转录
-  vr-project/  项目目录、数据结构、写锁与并发控制
-  vr-viz/      HTML 视图渲染 + 本地查看服务(视频回跳)
-  vr-report/   Markdown → 图表化 HTML
-  vr-mcp/      MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)
-  vr-cli/      `vr` 独立命令行(脱离 agent 也能自测)
+  vidbrief-core/     差帧、变化密集区、精确抽帧(步 1 算法核心)
+  vidbrief-asr/      whisper-cli 封装 → 结构化转录
+  vidbrief-project/  项目目录、数据结构、写锁与并发控制
+  vidbrief-viz/      HTML 视图渲染 + 本地查看服务(视频回跳)
+  vidbrief-report/   Markdown → 图表化 HTML
+  vidbrief-mcp/      MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)
+  vidbrief-cli/      `vidbrief` 独立命令行(脱离 agent 也能自测)
 docs/          文档(DESIGN 设计 / BRD 需求 / RESEARCH 技术核实 / WHISPER_SETUP 转录环境)
 fixtures/      测试素材
 tools/whisper/ whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
@@ -48,7 +48,7 @@ tools/whisper/ whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
 
 ```bash
 cargo build           # 编译整个 workspace
-./target/debug/vr     # 查看 CLI 用法(子命令待各里程碑实现)
+./target/debug/vidbrief     # 查看 CLI 用法(子命令待各里程碑实现)
 ```
 
 ## 关键决策(摘自设计文档 §14)
