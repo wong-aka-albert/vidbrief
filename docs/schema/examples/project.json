@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "rev": 7,
+  "id": "demo",
+  "name": "24 秒样例",
+  "created_at": "2026-09-24T21:00:00+08:00",
+  "source": {
+    "path": "source/video.mp4",
+    "original": "D:/videos/demo.mp4",
+    "link": "hardlink"
+  },
+  "glossary": null,
+  "progress": {
+    "preprocess": {
+      "done": true,
+      "at": "2026-09-24T21:03:11+08:00"
+    },
+    "calibrate": {
+      "rounds": 2,
+      "last_at": "2026-09-24T21:20:00+08:00"
+    },
+    "summarize": {
+      "done": false,
+      "at": null
+    },
+    "report": {
+      "done": false,
+      "at": null
+    }
+  }
+}

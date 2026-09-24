@@ -5,7 +5,9 @@
 算法负责粗筛(差帧、转录、截图),agent 负责理解(看图、纠错、总结),人通过对话把关。
 
 > 📐 完整设计见 **[docs/DESIGN.md](./docs/DESIGN.md)**
+> 🧾 项目材料格式(JSON Schema + 示例)见 **[docs/schema/](./docs/schema/)**
 > 📋 需求背景见 [docs/BRD.md](./docs/BRD.md) · 技术核实与实测见 [docs/RESEARCH.md](./docs/RESEARCH.md) · 本地 Whisper 见 [docs/WHISPER_SETUP.md](./docs/WHISPER_SETUP.md)
+> 📝 开发过程记录见 [docs/devlog/](./docs/devlog/)
 
 ## 三条铁律
 
@@ -34,21 +36,48 @@
 crates/
   vidbrief-core/     差帧、变化密集区、精确抽帧(步 1 算法核心)
   vidbrief-asr/      whisper-cli 封装 → 结构化转录
-  vidbrief-project/  项目目录、数据结构、写锁与并发控制
+  vidbrief-project/  项目目录 + 全部数据结构(格式的代码侧权威)+ 写锁与并发控制
   vidbrief-viz/      HTML 视图渲染 + 本地查看服务(视频回跳)
   vidbrief-report/   Markdown → 图表化 HTML
   vidbrief-mcp/      MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)
   vidbrief-cli/      `vidbrief` 独立命令行(脱离 agent 也能自测)
-docs/          文档(DESIGN 设计 / BRD 需求 / RESEARCH 技术核实 / WHISPER_SETUP 转录环境)
-fixtures/      测试素材
-tools/whisper/ whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
+docs/
+  DESIGN.md          主设计文档
+  schema/            项目材料格式的唯一权威:JSON Schema + 示例(同时是测试夹具)
+  devlog/            开发过程记录(迭代安排 / 进度 / 决策 / 问题 / 计划变更)
+  BRD.md RESEARCH.md WHISPER_SETUP.md
+fixtures/            测试素材(含已知切换点的回归视频)
+tools/whisper/       whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
+projects/            项目工作区(不入 git,由 `vidbrief init` 生成)
 ```
 
-## 构建
+## 项目工作区长什么样
+
+一个视频 = 一个项目目录,四步产物分目录存放,**材料即接口**(agent 读文件、写结论):
+
+```
+projects/<id>/
+├── project.json         元数据 + 进度
+├── source/              源视频(硬链接/软链接/复制)+ ffprobe 元数据
+├── 01_preprocess/       差帧图 / 密集区 / 转录 / 截图 / 时间线视图
+├── 02_calibrate/        纠错后的转录 / 补图 / 校准日志 / 视图
+├── 03_summary/          总结稿 + 探索笔记
+└── 04_report/           报告 MD / HTML / assets
+```
+
+每个 JSON 文件的字段、枚举与约束都定义在 [`docs/schema/`](./docs/schema/),并由测试与 Rust 类型三方锚定。
+
+## 构建与使用
 
 ```bash
-cargo build           # 编译整个 workspace
-./target/debug/vidbrief     # 查看 CLI 用法(子命令待各里程碑实现)
+cargo build --workspace        # 编译
+cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端到端)
+
+# 建项目(建目录骨架 + 探测源视频 + 写 project.json)
+./target/debug/vidbrief init <video> [--name x] [--title "中文名"] [--projects-dir dir]
+
+# 其余子命令待各里程碑实现
+./target/debug/vidbrief help
 ```
 
 ## 关键决策(摘自设计文档 §14)
@@ -63,4 +92,7 @@ cargo build           # 编译整个 workspace
 
 ## 里程碑
 
-见 [docs/DESIGN.md §13](./docs/DESIGN.md)。当前:**骨架已铺,进入 M0/M1**。
+见 [docs/DESIGN.md §13](./docs/DESIGN.md) 与 [docs/devlog/PLAN.md](./docs/devlog/PLAN.md)。
+
+- ✅ **M0** 数据模型定稿:JSON Schema + Rust 类型 + 目录骨架 + `vidbrief init`
+- ⏳ **M1**(下一步)`vidbrief-core` 差帧 / 密集区 / 抽帧 + `vidbrief-asr` 转录

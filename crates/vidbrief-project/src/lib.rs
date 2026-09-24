@@ -1,9 +1,101 @@
 //! 项目目录与数据结构(材料即接口)。
 //!
-//! 设计见 `docs/DESIGN.md` §4。
+//! 设计见 `docs/DESIGN.md` §4;格式规范见 `docs/schema/README.md`。
 //!
-//! 职责(待实现):
-//! - 项目目录骨架:`01_preprocess/` `02_calibrate/` `03_summary/` `04_report/`(`§4.1`)
-//! - 数据结构与 (反)序列化:`change_curve` / `dense_regions` / `transcript` / `shots` / `project.json`
-//! - 进度标记 `progress`(`§4.2`)
-//! - 并发控制:项目写锁 `project.lock`、原子写、修订号 `rev`(`§4.7`)
+//! 本 crate 是"项目目录里的每个 JSON 文件长什么样"的代码侧权威:
+//!
+//! | 模块 | 对应文件 |
+//! |------|---------|
+//! | [`project`] | `project.json` |
+//! | [`lock`] | `project.lock` |
+//! | [`source`] | 把源视频搬进 `source/` |
+//! | [`meta`] | `source/video.meta.json` |
+//! | [`curve`] | `01_preprocess/change_curve.json` |
+//! | [`regions`] | `01_preprocess/dense_regions.json` |
+//! | [`transcript`] | `01_preprocess/transcript.json`、`02_calibrate/transcript.fixed.json` |
+//! | [`shots`] | `01_preprocess/shots.json` |
+//! | [`supplement`] | `02_calibrate/supplement_requests.json` |
+//!
+//! 三个贯穿性约定(详见 `docs/schema/README.md`):
+//!
+//! 1. **一律 `snake_case`**,Rust 字段名与 JSON 字段名完全相同,不做风格转换。
+//! 2. **路径一律用 [`RelPath`]**(项目根相对、`/` 分隔、构造即校验),杜绝目录穿越与跨平台失败。
+//! 3. **"未知/不适用"写显式 `null`**,不省略字段;所有结构体都开 `deny_unknown_fields`,
+//!    与 JSON Schema 的 `additionalProperties: false` 严格对齐。
+//!
+//! 待实现(非 M0 范围):写锁的获取/释放逻辑见 `docs/DESIGN.md` §4.7,M3 随 MCP 多会话一起做。
+
+pub mod curve;
+pub mod ids;
+pub mod json;
+pub mod layout;
+pub mod lock;
+pub mod meta;
+pub mod project;
+pub mod regions;
+pub mod relpath;
+pub mod shots;
+pub mod source;
+pub mod supplement;
+pub mod transcript;
+
+use chrono::{DateTime, FixedOffset, Local, Timelike};
+
+pub use curve::{ChangeCurve, ChangePoint};
+pub use ids::{ProjectId, ShotId};
+pub use json::{read, to_pretty_string, write_atomic, write_atomic_str};
+pub use layout::Layout;
+pub use lock::ProjectLock;
+pub use meta::VideoMeta;
+pub use project::{
+    CalibrateProgress, Progress, Project, SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
+};
+pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
+pub use relpath::RelPath;
+pub use shots::{Confidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
+pub use source::{SourceLink, materialize, simplify_path, video_rel_for};
+pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
+pub use transcript::{Correction, CorrectionType, Segment, Transcript};
+
+/// 当前时刻,带本地 UTC 偏移(如 `2026-09-24T21:00:00+08:00`)。
+///
+/// 全项目所有"墙上时钟"字段都经由此函数产生,保证格式一致。
+///
+/// **截到整秒**:这些时间戳是给人读的(进度、校准轨迹、报告),亚秒精度只会让 JSON 变啰嗦。
+/// chrono 的默认序列化会自动补足小数位,不截的话会写出 `...:40.393500100+08:00`。
+pub fn now() -> DateTime<FixedOffset> {
+    let dt = Local::now().fixed_offset();
+    dt.with_nanosecond(0).unwrap_or(dt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 时间戳的形状是契约的一部分(JSON Schema 里的正则),所以在这里钉死。
+    #[test]
+    fn now_is_second_precision_rfc3339() {
+        let text = serde_json::to_string(&now()).unwrap();
+        let inner = text.trim_matches('"');
+
+        assert!(!inner.contains('.'), "时间戳不该有小数秒:{inner}");
+
+        let (date, rest) = inner.split_once('T').expect("缺日期与时间的分隔符 T");
+        assert_eq!(date.len(), 10, "日期应为 YYYY-MM-DD:{inner}");
+        assert_eq!(date.matches('-').count(), 2, "{inner}");
+
+        let clock = rest.get(..8).expect("时间部分不足 8 字节");
+        assert_eq!(clock.matches(':').count(), 2, "{inner}");
+        assert!(
+            clock.bytes().all(|b| b.is_ascii_digit() || b == b':'),
+            "时间部分含非法字符:{inner}"
+        );
+
+        let offset = rest.get(8..).expect("缺 UTC 偏移");
+        assert!(
+            offset == "Z"
+                || (offset.len() == 6 && matches!(offset.as_bytes().first(), Some(b'+' | b'-'))),
+            "UTC 偏移格式不对(应为 Z 或 ±HH:MM):{inner}"
+        );
+    }
+}

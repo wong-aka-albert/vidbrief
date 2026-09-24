@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief project.lock",
+  "description": "项目写锁。首个打开项目的会话取得写锁,其他会话只读。设计见 docs/DESIGN.md §4.7。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pid", "host", "session", "opened_at"],
+  "properties": {
+    "pid": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "持有写锁的 MCP 进程 pid;用于判断锁是否已成为死锁"
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "description": "主机名。project 目录可能位于共享盘,pid 只在同一台机器上有意义"
+    },
+    "session": {
+      "type": "string",
+      "minLength": 1,
+      "description": "会话标识,用于在提示里区分是哪个会话占着"
+    },
+    "opened_at": {
+      "$ref": "#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC 3339 带 UTC 偏移"
+    }
+  }
+}

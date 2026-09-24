@@ -1,0 +1,12 @@
+{
+  "path": "source/video.mp4",
+  "duration": 24.0,
+  "width": 1280,
+  "height": 720,
+  "fps": 30.0,
+  "codec": "h264",
+  "size_bytes": 1048576,
+  "sha256": "3f786850e387550fdab836ed7e6dc881de23001b3b6cc0b1ec3d2b1b0f3a4f4e",
+  "probed_at": "2026-09-24T21:00:02+08:00",
+  "prober": "ffprobe N-125875-g5d4d3bdc61-20260731"
+}

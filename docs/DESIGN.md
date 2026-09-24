@@ -1,8 +1,8 @@
 # 视频图文总结 MCP — 从零设计
 
-> 版本:v0.7(项目更名 video-reader → vidbrief;crate 前缀 vr- → vidbrief-)
+> 版本:v0.8(§4 数据模型定稿:JSON Schema 与 Rust 类型落成真实文件,M0)
 > 状态:待评审
-> 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)
+> 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)、[./schema/](./schema/)(**项目材料格式的唯一权威**)与 [./devlog/](./devlog/)(开发过程记录)
 
 ---
 
@@ -102,29 +102,37 @@ preprocess()          [供] get_shot()           [供] search_transcript()  buil
 
 ## 4. 核心数据模型
 
+> **本节已定稿(M0)。** 格式的**唯一权威**是 [`docs/schema/`](./schema/) ——
+> 那里有 JSON Schema、示例文件(同时是测试夹具)和全局约定。
+> 本节的代码侧对应物是 `crates/vidbrief-project/`。
+> 两边由 `cargo test -p vidbrief-project` 做**三方锚定**校验(示例 ↔ schema ↔ Rust 类型),
+> 任何一侧漂移都会红。
+
 ### 4.1 项目目录结构(材料即接口)
 
 ```
 projects/<project-name>/
-├── project.json                 # 元数据 + 各步进度标记
+├── project.json                 # 元数据 + 各步进度标记(§4.2)
+├── project.lock                 # 写锁:存在即表示有会话在编辑(§4.7)
 ├── source/
-│   ├── video.mp4                # 原视频(或软链接)
-│   └── video.meta.json          # 时长/分辨率/帧率
+│   ├── video.<ext>              # 源视频:硬链接 / 软链接 / 复制(§4.8)
+│   └── video.meta.json          # 时长/分辨率/帧率/编码/sha256
 │
 ├── 01_preprocess/
-│   ├── change_curve.json        # 差帧图:逐时刻变化率(见 §4.3)
-│   ├── dense_regions.json       # 算法识别出的"变化密集区"
-│   ├── transcript.srt/.txt/.vtt # 语音转文字(带时间戳)
-│   ├── transcript.json          # 结构化转录
-│   ├── shots/                   # 预筛选截图
+│   ├── change_curve.json        # 差帧图:逐时刻变化率(§4.3)
+│   ├── dense_regions.json       # 算法识别出的"变化密集区"(§4.4)
+│   ├── transcript.json          # 结构化转录(原始,永不就地改写)
+│   ├── transcript.srt/.txt/.vtt # whisper 原始输出(便于人工核对)
+│   ├── shots.json               # 截图清单 + agent 的校准结论(§4.6)
+│   ├── shots/                   # 步 1 抽出的截图
 │   │   └── s001_0086.0.jpg
 │   └── timeline.html            # 四层时间线视图(含视频回跳,§9)
 │
 ├── 02_calibrate/
-│   ├── transcript.fixed.json    # 经 agent 纠错后的转录
+│   ├── transcript.fixed.json    # 经 agent 纠错后的转录(全量副本,§4.5)
 │   ├── transcript.diff.md       # 纠错对照(原文 vs 修正)
-│   ├── shot_checks.json         # agent 对每张截图的结论(§6.3)
-│   ├── supplement_requests.json # 补图请求
+│   ├── supplement_requests.json # 补图候选 + agent 的取舍(§4.9)
+│   ├── cross_validate.md        # 图文交叉印证的矛盾点清单
 │   ├── shots_extra/             # 补图产出
 │   ├── timeline.html            # 校准后时间线视图(可重渲染)
 │   └── calibration_log.md       # 迭代轨迹
@@ -141,15 +149,30 @@ projects/<project-name>/
     └── assets/
 ```
 
-> 所有"校准结论"文件(`transcript.fixed.json`、`shot_checks.json`)**由 agent 通过工具写入**,不是工具自己算出来的。
+> 所有"校准结论"文件(`transcript.fixed.json`、`shots.json` 的 `check` 字段、`supplement_requests.json` 的 `status`)**由 agent 通过工具写入**,不是工具自己算出来的。
+
+**路径规则**:项目内所有路径都是**项目根相对路径**,用 `/` 分隔(如 `01_preprocess/shots/s007_0479.0.jpg`)。
+禁止绝对路径、盘符、反斜杠与 `..` —— 项目必须能整体搬走。Rust 侧由 `RelPath` 类型强制(构造即校验)。
+
+**为什么没有 `shot_checks.json`**:v0.7 曾把校准结论放在 `02_calibrate/shot_checks.json`,
+但截图清单本身(§4.6)已经有 `check` 字段 —— 同一件事两处落点必然不同步。
+M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威。
 
 ### 4.2 项目进度标记(`project.json`)
 
 ```jsonc
 {
-  "name": "demo",
-  "source": { "path": "source/video.mp4", "duration": 985.0 },
-  "created_at": "2026-09-09T21:00:00+08:00",
+  "schema_version": 1,           // 该项目下所有 JSON 的格式版本;不符直接报错,不做静默兼容
+  "rev": 7,                      // 乐观并发修订号:每次成功写入 +1(§4.7)
+  "id": "demo",              // 同时是目录名;ASCII 小写/数字/-/_
+  "name": "第一讲 开场",        // 人类可读名,可含中文
+  "created_at": "2026-09-24T21:00:00+08:00",
+  "source": {
+    "path": "source/video.mp4",  // 项目内位置
+    "original": "D:/videos/第一讲.mp4",  // 原始绝对路径,纯信息性,不用于访问文件
+    "link": "hardlink"           // hardlink | symlink | copy(§4.8)
+  },
+  "glossary": null,              // 术语表,默认 null(关闭)
   "progress": {
     "preprocess": { "done": true,  "at": "..." },
     "calibrate":  { "rounds": 3, "last_at": "..." },   // 迭代轮数,不设"通过/未通过"
@@ -160,6 +183,9 @@ projects/<project-name>/
 ```
 
 > **不设强制审核门**。编排在 agent 侧,"放行"是对话行为;这里只记录进度供参考。
+>
+> **时长不在这里**:`duration` 归 `source/video.meta.json` 独家所有。
+> 一个数字两个落点迟早会不一致,宁可让 `list_projects` 多读一个文件。
 
 ### 4.3 差帧图 `change_curve.json`(步 1 产出 ①)
 
@@ -168,24 +194,41 @@ projects/<project-name>/
 ```jsonc
 {
   "source": "source/video.mp4",
-  "fps_sampled": 1.0,
-  "width": 480, "height": 270,
   "duration": 985.0,
+  "fps_sampled": 1.0,
+  "width": 480, "height": 270,   // 参与打分的缩小后尺寸
+  "metric": "hist_l1_0.75+luma_0.25",   // 打分口径标识
+  "generated_at": "...",
   "changes": [
     { "t": 0.0, "score": 0.0 },
     { "t": 1.0, "score": 0.017 }
-    // 每采样帧一个点,score ∈ [0,1] = 该帧与上一帧的差异
+    // 每采样帧一个点,score ∈ [0,1] = 该帧与上一帧的差异;首点(无前一帧)恒为 0
   ]
 }
 ```
 
 - `score` 沿用现有实现:**颜色直方图 L1 距离(0.75)+ 亮度均值差(0.25)**,归一化 `[0,1]`。
 - 展示为**柱状/面积直方图**:横轴=时间,纵轴=变化率。保留未平滑原始值。
+- `metric` 必须随算法一起改 —— 否则无法分辨磁盘上的旧文件是哪套口径算的。
 
 ### 4.4 密集区 `dense_regions.json`
 
 ```jsonc
 {
+  "generated_at": "...",
+  "params": {                    // 可调输入
+    "window": 8.0,               // 滑窗宽度 W(秒)
+    "peak_threshold": 0.25,      // 孤立硬切换阈值
+    "mass_k": 3.0,               // 密集区阈值 = max(窗口中位数 × k, floor)
+    "mass_floor": 0.6,           // 绝对下限:防止静止视频整段被判为密集
+    "merge_gap": 4.0,            // 间隔小于此值(秒)的密集区合并
+    "static_break": 120.0        // 长静止判据(秒)
+  },
+  "stats": {                     // 本次运行算出的中间量
+    "sampled_points": 985,
+    "mass_median": 0.10,
+    "mass_threshold": 0.60       // 实际生效的阈值
+  },
   "regions": [
     { "id": 3, "start": 84.0, "end": 92.0, "mass": 3.41,
       "peak_t": 86.0, "peak_score": 1.0,
@@ -194,38 +237,70 @@ projects/<project-name>/
 }
 ```
 
-### 4.5 转录 `transcript.json`
+> **为什么连 `stats` 一起存**:密集区阈值必须随视频类型自适应。出问题时只有靠这两组数字
+> 才能复现"当时为什么这样判",并据此调参重跑。`params` 的默认值在 M1 用真实长视频标定。
+
+### 4.5 转录 `transcript.json` / `transcript.fixed.json`
+
+两个文件**共用同一 schema 与同一 Rust 类型**:
+
+- `01_preprocess/transcript.json` —— 步 1 产出,**原始**。`corrected_text` 与 `correction` **恒为 `null`**。
+- `02_calibrate/transcript.fixed.json` —— 步 2 产出,**全量副本** + 填充纠错结论。
 
 ```jsonc
 {
+  "source": "source/video.mp4",
   "model": "ggml-medium",
   "language": "zh",
+  "duration": 985.0,
+  "generated_at": "...",         // fixed 沿用此值,不因纠错而更新
   "segments": [
     { "id": 12, "start": 479.0, "end": 484.0,
-      "text": "这是国内派森教程的第一小节",
-      "corrected_text": "这是国内 Python 教程的第一小节",   // agent 写入
-      "correction": { "type": "terminology", "note": "派森 → Python", "applied": true } }
+      "text": "这是国内派森教程的第一小节",              // ASR 原文,永不就地改写
+      "corrected_text": "这是国内 Python 教程的第一小节",     // agent 写入
+      "correction": { "type": "terminology", "note": "派森 → Python",
+                      "reason": "截图 s001 画面文字为「Python 列表」" } }
   ]
 }
 ```
+
+- `correction.type` ∈ `homophone`(同音错字)| `terminology`(术语/专有名词)| `number`(数字/单位/时间)| `uncertain`(存疑未改)| `other`。
+- **`type: "uncertain"` 时 `corrected_text` 必须保持 `null`** —— 存疑不等于可以臆造,
+  疑似写法只写在 `note` 里,留给用户在审查节点裁决。
+
+> **为什么不就地改原文**:改了原文,"agent 到底动了哪里"就查不出来了,
+> 用户也就无法核对纠错是否合理。原始产出永远是只读证据。
 
 ### 4.6 截图清单 `shots.json`
 
 ```jsonc
 {
+  "generated_at": "...",         // 首次生成时间;后续增删改不更新
   "shots": [
     { "id": "s007", "t": 479.0,
       "file": "01_preprocess/shots/s007_0479.0.jpg",
-      "origin": "dense_region",   // dense_region | isolated_peak | llm_supplement | agent_supplement | manual
-      "region_id": 3, "reason": null, "status": "keep",   // keep | drop
-      "check": {                  // agent 通过 record_shot_check 写入
+      "origin": "dense_region",  // dense_region | isolated_peak | agent_request | manual
+      "region_id": 3,            // 算法产物指向 dense_regions.json;补图为 null
+      "status": "keep",          // keep | drop
+      "reason": null,            // 补图理由(agent_request / manual 时应有值)
+      "created_at": "...",
+      "check": {                 // agent 通过 record_shot_check 写入;未校准为 null
         "match": true, "audio_visual_sync": true,
-        "type_read": "Python 教程 第一节",
+        "type_read": "Python 教程 第一节",       // 从画面读到的内容
         "neighbor_text": "这是国内 Python 教程的第一小节",
         "issues": [], "confidence": "high", "checked_at": "..." } }
   ]
 }
 ```
+
+**命名规则**:文件名 = `{id}_{t:06.1}.jpg`,如 `s007_0479.0.jpg`
+(`{:06.1}` = 整数部分补零到至少 4 位;超过 9999 秒自然变宽,不截断)。
+
+**id 永不复用**:`drop` 只改 `status` 不回收号,补图继续往后发。这样任何日志、报告、对话里
+出现过的 `s007`,永远指同一时刻的同一张图。
+
+> v0.7 的 `llm_supplement` 在 M0 定稿时并入 `agent_request` —— 补图都是 agent 判的,
+> 分两个名字只会让人猜区别在哪。步 3 的二次补图靠存放目录(`shots_extra2/`)区分。
 
 ### 4.7 并发与多会话
 
@@ -238,12 +313,54 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 
 | 机制 | 做法 |
 |------|------|
-| **项目写锁** | 项目根放 `project.lock`(含 owner/pid/opened_at/mode)。首个打开者取得**写锁**;其他会话只能**只读打开**,并被告知"该项目正被另一会话编辑"。 |
+| **项目写锁** | 项目根放 `project.lock`(含 `pid` / `host` / `session` / `opened_at`)。首个打开者取得**写锁**;其他会话只能**只读打开**,并被告知"该项目正被另一会话编辑"。持锁进程已死 = 死锁可回收。 |
 | **原子写** | 所有写文件走"临时文件 + 原子 rename",避免读到半截文件。 |
 | **修订号(乐观并发)** | `project.json` 带 `rev`;写操作须带上读到的 `rev`,不匹配则返回 `stale`,agent 重读后再改。 |
 | **进程内串行** | 同一 MCP 进程内对同一项目的写操作串行化(内部互斥)。 |
 
 > 结论:多会话**同时查看**任意;**同时编辑同一项目**由写锁 + 修订号保证不互相踩。若将来提供 HTTP 传输供多客户端共享一个服务,则改为"单服务 + 按 session 路由 + 同样的写锁/修订号"。
+>
+> **实现进度**:M0 只定 `project.lock` 的格式与类型(`vidbrief_project::ProjectLock`),
+> 获取/释放/死锁检测的逻辑随 M3(MCP 多会话真正出现时)一起做。
+
+### 4.8 源视频如何进入项目(`source.link`)
+
+`init` 按"代价从低到高"依次尝试,并**把实际用了哪种记进 `project.json.source.link`**:
+
+| 方式 | 代价 | 何时可用 |
+|------|------|---------|
+| `hardlink` | 零拷贝、零权限 | 同一卷(Windows 上建硬链接不需要管理员) |
+| `symlink` | 零拷贝 | 需权限:Windows 要开发者模式或管理员 |
+| `copy` | 占一份磁盘 | 兜底,永远可用 |
+
+**为什么要记下来**:只有 `copy` 的项目是**自包含**的。硬链接/软链接的项目一旦离开原视频就废了 ——
+"报告里能不能引用视频""项目能不能打包发给别人"都取决于这个字段。
+
+硬链接的语义要注意:项目和原路径指向**同一个文件**,删掉原文件不影响项目,但**就地修改**
+原文件会让项目看到新内容 —— 这正是 `video.meta.json.sha256` 存在的意义。
+
+文件位置固定为 `source/video.<原扩展名>`(如 `.mkv` 就保持 `.mkv`,不改成 `.mp4`)。
+
+### 4.9 补图候选 `supplement_requests.json`
+
+```jsonc
+{
+  "generated_at": "...",
+  "window": 3.0,                 // "附近有图"的判定半径(秒)
+  "requests": [
+    { "id": 1, "t": 18.8, "segment_id": 7,
+      "text": "画面停住了大家可以把结论抄下来",     // 该段原文,让人一眼看出为什么被列出来
+      "trigger": "no_shot_nearby",  // deictic_phrase | no_shot_nearby | both
+      "nearest_shot": "s003", "gap": 3.2,
+      "status": "accepted",         // pending | accepted | rejected
+      "shot_id": "s004",            // accepted 时补出的截图
+      "note": "画面停住后的定型画面,补一张便于读数" }
+  ]
+}
+```
+
+> 算法只负责**列候选**(指代性表达 + 时间距离),**要不要补由 agent 判断** ——
+> 用户说"看这里"不代表真有个图要看。`status` 的初值恒为 `pending`。
 
 ---
 
@@ -326,11 +443,11 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 - 校对规则(写进提示模板 §10.4):只改明确识别错误,不润色、不改语序;数字/单位/时间保留;无把握标 `uncertain` 不臆造。
 
 **③ 图文交叉印证**
-- agent 综合 `transcript.fixed` 与全部 `shot_checks`,自己列出矛盾点,写进 `cross_validate.md`(通过 `write_note` 之类的写入工具)。
+- agent 综合 `transcript.fixed` 与 `shots.json` 里全部 `check` 结论,自己列出矛盾点,写进 `cross_validate.md`(通过 `write_note` 之类的写入工具)。
 
 **④ 补充截图(算法漏掉的)** — `find_supplement_candidates`(纯算法)+ `extract_shot`
 - 算法扫描转录里的**指代性表达**("如图/这个图/看这里/这边显示/大家看屏幕/这一段/形态")及"提到但附近(±3s)无截图"的时刻 → `supplement_requests.json`。
-- agent 判断哪些确实需要,调 `extract_shot` 补帧 → `shots_extra/`,登记进 `shots.json`(`origin=llm_supplement`)。
+- agent 判断哪些确实需要,调 `extract_shot` 补帧 → `shots_extra/`,登记进 `shots.json`(`origin=agent_request`)。
 
 ### 6.3 迭代形态(对话怎么进行)
 
@@ -483,7 +600,10 @@ vidbrief/
 │   ├── vidbrief-mcp/      # MCP 服务:供材料 + 存结论 + 算法动作 + 提示模板
 │   └── vidbrief-cli/      # 独立命令行(脱离 agent 也能测/用)
 ├── ui/              # 视图模板 + 前端(时间线组件)
-└── docs/
+├── docs/
+│   ├── DESIGN.md
+│   ├── schema/      # 项目材料格式的**唯一权威**:JSON Schema + 示例(同时是测试夹具)
+│   └── devlog/      # 开发过程记录
 ```
 
 > 注意:没有 "vision" 模块——识别由 agent 完成,工具侧无对应代码。
@@ -542,12 +662,17 @@ vidbrief/
 ### 10.5 命令行(便于不接 agent 时自测)
 
 ```bash
-vidbrief init <video> [--name x]       # 建项目
+vidbrief init <video> [--name x] [--title t] [--projects-dir d]   # 建项目(已实现)
 vidbrief preprocess <project>          # 步 1(纯算法)
 vidbrief ui         <project>          # 本地视图 + 视频服务
 vidbrief mcp        [--stdio|--http]   # 启动 MCP 服务
 vidbrief status     <project>          # 查看项目状态
+vidbrief help                          # 用法
 ```
+
+`init` 的行为:校验视频 → 由文件名净化出项目 id(中文名净化不出来就要求 `--name`)→
+建目录骨架 → 按硬链接/软链接/复制的顺序把源视频放进 `source/` → `ffprobe` 探测并写
+`source/video.meta.json` → 写 `project.json`。id 冲突时自动加后缀(`demo` → `demo-2`),**不覆盖**已有项目。
 
 ---
 
@@ -634,7 +759,7 @@ agent: → 重写 MD → build_report(html) 重渲染
 
 | 阶段 | 内容 | 依赖 |
 |------|------|------|
-| **M0 schema 定稿** | §4 的 JSON schema + 目录结构落成真实文件 | 本文评审 |
+| **M0 schema 定稿** ✅ | §4 的 JSON schema + 目录结构落成真实文件 | 本文评审 |
 | **M1 vidbrief-core + 步1** | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
 | **M2 时间线视图** | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
 | **M3 MCP 骨架** | `vidbrief-mcp` 服务 + 项目/材料/算法工具接上 | M1,M2 |

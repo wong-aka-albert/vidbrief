@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-09-24T21:03:11+08:00",
+  "shots": [
+    {
+      "id": "s001",
+      "t": 9.0,
+      "file": "01_preprocess/shots/s001_0009.0.jpg",
+      "origin": "dense_region",
+      "region_id": 1,
+      "status": "keep",
+      "reason": null,
+      "created_at": "2026-09-24T21:03:11+08:00",
+      "check": {
+        "match": true,
+        "audio_visual_sync": true,
+        "type_read": "Python 列表 结构图",
+        "neighbor_text": "好我们切到主图了",
+        "issues": [],
+        "confidence": "high",
+        "checked_at": "2026-09-24T21:12:30+08:00"
+      }
+    },
+    {
+      "id": "s002",
+      "t": 15.0,
+      "file": "01_preprocess/shots/s002_0015.0.jpg",
+      "origin": "dense_region",
+      "region_id": 1,
+      "status": "keep",
+      "reason": null,
+      "created_at": "2026-09-24T21:03:11+08:00",
+      "check": {
+        "match": true,
+        "audio_visual_sync": true,
+        "type_read": "Python 列表 结构图 · 演示进行中",
+        "neighbor_text": "注意这里的数据变化过程正在走完",
+        "issues": [],
+        "confidence": "medium",
+        "checked_at": "2026-09-24T21:12:41+08:00"
+      }
+    },
+    {
+      "id": "s003",
+      "t": 22.0,
+      "file": "01_preprocess/shots/s003_0022.0.jpg",
+      "origin": "isolated_peak",
+      "region_id": 2,
+      "status": "keep",
+      "reason": null,
+      "created_at": "2026-09-24T21:03:11+08:00",
+      "check": null
+    },
+    {
+      "id": "s004",
+      "t": 18.8,
+      "file": "02_calibrate/shots_extra/s004_0018.8.jpg",
+      "origin": "agent_request",
+      "region_id": null,
+      "status": "keep",
+      "reason": "画面停住后的定型画面,补一张便于读数",
+      "created_at": "2026-09-24T21:18:04+08:00",
+      "check": {
+        "match": true,
+        "audio_visual_sync": false,
+        "type_read": "Python 列表 结构图 · 已定型",
+        "neighbor_text": "画面停住了大家可以把结论抄下来",
+        "issues": [
+          "语音说「正在走完」而该帧已是定型静态图,存在约 2.3 秒时间差"
+        ],
+        "confidence": "low",
+        "checked_at": "2026-09-24T21:18:40+08:00"
+      }
+    }
+  ]
+}

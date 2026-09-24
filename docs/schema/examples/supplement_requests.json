@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-09-24T21:15:00+08:00",
+  "window": 3.0,
+  "requests": [
+    {
+      "id": 1,
+      "t": 18.8,
+      "segment_id": 7,
+      "text": "画面停住了大家可以把结论抄下来",
+      "trigger": "no_shot_nearby",
+      "nearest_shot": "s003",
+      "gap": 3.2,
+      "status": "accepted",
+      "shot_id": "s004",
+      "note": "画面停住后的定型画面,补一张便于读数"
+    },
+    {
+      "id": 2,
+      "t": 22.5,
+      "segment_id": 8,
+      "text": "最后大家看屏幕上的总结页",
+      "trigger": "deictic_phrase",
+      "nearest_shot": "s003",
+      "gap": 0.5,
+      "status": "pending",
+      "shot_id": null,
+      "note": null
+    }
+  ]
+}

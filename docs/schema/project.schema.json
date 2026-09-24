@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief project.json",
+  "description": "项目元数据与各步进度标记。设计见 docs/DESIGN.md §4.2,约定见 docs/schema/README.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rev",
+    "id",
+    "name",
+    "created_at",
+    "source",
+    "glossary",
+    "progress"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "该项目下所有 JSON 文件的格式版本;不兼容变更时 +1"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "乐观并发修订号(§4.7);工具每次成功写入本文件时 +1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "项目 id,同时是 projects/ 下的目录名"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "人类可读名称,可含中文"
+    },
+    "created_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "original", "link"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relpath",
+          "description": "项目内视频副本或软链接的位置,如 source/video.mp4"
+        },
+        "original": {
+          "type": "string",
+          "minLength": 1,
+          "description": "源视频的原始绝对路径。纯信息性,不用于访问文件(可能是 Windows 路径)"
+        },
+        "link": {
+          "type": "string",
+          "enum": ["hardlink", "symlink", "copy"],
+          "description": "源视频进入项目的方式。只有 copy 的项目是自包含的;硬链接/软链接的项目依赖原文件还在"
+        }
+      }
+    },
+    "glossary": {
+      "description": "术语表;默认 null = 关闭。非 null 时每项是一个正确写法",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      ]
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preprocess", "calibrate", "summarize", "report"],
+      "properties": {
+        "preprocess": { "$ref": "#/$defs/step_progress" },
+        "calibrate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rounds", "last_at"],
+          "properties": {
+            "rounds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "校准迭代轮数。校准不设通过/未通过,只记轮数"
+            },
+            "last_at": { "$ref": "#/$defs/nullable_timestamp" }
+          }
+        },
+        "summarize": { "$ref": "#/$defs/step_progress" },
+        "report": { "$ref": "#/$defs/step_progress" }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC 3339 带 UTC 偏移,如 2026-09-24T21:00:00+08:00"
+    },
+    "nullable_timestamp": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/timestamp" }]
+    },
+    "relpath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/.\\\\:][^/\\\\:]*(/[^/.\\\\:][^/\\\\:]*)*$",
+      "description": "项目根相对路径,以 / 分隔。禁止绝对路径、盘符、反斜杠、以点开头的段(. 与 ..)"
+    },
+    "step_progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["done", "at"],
+      "properties": {
+        "done": { "type": "boolean" },
+        "at": { "$ref": "#/$defs/nullable_timestamp" }
+      }
+    }
+  }
+}

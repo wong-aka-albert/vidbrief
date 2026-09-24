@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief transcript.json / transcript.fixed.json",
+  "description": "结构化转录。原始文件 01_preprocess/transcript.json 的 corrected_text 与 correction 恒为 null;02_calibrate/transcript.fixed.json 是填充了纠错结果的全量副本,两者共用本 schema。设计见 docs/DESIGN.md §4.5、§6.2。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "model", "language", "duration", "generated_at", "segments"],
+  "properties": {
+    "source": {
+      "$ref": "#/$defs/relpath",
+      "description": "被转录的视频在项目内的位置"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ASR 模型标识,如 ggml-medium"
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "description": "语言代码,如 zh"
+    },
+    "duration": {
+      "type": "number",
+      "minimum": 0
+    },
+    "generated_at": {
+      "$ref": "#/$defs/timestamp",
+      "description": "转录音频的时间。transcript.fixed.json 沿用原始值,不因纠错而更新"
+    },
+    "segments": {
+      "type": "array",
+      "description": "按 start 升序,区间互不重叠",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "start", "end", "text", "corrected_text", "correction"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "等于 SRT 里的序号,从 1 起"
+          },
+          "start": {
+            "type": "number",
+            "minimum": 0
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ASR 原始输出,永不就地改写"
+          },
+          "corrected_text": {
+            "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }],
+            "description": "agent 修正后的整句文本;未修改或不改时保持 null"
+          },
+          "correction": {
+            "description": "纠错说明。type 为 uncertain 表示存疑但未改,此时 corrected_text 必须为 null",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "note", "reason"],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["homophone", "terminology", "number", "uncertain", "other"],
+                    "description": "homophone=同音错字;terminology=术语/专有名词;number=数字/单位/时间;uncertain=存疑未改;other=其它"
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "改动内容,如「派森 → Python」;uncertain 时写疑似正确写法"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "判断依据(画面文字 / 上下文 / 术语表)"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "relpath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/.\\\\:][^/\\\\:]*(/[^/.\\\\:][^/\\\\:]*)*$"
+    }
+  }
+}

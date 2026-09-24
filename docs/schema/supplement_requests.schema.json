@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief 02_calibrate/supplement_requests.json",
+  "description": "补图候选:语音提到指代对象但附近没有截图的位置。由 find_supplement_candidates(纯算法)生成,agent 逐条判断后写回 status。设计见 docs/DESIGN.md §6.2 子任务④。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generated_at", "window", "requests"],
+  "properties": {
+    "generated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "window": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "「附近有图」的判定半径(秒),默认 3.0。超过该半径无图才可能被列为候选"
+    },
+    "requests": {
+      "type": "array",
+      "description": "按 t 升序。允许为空。重跑 find_supplement_candidates 时,已有 status 的条目按 id 保留",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "t",
+          "segment_id",
+          "text",
+          "trigger",
+          "nearest_shot",
+          "gap",
+          "status",
+          "shot_id",
+          "note"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "项目内唯一,从 1 起"
+          },
+          "t": {
+            "type": "number",
+            "minimum": 0,
+            "description": "建议补图的时刻(通常取该转录段的中点)"
+          },
+          "segment_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "触发本候选的转录段 id"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "该段转录原文,便于人直接看为什么被列出来"
+          },
+          "trigger": {
+            "type": "string",
+            "enum": ["deictic_phrase", "no_shot_nearby", "both"],
+            "description": "deictic_phrase=含指代性表达(看这里/这边显示/大家看屏幕…);no_shot_nearby=附近无截图;both=两者都命中"
+          },
+          "nearest_shot": {
+            "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/shot_id" }],
+            "description": "现有截图里离 t 最近的一张;项目无截图时为 null"
+          },
+          "gap": {
+            "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }],
+            "description": "t 与 nearest_shot 的时间距离(秒)。nearest_shot 为 null 时本字段也为 null"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "accepted", "rejected"],
+            "description": "agent 的判断结果。pending = 还没看"
+          },
+          "shot_id": {
+            "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/shot_id" }],
+            "description": "status 为 accepted 时,补出的截图 id;否则为 null"
+          },
+          "note": {
+            "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }],
+            "description": "agent 接受/拒绝的理由"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "shot_id": {
+      "type": "string",
+      "pattern": "^s[0-9]{3,}$"
+    }
+  }
+}

@@ -9,3 +9,5 @@ name = "vidbrief"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+vidbrief-project.workspace = true

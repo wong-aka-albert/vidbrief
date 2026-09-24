@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-09-24T21:03:11+08:00",
+  "params": {
+    "window": 8.0,
+    "peak_threshold": 0.25,
+    "mass_k": 3.0,
+    "mass_floor": 0.6,
+    "merge_gap": 4.0,
+    "static_break": 120.0
+  },
+  "stats": {
+    "sampled_points": 25,
+    "mass_median": 0.1,
+    "mass_threshold": 0.6
+  },
+  "regions": [
+    {
+      "id": 1,
+      "start": 9.0,
+      "end": 15.0,
+      "mass": 2.26,
+      "peak_t": 9.0,
+      "peak_score": 0.62,
+      "reason": "high_density"
+    },
+    {
+      "id": 2,
+      "start": 22.0,
+      "end": 22.0,
+      "mass": 0.41,
+      "peak_t": 22.0,
+      "peak_score": 0.41,
+      "reason": "isolated_peak"
+    }
+  ]
+}

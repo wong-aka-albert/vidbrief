@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief 01_preprocess/change_curve.json",
+  "description": "差帧图:逐采样时刻的画面变化率。视图顶层直方图的数据源。算法见 docs/DESIGN.md §5.1,定义见 §4.3。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source",
+    "duration",
+    "fps_sampled",
+    "width",
+    "height",
+    "metric",
+    "generated_at",
+    "changes"
+  ],
+  "properties": {
+    "source": {
+      "$ref": "#/$defs/relpath",
+      "description": "被分析的视频在项目内的位置"
+    },
+    "duration": {
+      "type": "number",
+      "minimum": 0,
+      "description": "视频时长(秒),冗余存一份便于视图直接确定横轴范围"
+    },
+    "fps_sampled": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "采样帧率,默认 1.0(每秒一个点)"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "参与打分的缩小后宽度,默认 480"
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "参与打分的缩小后高度(按宽高比推出)"
+    },
+    "metric": {
+      "type": "string",
+      "minLength": 1,
+      "description": "打分口径标识,如 hist_l1_0.75+luma_0.25。换算法时必须改这个值,以便识别旧文件"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "按时间升序;首点(无前一帧)score 恒为 0。保留未平滑原始值",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["t", "score"],
+        "properties": {
+          "t": {
+            "type": "number",
+            "minimum": 0
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "该帧与上一帧的差异,0 = 完全相同,1 = 完全不同"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "relpath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/.\\\\:][^/\\\\:]*(/[^/.\\\\:][^/\\\\:]*)*$"
+    }
+  }
+}

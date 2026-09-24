@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief source/video.meta.json",
+  "description": "源视频的技术元数据,由 ffprobe 探测得到(建项目时写一次)。设计见 docs/DESIGN.md §4.1。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "path",
+    "duration",
+    "width",
+    "height",
+    "fps",
+    "codec",
+    "size_bytes",
+    "sha256",
+    "probed_at",
+    "prober"
+  ],
+  "properties": {
+    "path": {
+      "$ref": "#/$defs/relpath",
+      "description": "视频在项目内的位置,应与 project.json.source.path 一致"
+    },
+    "duration": {
+      "type": "number",
+      "minimum": 0,
+      "description": "时长(秒)。无法探测时建项目即失败,不允许 null"
+    },
+    "width": {
+      "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }]
+    },
+    "height": {
+      "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }]
+    },
+    "fps": {
+      "oneOf": [{ "type": "null" }, { "type": "number", "exclusiveMinimum": 0 }],
+      "description": "平均帧率,允许小数(如 29.97)"
+    },
+    "codec": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "源视频内容哈希,用于判断文件是否被换过"
+    },
+    "probed_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "prober": {
+      "type": "string",
+      "minLength": 1,
+      "description": "探测工具与版本,如 ffprobe N-125875-g5d4d3bdc61"
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "relpath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/.\\\\:][^/\\\\:]*(/[^/.\\\\:][^/\\\\:]*)*$"
+    }
+  }
+}
