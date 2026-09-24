@@ -2,7 +2,7 @@
 
 > 版本:v0.6(补充多会话并发:每进程单例端口不冲突;同项目并发编辑用写锁 + 修订号)
 > 状态:待评审
-> 关联:../BRD.md(需求对话)、../RESEARCH.md(技术核实与实测记录)
+> 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)
 
 ---
 
@@ -396,7 +396,7 @@ agent: → find_supplement_candidates() → 判断后 extract_shot 补 3 张
    - 数据图表:差帧图重现、案例时间分布
    - 图文对照卡片:每张图 + 同期转录 + 校准结论
    - 附录:术语/纠错对照
-3. **图像与体积**:图片用**相对路径引用 `04_report/assets/`**,避免 base64 塞进单文件(现有 `report_demo.md` 因此膨胀到 889KB)。需单文件分享时提供 `self_contained=true`。
+3. **图像与体积**:图片用**相对路径引用 `04_report/assets/`**,避免 base64 塞进单文件(旧样例报告曾因此膨胀到 889KB)。需单文件分享时提供 `self_contained=true`。
 4. **可重做**:用户不满意 → agent 重写 MD → 重新渲染 HTML。
 
 ---
@@ -475,7 +475,7 @@ agent: → find_supplement_candidates() → 判断后 extract_shot 补 3 张
 ```
 video-reader/
 ├── crates/
-│   ├── vr-core/     # 差帧、密集区、抽帧(复用/重构现有 src/main.rs)
+│   ├── vr-core/     # 差帧、密集区、抽帧(重写;旧实现已不在本仓库)
 │   ├── vr-asr/      # 调 whisper-cli,解析 srt → transcript.json
 │   ├── vr-project/  # 项目目录 + 数据结构 + project.json
 │   ├── vr-viz/      # 时间线/对照表/报告 HTML 渲染(含视频回跳 + 前端脚本)
@@ -658,18 +658,20 @@ agent: → 重写 MD → build_report(html) 重渲染
 
 ---
 
-## 15. 与现有资产的关系(复用清单)
+## 15. 与现有资产的关系
 
-| 现有资产 | 在新设计中的角色 | 处理 |
-|----------|-----------------|------|
-| `src/main.rs`(video-reader) | 步 1 差帧 + 峰值;抽帧 | 重构进 `vr-core`,新增密集区检测 |
-| `scripts/transcribe.sh` | 步 1 ASR | 写项目目录 + 结构化 JSON → 并入 `vr-asr` |
-| `tools/whisper/`(二进制 + 模型) | ASR 引擎 | 原样复用 |
-| `scripts/describe_frames.py` | 旧:调视觉 API 识图 | **废弃**(识别改由 agent 做);其提示词可作 §10.4 参考 |
-| `scripts/describe_frames_with_context.py` | 旧:图文联合调 API | **废弃**;其"图文联合"思路已内化为提示模板 P1 |
-| `scripts/build_report.py` | 步 4 报告雏形 | 重构:`vr-report`,图片改相对路径 |
-| `timeline_demo.json` / `report_demo.md` | 历史实测样例 | 留作回归验证 |
-| `RESEARCH.md` / `WHISPER_SETUP.md` | 技术依据 | 保留 |
+> 旧实现(单文件 `src/main.rs` + `scripts/` 下的 Python/bash)已在重建时**从工作区移除**,本仓库不再保留它的存档。下表说明这些资产的**去向**:哪些思路被继承、哪些被废弃。
+
+| 旧资产(已归档) | 在新设计中的去向 |
+|----------------|-----------------|
+| `src/main.rs`(video-reader) | 差帧 / 峰值 / 抽帧算法**重写进 `vr-core`**,并新增变化密集区检测(§5.2) |
+| `scripts/transcribe.sh` | 思路并入 `vr-asr`:抽 wav → whisper-cli → 结构化 `transcript.json` |
+| `tools/whisper/`(二进制 + 模型) | **仍在工作区,原样复用**(体积大,不入 git) |
+| `scripts/describe_frames.py` | **废弃**(识别改由 agent 做);其提示词作 §10.4 参考 |
+| `scripts/describe_frames_with_context.py` | **废弃**;"图文联合"思路已内化为提示模板 P1 |
+| `scripts/build_report.py` | 思路并入 `vr-report`:MD → HTML,图片改相对路径 |
+| `timeline_demo.json` / `report_demo.md` | 实测样例;`fixtures/test_sample.mp4` 保留作回归素材 |
+| `BRD.md` / `RESEARCH.md` / `WHISPER_SETUP.md` | 文档,已整理至 `docs/` |
 
 ---
 

@@ -5,7 +5,7 @@
 算法负责粗筛(差帧、转录、截图),agent 负责理解(看图、纠错、总结),人通过对话把关。
 
 > 📐 完整设计见 **[docs/DESIGN.md](./docs/DESIGN.md)**
-> 📋 需求背景见 [BRD.md](./BRD.md) · 技术核实与实测见 [RESEARCH.md](./RESEARCH.md) · 本地 Whisper 见 [WHISPER_SETUP.md](./WHISPER_SETUP.md)
+> 📋 需求背景见 [docs/BRD.md](./docs/BRD.md) · 技术核实与实测见 [docs/RESEARCH.md](./docs/RESEARCH.md) · 本地 Whisper 见 [docs/WHISPER_SETUP.md](./docs/WHISPER_SETUP.md)
 
 ## 三条铁律
 
@@ -39,7 +39,7 @@ crates/
   vr-report/   Markdown → 图表化 HTML
   vr-mcp/      MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)
   vr-cli/      `vr` 独立命令行(脱离 agent 也能自测)
-docs/DESIGN.md 设计文档
+docs/          文档(DESIGN 设计 / BRD 需求 / RESEARCH 技术核实 / WHISPER_SETUP 转录环境)
 fixtures/      测试素材
 tools/whisper/ whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
 ```
