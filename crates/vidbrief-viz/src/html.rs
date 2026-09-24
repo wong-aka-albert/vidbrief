@@ -55,6 +55,7 @@ mod tests {
                 duration: 60.0,
             },
             video_url: "../source/video.mp4".into(),
+            probe_url: "../project.json".into(),
             curve: CurveBrief {
                 step: 1.0,
                 max_score: 1.0,

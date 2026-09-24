@@ -8,6 +8,15 @@
   :root {
     --bg: #14161a; --panel: #1c1f26; --line: #2b3038; --fg: #d8dee9; --dim: #7b8494;
     --accent: #4aa3ff; --keep: #3fb950; --drop: #6e7681; --track-h: 62px; --sub-h: 30px;
+    --hover: #ffffff08; --seg: #4aa3ff33; --seg-fixed: #3fb95055;
+    --ctl-bg: #232830; --ctl-bg-hover: #2e343d;
+  }
+  /* 亮色模式。**视频区不跟着变** —— 见下面 .video-wrap 的说明。 */
+  :root[data-theme="light"] {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --fg: #1f2328; --dim: #656d76;
+    --accent: #0969da; --keep: #1a7f37; --drop: #8c959f;
+    --hover: #0000000a; --seg: #0969da29; --seg-fixed: #1a7f3729;
+    --ctl-bg: #eef0f3; --ctl-bg-hover: #e3e6ea;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
@@ -19,10 +28,69 @@
   header .meta { color: var(--dim); font-size: 12px; }
   header .spacer { flex: 1; }
   header .warn { color: #d29922; font-size: 12px; }
+  header .tool { display: flex; align-items: center; gap: 8px; }
   main { padding: 16px 18px 60px; max-width: 1600px; margin: 0 auto; }
 
-  .video-wrap { background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  button.tool, select.tool {
+    font: inherit; font-size: 12px; color: var(--fg); background: var(--ctl-bg);
+    border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; cursor: pointer;
+  }
+  button.tool:hover, select.tool:hover { background: var(--ctl-bg-hover); }
+
+  /* ── 视频 + 覆盖层 ──────────────────────────────────────── */
+  /* 视频区**永远是黑底**:它是画面本身,不是页面的一部分 —— 亮色模式下给视频加白底
+     只会变成一圈刺眼的白框。所以这里用固定的 #000,不跟主题。 */
+  .video-wrap { position: relative; background: #000; border: 1px solid var(--line);
+    border-radius: 6px; overflow: hidden; }
   video { display: block; width: 100%; max-height: 56vh; background: #000; }
+
+  /* 覆盖层画在**视频上面**,而视频多数是深色画面 —— 所以这一整块刻意**不跟随主题**:
+     黑底 + 白字在任何主题下都看得清;跟着主题走的话,亮色模式下就成了白字白底。
+     (原来那个加载转圈之所以看不清,根子就在这里:它是浏览器自己画的深色动画,
+     压在深色画面上。我们自己画一个高对比度的盖住它。) */
+  .v-overlay { position: absolute; inset: 0; display: grid; place-items: center;
+    pointer-events: none; }
+  #bigPlay {
+    display: none; width: 78px; height: 78px; border-radius: 50%;
+    border: 2px solid #ffffffb0; background: #000000a8; color: #fff;
+    font-size: 30px; line-height: 1; cursor: pointer; padding: 0 0 0 6px;
+    transition: background .12s, transform .12s; pointer-events: auto;
+  }
+  #bigPlay:hover { background: #000000d9; transform: scale(1.06); }
+  .video-wrap.paused #bigPlay { display: block; }
+  /* 暂停时把画面压暗一点,让播放键更突出 */
+  .video-wrap.paused video { filter: brightness(.82); }
+
+  #vStatus { position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; text-align: center;
+    /* 遮罩要够厚:浏览器自己的加载转圈画在**我们上面**(它在 video 的 shadow DOM 里,
+       层级压不住),只能靠加厚遮罩把它盖住。断线时直接盖到接近不透明。 */
+    background: #000000c4; color: #fff; padding: 24px; }
+  #vStatus.show { display: flex; }
+  #vStatus.broken { background: #000000f5; }
+  #vStatus .spinner {
+    width: 46px; height: 46px; border-radius: 50%;
+    border: 3px solid #ffffff3d; border-top-color: #fff;
+    animation: vspin .85s linear infinite;
+  }
+  @keyframes vspin { to { transform: rotate(360deg); } }
+  #vStatus .msg { font-size: 13px; }
+  #vStatus .hint { font-size: 12px; color: #ffffffb8; max-width: 560px; line-height: 1.75; }
+  #vStatus code { background: #ffffff24; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, Consolas, monospace; }
+  #vStatus .icon { font-size: 34px; line-height: 1; display: none; }
+  #vStatus.broken .spinner { display: none; }
+  #vStatus.broken .icon { display: block; }
+  #vRetry { display: none; pointer-events: auto; font: inherit; font-size: 12px;
+    padding: 6px 18px; border-radius: 5px; cursor: pointer;
+    border: 1px solid #ffffff7a; background: #ffffff1f; color: #fff; }
+  #vRetry:hover { background: #ffffff33; }
+  #vStatus.broken #vRetry { display: inline-block; }
+
+  .vbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 2px 0; color: var(--dim); font-size: 12px; }
+  .vbar .kbd { color: var(--fg); }
+  .vbar .spacer { flex: 1; }
 
   /* 五层共轴:每一层的 left 都是 (t / duration) * 100% */
   .stack { position: relative; margin-top: 14px; user-select: none; }
@@ -30,7 +98,6 @@
   .layer:last-child { border-bottom: 0; }
   .layer-label { position: absolute; left: 0; top: 0; z-index: 4; font-size: 11px;
     color: var(--dim); background: var(--bg); padding: 1px 6px 1px 0; pointer-events: none; }
-
   #histWrap { height: 110px; background: var(--panel); cursor: crosshair; }
   #hist { display: block; width: 100%; height: 110px; }
   #regions { position: absolute; inset: 0; pointer-events: none; }
@@ -52,9 +119,9 @@
 
   #subs { height: var(--sub-h); background: var(--panel); cursor: crosshair; overflow: hidden; }
   .seg { position: absolute; top: 4px; bottom: 4px; min-width: 1px;
-    background: #4aa3ff33; border-radius: 2px; cursor: pointer; }
+    background: var(--seg); border-radius: 2px; cursor: pointer; }
   .seg:hover { background: var(--accent); }
-  .seg.fixed { background: #3fb95055; }
+  .seg.fixed { background: var(--seg-fixed); }
 
   #playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ff5c5c;
     pointer-events: none; z-index: 6; }
@@ -68,28 +135,51 @@
   #tip .t { color: var(--accent); font-variant-numeric: tabular-nums; }
   #tip .k { color: var(--dim); }
 
-  .below { display: grid; grid-template-columns: 1fr 440px; gap: 16px; margin-top: 16px; }
-  @media (max-width: 1100px) { .below { grid-template-columns: 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-  .card h2 { font-size: 12px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line);
-    color: var(--dim); font-weight: 600; }
-  .card .body { padding: 10px 12px; }
+  /* 两列**同高**,滚动区用 flex:1 填满卡片。
+     这里的关键是:高度要定在**整个区域**上(`.below`),不是定在列表上。
+     - 早先定在列表上(`#subList { max-height: 46vh }`)→ 卡片被 grid 拉得更高,
+       列表不跟着长 → 底部留一块空白(看起来像渲染坏了);
+     - 定在 `.below` 上 → grid 行高就是确定的,内容再多也撑不大它,
+       里面的 `.fill` 自然吃满剩余空间。
+     `.fill` 用 `flex: 1 1 0`(basis 0)而不是 `auto`:basis auto 会让内容的
+     max-content 高度参与父级尺寸计算,322 行字幕能把整页撑到一万像素。 */
+  .below { display: grid; grid-template-columns: minmax(0, 1fr) 440px; gap: 16px;
+    margin-top: 16px; height: 60vh; min-height: 300px; }
+  .col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  /* 列里的**最后一张卡**吃满剩余高度(那总是"截图"卡)。
+     不给它 flex 的话,列是定高了,但卡片还是自然高度 —— 底部照样空一块。
+     第一张(当前字幕)保持自然高度:它是几行字,不该被拉长。 */
+  .col > .card:last-child { flex: 1 1 0; }
+  .card { display: flex; flex-direction: column; min-height: 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .card > h2 { flex: 0 0 auto; font-size: 12px; margin: 0; padding: 8px 12px;
+    border-bottom: 1px solid var(--line); color: var(--dim); font-weight: 600; }
+  /* 滚动区:吃满卡片剩下的高度 */
+  .fill { flex: 1 1 0; min-height: 0; overflow: auto; }
+  .card .body { padding: 10px 12px; flex: 0 0 auto; }
   #now { white-space: pre-wrap; min-height: 3em; }
   #now .ts { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  @media (max-width: 1100px) {
+    .below { grid-template-columns: minmax(0, 1fr); height: auto; }
+    /* 窄屏堆成一列时,再固定 60vh 就太高了 —— 让每块按内容长,各自封顶。
+       这里必须把 flex-basis 从 0 换回 auto:卡片高度是 auto 时,basis 0 会让
+       列表的"假设尺寸"变成 0,直接塌掉。 */
+    .fill { flex: 1 1 auto; max-height: 40vh; }
+  }
 
   .row { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--line);
     cursor: pointer; align-items: flex-start; }
-  .row:hover { background: #ffffff08; }
+  .row:hover { background: var(--hover); }
   #shotsPanel .row img { width: 84px; border-radius: 3px; border: 1px solid var(--line); }
   #shotsPanel .row .txt { flex: 1; min-width: 0; }
   #shotsPanel .row .h { font-variant-numeric: tabular-nums; color: var(--accent); }
   #shotsPanel .row .m { color: var(--dim); font-size: 11px; word-break: break-word; }
-  #subList { max-height: 46vh; overflow: auto; }
-  #subList .row.cur { background: #4aa3ff22; }
+  /* 注意:**不要**在这里再给 #subList 加 max-height。它现在靠 .fill 的 flex:1
+     吃满卡片;固定高度会让它在卡片里留出空白(这正是当初那块空白的成因)。 */
+  #subList .row.cur { background: var(--seg); }
   #subList .row .ts { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 78px; }
   #subList .row .tx { flex: 1; }
   #subList .row .fix { color: #d29922; }
-  .scroll { max-height: 46vh; overflow: auto; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 8px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
     vertical-align: -1px; margin-right: 4px; }
@@ -102,10 +192,30 @@
   <span class="meta" id="pmeta"></span>
   <span class="spacer"></span>
   <span class="warn" id="warn"></span>
+  <span class="tool">
+    <button class="tool" id="themeBtn" title="切换亮色/暗色">🌙</button>
+  </span>
 </header>
 
 <main>
-  <div class="video-wrap"><video id="v" controls preload="metadata" playsinline></video></div>
+  <div class="video-wrap paused" id="videoWrap">
+    <video id="v" controls preload="metadata" playsinline></video>
+    <div class="v-overlay">
+      <button id="bigPlay" title="播放(空格)">▶</button>
+      <div id="vStatus">
+        <div class="spinner"></div>
+        <div class="icon">⚠</div>
+        <div class="msg" id="vMsg">缓冲中…</div>
+        <div class="hint" id="vHint"></div>
+        <button id="vRetry">重试</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="vbar">
+    <span><span class="kbd">空格</span> 播放/暂停 · <span class="kbd">← →</span> ±1s(Shift ±10s)
+      · <span class="kbd">[ ]</span> 调速 · <span class="kbd">t</span> 换主题 · 点/拖时间轴跳转</span>
+  </div>
 
   <div class="stack" id="stack">
     <div class="layer" id="histWrap">
@@ -120,25 +230,24 @@
   </div>
 
   <div class="legend">
-    <span><i style="background:#4aa3ff"></i>变化率</span>
+    <span><i style="background:var(--accent)"></i>变化率</span>
     <span><i style="background:#d29922"></i>密集区</span>
     <span><i style="background:#db61a2"></i>孤立切换</span>
-    <span><i style="background:#3fb950"></i>长静止后的章节起点</span>
+    <span><i style="background:var(--keep)"></i>长静止后的章节起点</span>
     <span>虚线边框 = 截图未校准</span>
-    <span style="color:var(--fg)">点任意位置跳转 · 拖播放头连续拖 · 空格播放/暂停 · ←→ ±1s(Shift ±10s)</span>
   </div>
 
   <div class="below">
-    <div>
+    <div class="col">
       <div class="card"><h2>当前字幕</h2><div class="body" id="now">—</div></div>
-      <div class="card" style="margin-top:16px">
+      <div class="card">
         <h2>截图(<span id="shotCount">0</span>)</h2>
-        <div class="scroll" id="shotsPanel"></div>
+        <div class="fill" id="shotsPanel"></div>
       </div>
     </div>
     <div class="card">
       <h2>全部字幕(<span id="segCount">0</span>)</h2>
-      <div id="subList"></div>
+      <div class="fill" id="subList"></div>
     </div>
   </div>
 </main>
@@ -154,6 +263,138 @@ const v = $("#v"), stack = $("#stack"), tip = $("#tip");
 const duration = D.project.duration || 1;
 
 v.src = D.video_url;
+
+/* ── 主题(亮/暗)────────────────────────────────────────────
+   跟着系统走,手动切过就记住。画布上的颜色也要跟着重画 ——
+   它们是在 JS 里画的,不会自己跟着 CSS 变量变。 */
+const themeBtn = $("#themeBtn");
+function applyTheme(name) {
+  document.documentElement.dataset.theme = name;
+  themeBtn.textContent = name === "light" ? "☀" : "🌙";
+  themeBtn.title = name === "light" ? "切换到暗色" : "切换到亮色";
+  drawHist(); // 画布颜色取自 CSS 变量,换主题必须重画
+}
+{
+  const saved = localStorage.getItem("vidbrief-theme");
+  const preferLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+  // **不在这里立刻 applyTheme()** —— 它会调 drawHist(),而离屏 canvas(`off`)
+  // 是文件后面才声明的 const,提前访问会踩 TDZ。真正的初始化放在文件末尾。
+  window.__vidbriefTheme = saved || (preferLight ? "light" : "dark");
+}
+themeBtn.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  localStorage.setItem("vidbrief-theme", next);
+  applyTheme(next);
+});
+
+/** 读一个 CSS 变量的当前值(画布上要用)。 */
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* ── 播放/暂停覆盖层 + 缓冲/断线提示 ─────────────────────── */
+const wrap = $("#videoWrap");
+const vStatus = $("#vStatus");
+const vMsg = $("#vMsg");
+const vHint = $("#vHint");
+
+function setPausedUi(paused) { wrap.classList.toggle("paused", paused); }
+v.addEventListener("play", () => setPausedUi(false));
+v.addEventListener("pause", () => setPausedUi(true));
+v.addEventListener("ended", () => setPausedUi(true));
+$("#bigPlay").addEventListener("click", (ev) => { ev.stopPropagation(); v.play(); });
+
+/** 显示"缓冲中"。这一层压在视频上,所以用固定的黑底白字,不跟主题。 */
+function showBuffering() {
+  vStatus.classList.remove("broken");
+  vMsg.textContent = "缓冲中…";
+  vHint.innerHTML = "";
+  vStatus.classList.add("show");
+}
+
+/**
+ * 显示"服务已断开"。
+ *
+ * **这一条比转圈重要得多**:浏览器自己的加载动画会一直转下去,看起来跟"卡了一下"
+ * 没区别,用户只会干等。我们主动探测一下服务还在不在,不在就把重跑命令摆出来。
+ */
+function showBroken(detail) {
+  vStatus.classList.add("show", "broken");
+  vMsg.textContent = "本地查看服务已断开";
+  vHint.innerHTML =
+    "视频和图片都取不到了 —— 那个 <code>vidbrief ui</code> 进程已经不在了。<br>" +
+    "重新跑一次即可(页面本身还在,不用重开):<br>" +
+    "<code>vidbrief ui &lt;项目&gt;</code>" +
+    (detail ? "<br><span style='opacity:.7'>" + esc(detail) + "</span>" : "");
+}
+function hideStatus() { vStatus.classList.remove("show", "broken"); }
+
+let probeTimer = null;
+
+/**
+ * 一边显示状态一边探服务是否还在。
+ *
+ * **为什么用轮询而不是一次性定时器**:一次性定时器会被 `seeked`/`canplay`
+ * 之类的事件清掉,而事件顺序不保证 —— 清掉之后就再也不会探测了,又回到"永远转圈"。
+ * 轮询只关心"状态层还开着吗",状态一关就自己停,不会漏也不会重复。
+ */
+function startProbing() {
+  if (probeTimer) return;
+  probeTimer = setInterval(probeOnce, 1500);
+  probeOnce(); // 立刻先探一次 —— 服务真死了应当马上说,不必等一个周期
+}
+
+function stopProbing() {
+  if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+}
+
+async function probeOnce() {
+  if (!vStatus.classList.contains("show")) { stopProbing(); return; }
+  if (!v.paused && v.readyState >= 3 && !v.seeking) { stopProbing(); return; }
+  try {
+    const r = await fetch(D.probe_url, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    // 服务还在,那就是单纯慢 —— 继续显示"缓冲中"
+  } catch (e) {
+    stopProbing();
+    showBroken(String(e && e.message ? e.message : e));
+  }
+}
+
+v.addEventListener("waiting", () => { showBuffering(); startProbing(); });
+v.addEventListener("stalled", () => { showBuffering(); startProbing(); });
+v.addEventListener("playing", () => { stopProbing(); hideStatus(); });
+v.addEventListener("canplay", () => { stopProbing(); hideStatus(); });
+v.addEventListener("seeked", () => { if (v.readyState >= 3) { stopProbing(); hideStatus(); } });
+v.addEventListener("error", () => {
+  const code = v.error ? "MediaError " + v.error.code : "未知错误";
+  showBroken(code + " —— 多半是服务已经不在了");
+});
+$("#vRetry").addEventListener("click", () => {
+  hideStatus();
+  v.load();          // 重新拉一遍元数据与数据
+  syncTo(v.currentTime || 0);
+});
+
+/* ── 倍速 ──────────────────────────────────────────────────
+   **界面里刻意不放倍速控件** —— 浏览器自带的播放器菜单("⋮" → 播放速度)已经有了,
+   再加一个就是重复的 UI。这里只留 `[` `]` 快捷键:它是隐形的,不占地方,
+   而且能调到浏览器菜单里没有的 2.5× / 3×(看长教程时有用)。 */
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
+
+/** 按 `step` 调到**方向上的下一档**。
+ *
+ * 不在预设里的速度(比如浏览器菜单设的 1.75×)直接按方向找下一个,而不是
+ * "先吸附到最近预设再挪一格" —— 后者会在 1.75× 按 `[` 时跳到 1.25×,
+ * 把 1.5× 整个跳过去,不是用户想要的"慢一点"。
+ * 到头了(已经在最慢/最快)就什么都不做,不反向弹回去。 */
+function nudgeRate(step) {
+  const cur = v.playbackRate;
+  const next = step > 0
+    ? RATES.find((r) => r > cur + 1e-3)
+    : [...RATES].reverse().find((r) => r < cur - 1e-3);
+  if (next !== undefined) v.playbackRate = next;
+}
 
 $("#pname").textContent = D.project.name || D.project.id;
 $("#pmeta").textContent =
@@ -207,7 +448,7 @@ function drawHist() {
     c.fillStyle = "hsl(" + (205 - 205 * s) + " 85% " + (28 + 34 * s) + "%)";
     c.fillRect(i * bw, H - h, Math.max(bw * 0.85, 0.6), h);
   }
-  c.fillStyle = "#2b3038";
+  c.fillStyle = cssVar("--line") || "#2b3038";
   c.fillRect(0, H - 1, W, 1);
   paint();
 }
@@ -403,15 +644,22 @@ function esc(s) {
 
 /* ── 键盘 ────────────────────────────────────────────────── */
 window.addEventListener("keydown", (ev) => {
-  if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA") return;
+  if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA") return;
   if (ev.code === "Space") { v.paused ? v.play() : v.pause(); ev.preventDefault(); }
   if (ev.code === "ArrowLeft") { seek(v.currentTime - (ev.shiftKey ? 10 : 1)); ev.preventDefault(); }
   if (ev.code === "ArrowRight") { seek(v.currentTime + (ev.shiftKey ? 10 : 1)); ev.preventDefault(); }
+  // `[` `]`:在预设倍速里挪一格
+  if (ev.key === "[") { nudgeRate(-1); ev.preventDefault(); }
+  if (ev.key === "]") { nudgeRate(1); ev.preventDefault(); }
+  // `t`:切主题
+  if (ev.key === "t" || ev.key === "T") { themeBtn.click(); ev.preventDefault(); }
 });
 
 /* ── 启动 ────────────────────────────────────────────────── */
 window.addEventListener("resize", () => { drawHist(); drawRuler(); });
-drawHist(); drawRuler(); drawShots(); drawSubs(); syncTo(0);
+applyTheme(window.__vidbriefTheme);   // 到这里 off / drawHist 都已经就绪
+setPausedUi(v.paused);
+drawRuler(); drawShots(); drawSubs(); syncTo(0);
 </script>
 </body>
 </html>

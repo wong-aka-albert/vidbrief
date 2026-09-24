@@ -19,6 +19,9 @@ pub struct TimelineData {
     pub project: ProjectBrief,
     /// 视频的**相对 URL**(相对 timeline.html 所在目录)。
     pub video_url: String,
+    /// 一个极小的、必然存在的文件的 URL。前端拿它当**健康探针**:
+    /// 视频卡住时 fetch 一下,失败就说明本地服务已经断开 —— 比一直转圈有用得多。
+    pub probe_url: String,
     pub curve: CurveBrief,
     pub regions: Vec<RegionBrief>,
     pub shots: Vec<ShotBrief>,
@@ -108,6 +111,7 @@ pub fn collect(layout: &Layout, timeline_rel: &str) -> Result<TimelineData> {
             duration: meta.duration,
         },
         video_url: relative_url(timeline_rel, project.source.path.as_str())?,
+        probe_url: relative_url(timeline_rel, vidbrief_project::layout::PROJECT_FILE)?,
         curve: CurveBrief {
             step: curve.step().unwrap_or(1.0),
             max_score: curve.max_score(),
