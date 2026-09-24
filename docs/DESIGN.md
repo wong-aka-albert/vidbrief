@@ -662,7 +662,7 @@ vidbrief/
 ### 10.5 命令行(便于不接 agent 时自测)
 
 ```bash
-vidbrief init <video> [--name x] [--title t] [--projects-dir d]   # 建项目(已实现)
+vidbrief init <video> [-n id] [-t title] [-p dir]   # 建项目(已实现)
 vidbrief preprocess <project>          # 步 1(纯算法)
 vidbrief ui         <project>          # 本地视图 + 视频服务
 vidbrief mcp        [--stdio|--http]   # 启动 MCP 服务
@@ -670,9 +670,19 @@ vidbrief status     <project>          # 查看项目状态
 vidbrief help                          # 用法
 ```
 
-`init` 的行为:校验视频 → 由文件名净化出项目 id(中文名净化不出来就要求 `--name`)→
-建目录骨架 → 按硬链接/软链接/复制的顺序把源视频放进 `source/` → `ffprobe` 探测并写
-`source/video.meta.json` → 写 `project.json`。id 冲突时自动加后缀(`demo` → `demo-2`),**不覆盖**已有项目。
+`init` 的行为:校验视频 → 定项目 id(`-n` 显式指定 → `-p` 目录名的净化结果 → 视频文件名净化;
+纯中文名净化不出来就要求 `-n`)→ 建目录骨架 → 按硬链接/软链接/复制的顺序把源视频放进 `source/` →
+`ffprobe` 探测并写 `source/video.meta.json` → 写 `project.json`。
+
+| 选项 | 含义 |
+|------|------|
+| `-n, --name <ID>` | 项目 id(ASCII)。默认由文件名净化 |
+| `-t, --title <TEXT>` | 人类可读名,可含中文。默认取视频文件名 |
+| `-p, --project-dir <DIR>` | **项目目录本身**(直接把项目建在 `<DIR>` 里)。默认 `projects/<id>`,已存在时自动加后缀 |
+
+> `-p` 是"项目目录",不是"项目们的父目录"。给了 `-p` 就用它本身,不再套一层;
+> 该目录已存在则**报错**而不加后缀 —— 路径是你显式给的,工具不该替你改名。
+> 默认路径 (`projects/<id>`) 因为 id 是工具推出来的,冲突时才自动加 `-2` / `-3`。
 
 ---
 

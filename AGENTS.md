@@ -157,7 +157,7 @@ git commit -m "feat(vidbrief-core): 实现变化密集区检测 [260925-01]"
 ```bash
 cargo build --workspace          # 编译
 cargo test  --workspace          # 全部测试
-./target/debug/vidbrief init fixtures/test_sample.mp4 --projects-dir /tmp/smoke   # 冒烟:建个项目看看
+./target/debug/vidbrief init fixtures/test_sample.mp4 -p /tmp/smoke   # 冒烟:建个项目看看
 ```
 
 ---

@@ -74,7 +74,8 @@ cargo build --workspace        # 编译
 cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端到端)
 
 # 建项目(建目录骨架 + 探测源视频 + 写 project.json)
-./target/debug/vidbrief init <video> [--name x] [--title "中文名"] [--projects-dir dir]
+./target/debug/vidbrief init <video> [-n id] [-t "中文名"] [-p 项目目录]
+./target/debug/vidbrief init -h        # init 的全部选项
 
 # 其余子命令待各里程碑实现
 ./target/debug/vidbrief help

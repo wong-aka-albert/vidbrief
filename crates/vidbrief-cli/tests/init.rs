@@ -2,6 +2,9 @@
 //!
 //! 用 `fixtures/test_sample.mp4`(60 秒合成视频)当输入,因此这些测试也顺带验证了
 //! ffprobe 探测这条路是通的 —— 探测失败会让 `init` 直接报错。
+//!
+//! 大多数测试把**工作目录**设成临时目录,于是默认位置 `projects/<id>` 落在临时目录里,
+//! 既不污染仓库,又真实验证了默认路径与冲突加后缀的逻辑。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -42,8 +45,10 @@ impl Drop for TempDir {
     }
 }
 
-fn run(args: &[&str]) -> Output {
+/// 在 `cwd` 下跑 `vidbrief`。
+fn run_in(cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_vidbrief"))
+        .current_dir(cwd)
         .args(args)
         .output()
         .expect("无法启动 vidbrief")
@@ -57,31 +62,24 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+// ── 默认位置 projects/<id> ───────────────────────────────────────────
+
 #[test]
 fn init_builds_the_whole_skeleton() {
     let tmp = TempDir::new("skeleton");
-    let projects = tmp.join("projects");
-
-    let out = run(&[
-        "init",
-        fixture().to_str().unwrap(),
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ]);
+    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap()]);
     assert!(out.status.success(), "init 失败:\n{}", stderr(&out));
 
-    // 项目 id 由文件名净化而来:test_sample → test-sample
-    let layout = Layout::for_project(&projects, "test-sample");
+    // 项目 id 由文件名净化而来:test_sample → test-sample;默认落在 ./projects/<id>
+    let layout = Layout::for_project(tmp.join("projects"), "test-sample");
 
-    // 目录骨架齐全
     for (name, path) in layout.rel_dirs() {
         assert!(path.is_dir(), "目录未建出:{name}");
     }
 
-    // 入口文件与元数据存在且能被本项目的类型读回
     let project = Project::load(&layout.project_json()).expect("project.json 读不回来");
     assert_eq!(project.id.as_ref(), "test-sample");
-    assert_eq!(project.name, "test_sample");
+    assert_eq!(project.name, "test_sample", "未给 --title 时用视频文件名");
     assert_eq!(project.rev, 1);
     assert!(project.source.path.as_str().starts_with("source/video."));
     assert!(!project.progress.preprocess.done, "刚建的项目还没跑过步 1");
@@ -97,7 +95,6 @@ fn init_builds_the_whole_skeleton() {
     assert_eq!(meta.sha256.len(), 64);
     assert!(meta.prober.starts_with("ffprobe"), "prober 应为 ffprobe,实际 {}", meta.prober);
 
-    // 源视频真的在项目里,且能被读出来(硬链接/软链接/复制都算)
     let video = layout.rel(project.source.path.as_str());
     assert!(video.is_file(), "源视频没进项目:{}", video.display());
     assert_eq!(
@@ -106,122 +103,191 @@ fn init_builds_the_whole_skeleton() {
         "项目里的源视频大小与原始文件不符"
     );
 
-    // 输出里应给出下一步提示
     let text = stdout(&out);
     assert!(text.contains("项目已建立:test-sample"), "{text}");
-    assert!(text.contains("vidbrief preprocess"), "{text}");
+    assert!(text.contains("vidbrief preprocess"), "应给出下一步提示:{text}");
 }
 
 #[test]
 fn init_dedupes_instead_of_overwriting() {
     let tmp = TempDir::new("dedupe");
-    let projects = tmp.join("projects");
     let video = fixture();
-    let args = [
-        "init",
-        video.to_str().unwrap(),
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ];
+    let args = ["init", video.to_str().unwrap()];
 
-    let first = run(&args);
+    let first = run_in(&tmp.0, &args);
     assert!(first.status.success(), "{}", stderr(&first));
-    let second = run(&args);
+    let second = run_in(&tmp.0, &args);
     assert!(second.status.success(), "第二次 init 应另建项目而不是失败:\n{}", stderr(&second));
 
-    let text = stdout(&second);
-    assert!(text.contains("项目已建立:test-sample-2"), "{text}");
-    assert!(Layout::for_project(&projects, "test-sample").exists());
-    assert!(Layout::for_project(&projects, "test-sample-2").exists());
+    assert!(stdout(&second).contains("项目已建立:test-sample-2"), "{}", stdout(&second));
+    assert!(Layout::for_project(tmp.join("projects"), "test-sample").exists());
+    assert!(Layout::for_project(tmp.join("projects"), "test-sample-2").exists());
 }
+
+// ── -p / --project-dir:项目目录本身 ─────────────────────────────────
+
+#[test]
+fn project_dir_flag_puts_the_project_exactly_there() {
+    let tmp = TempDir::new("pdir");
+    let exact = tmp.join("my-place");
+
+    let out = run_in(
+        &tmp.0,
+        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // 就是那个目录本身,没有再套一层
+    let project = Project::load(&exact.join("project.json")).expect("project.json 不在 -p 指定的位置");
+    assert_eq!(project.id.as_ref(), "my-place", "未给 -n 时,id 取 -p 目录名的净化结果");
+    assert_eq!(project.name, "test_sample");
+    assert!(!tmp.join("projects").exists(), "给了 -p 就不该再建默认的 projects/");
+
+    assert!(exact.join("01_preprocess/shots").is_dir(), "骨架仍要建全");
+    assert!(exact.join("source/video.mp4").is_file());
+}
+
+#[test]
+fn project_dir_flag_refuses_to_overwrite() {
+    let tmp = TempDir::new("pdir-exists");
+    let exact = tmp.join("taken");
+    std::fs::create_dir_all(&exact).unwrap();
+    std::fs::write(exact.join("keep.txt"), b"do not touch").unwrap();
+
+    let out = run_in(
+        &tmp.0,
+        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+    );
+    assert!(!out.status.success(), "目录已存在就该拒绝");
+    assert!(stderr(&out).contains("拒绝覆盖"), "{}", stderr(&out));
+    assert_eq!(std::fs::read(exact.join("keep.txt")).unwrap(), b"do not touch");
+    assert!(!exact.join("project.json").exists(), "不该写进去任何东西");
+}
+
+#[test]
+fn project_dir_id_falls_back_to_video_name_when_dir_is_not_ascii() {
+    let tmp = TempDir::new("pdir-cn");
+    let exact = tmp.join("第一讲");
+
+    let out = run_in(
+        &tmp.0,
+        &["init", fixture().to_str().unwrap(), "-p", exact.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let project = Project::load(&exact.join("project.json")).unwrap();
+    assert_eq!(
+        project.id.as_ref(),
+        "test-sample",
+        "目录名净化不出来时应退回视频文件名,而不是报错"
+    );
+}
+
+// ── id 推导与显式指定 ────────────────────────────────────────────────
 
 #[test]
 fn init_asks_for_name_when_stem_is_not_ascii() {
     let tmp = TempDir::new("cn");
     let video = tmp.join("第一讲 开场.mp4");
     std::fs::copy(fixture(), &video).unwrap();
-    let projects = tmp.join("projects");
 
-    let out = run(&[
-        "init",
-        video.to_str().unwrap(),
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ]);
-    assert!(!out.status.success(), "中文文件名应要求显式 --name");
-    let err = stderr(&out);
-    assert!(err.contains("--name"), "错误信息应告诉用户怎么办:\n{err}");
+    let out = run_in(&tmp.0, &["init", video.to_str().unwrap()]);
+    assert!(!out.status.success(), "中文文件名 + 无 -p 应要求显式 -n");
+    assert!(stderr(&out).contains("--name") || stderr(&out).contains("-n"), "{}", stderr(&out));
 
-    // 给了 --name 就能建
-    let out = run(&[
-        "init",
-        video.to_str().unwrap(),
-        "--name",
-        "demo",
-        "--title",
-        "第一讲 开场",
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ]);
+    let out = run_in(
+        &tmp.0,
+        &["init", video.to_str().unwrap(), "-n", "demo", "-t", "第一讲 开场"],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
 
-    let layout = Layout::for_project(&projects, "demo");
-    let project = Project::load(&layout.project_json()).unwrap();
+    let project = Project::load(&tmp.join("projects/demo/project.json")).unwrap();
     assert_eq!(project.id.as_ref(), "demo");
     assert_eq!(project.name, "第一讲 开场", "中文标题应原样保留在 name 里");
+}
+
+// ── 参数解析 ─────────────────────────────────────────────────────────
+
+#[test]
+fn short_flags_and_equals_forms() {
+    let tmp = TempDir::new("forms");
+
+    // 短选项 `-p x`
+    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "-n", "a", "-t", "T", "-p", tmp.join("a").to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(Project::load(&tmp.join("a/project.json")).unwrap().name, "T");
+
+    // 长选项 `--key=value`
+    let out = run_in(
+        &tmp.0,
+        &[
+            "init",
+            fixture().to_str().unwrap(),
+            &format!("--project-dir={}", tmp.join("b").display()),
+            "--name=b",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(tmp.join("b/project.json").is_file());
+
+    // 短选项带等号 `-p=value`
+    let out = run_in(
+        &tmp.0,
+        &["init", fixture().to_str().unwrap(), &format!("-p={}", tmp.join("c").display())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(tmp.join("c/project.json").is_file());
+}
+
+#[test]
+fn init_help_lists_the_options() {
+    let tmp = TempDir::new("help");
+    let out = run_in(&tmp.0, &["init", "-h"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    for expected in ["-n, --name", "-t, --title", "-p, --project-dir", "-h, --help"] {
+        assert!(text.contains(expected), "用法里缺 `{expected}`:\n{text}");
+    }
+    assert!(!tmp.join("projects").exists(), "-h 不该建任何东西");
 }
 
 #[test]
 fn init_reports_errors_instead_of_panicking() {
     let tmp = TempDir::new("errors");
-    let projects = tmp.join("projects");
 
-    // 视频不存在
-    let out = run(&[
-        "init",
-        tmp.join("nope.mp4").to_str().unwrap(),
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ]);
+    let out = run_in(&tmp.0, &["init", tmp.join("nope.mp4").to_str().unwrap()]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("找不到视频文件"), "{}", stderr(&out));
 
-    // 缺参数
-    let out = run(&["init"]);
+    let out = run_in(&tmp.0, &["init"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("用法"), "{}", stderr(&out));
 
-    // 不认识的参数
-    let out = run(&[
-        "init",
-        fixture().to_str().unwrap(),
-        "--nope",
-        "x",
-        "--projects-dir",
-        projects.to_str().unwrap(),
-    ]);
+    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "--nmae", "x"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("--nope"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--nmae"), "{}", stderr(&out));
 
-    // 死了三次都不该留下半个项目
-    assert!(!projects.exists() || std::fs::read_dir(&projects).unwrap().next().is_none());
+    let out = run_in(&tmp.0, &["init", "a.mp4", "b.mp4"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("只接受一个视频路径"), "{}", stderr(&out));
+
+    let out = run_in(&tmp.0, &["init", fixture().to_str().unwrap(), "-p"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("缺少取值"), "{}", stderr(&out));
+
+    // 六次失败都不该留下半个项目
+    assert!(
+        !tmp.join("projects").exists(),
+        "失败的 init 不该留下 projects/ 目录"
+    );
 }
 
-#[test]
-fn init_accepts_equals_form_of_options() {
-    let tmp = TempDir::new("equals");
-    let projects = tmp.join("projects");
-    let arg = format!("--projects-dir={}", projects.display());
-
-    let out = run(&["init", fixture().to_str().unwrap(), &arg, "--name=demo"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(Layout::for_project(&projects, "demo").exists());
-}
+// ── 顶层命令 ─────────────────────────────────────────────────────────
 
 #[test]
 fn unimplemented_commands_exit_two_and_say_so() {
     for cmd in ["preprocess", "ui", "mcp", "status"] {
-        let out = run(&[cmd]);
+        let out = run_in(&std::env::temp_dir(), &[cmd]);
         assert_eq!(out.status.code(), Some(2), "{cmd} 应以退出码 2 结束");
         let err = stderr(&out);
         assert!(err.contains("尚未实现"), "{cmd}:{err}");
@@ -231,17 +297,17 @@ fn unimplemented_commands_exit_two_and_say_so() {
 
 #[test]
 fn help_and_unknown_command() {
-    let out = run(&["help"]);
+    let cwd = std::env::temp_dir();
+
+    let out = run_in(&cwd, &["help"]);
     assert!(out.status.success());
     assert!(stdout(&out).contains("init <video>"), "{}", stdout(&out));
 
-    // 不带参数 → 打印用法,退出码 0
-    let out = run(&[]);
+    let out = run_in(&cwd, &[]);
     assert!(out.status.success());
     assert!(stdout(&out).contains("Usage:"));
 
-    // 未知道的子命令 → 用法 + 退出码 2
-    let out = run(&["frobnicate"]);
+    let out = run_in(&cwd, &["frobnicate"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("未知子命令"), "{}", stderr(&out));
 }
