@@ -80,6 +80,9 @@ cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端�
 # 步 1:差帧图 + 密集区 + 预筛选截图(+ 有音轨时做转录)
 ./target/debug/vidbrief preprocess <项目> [--no-transcribe] [--no-shots] [-f fps] [-w 宽度]
 
+# 时间线视图:渲染 + 起本地服务 + 开浏览器(视频回跳靠它)
+./target/debug/vidbrief ui <项目> [--no-open]
+
 # 查看状态 + 健康检查(--verify 会重算 sha256,发现源文件被就地改写)
 ./target/debug/vidbrief status <项目> [--verify]
 

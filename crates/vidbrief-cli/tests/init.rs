@@ -362,7 +362,7 @@ fn falling_back_to_copy_always_explains_itself() {
 
 #[test]
 fn unimplemented_commands_exit_two_and_say_so() {
-    for cmd in ["ui", "mcp"] {
+    for cmd in ["mcp"] {
         let out = run_in(&std::env::temp_dir(), &[cmd]);
         assert_eq!(out.status.code(), Some(2), "{cmd} 应以退出码 2 结束");
         let err = stderr(&out);

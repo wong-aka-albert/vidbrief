@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use vidbrief_asr::{Config as AsrConfig, transcribe};
+use vidbrief_asr::transcribe_project;
 use vidbrief_core::{
     CurveOptions, ShotQuality, analyze, extract_shots, plan_shots,
 };
@@ -24,7 +24,7 @@ Commands:
   init <video> [options]    建项目(目录骨架 + 探测元数据 + 搬入源视频)
   preprocess <project>      步 1:差帧图 / 密集区 / 截图 / 转录
   status <project>          查看项目状态与健康检查
-  ui <project>              本地视图 + 视频服务
+  ui <project>              渲染时间线视图 + 起本地服务 + 打开浏览器
   mcp [--stdio]             启动 MCP 服务
   help                      显示本条用法
 
@@ -99,6 +99,25 @@ Options:
   transcript.json     + .srt/.txt/.vtt(源视频没有音轨时跳过)
 ";
 
+const UI_USAGE: &str = "\
+vidbrief ui —— 本地视图 + 视频服务
+
+Usage: vidbrief ui <project> [options]
+
+Arguments:
+  <project>                项目目录,或 projects/ 下的项目名
+
+Options:
+      --no-open            只起服务并打印 URL,不打开浏览器
+  -h, --help               显示本条用法
+
+说明:
+  - 渲染 01_preprocess/timeline.html(四层共轴时间线 + 视频回跳)
+  - 起一个绑在 127.0.0.1 的静态服务把项目目录发布出去 —— **必须有它浏览器才能 seek**
+    (`file://` 打开时对本地媒体有跨域限制,时间轴点了不跳)
+  - 端口由操作系统分配,不会和别的东西撞车;只监听回环地址,局域网访问不到
+";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -111,11 +130,12 @@ fn main() -> ExitCode {
         "init" => cmd_init(rest),
         "status" => cmd_status(rest),
         "preprocess" => cmd_preprocess(rest),
+        "ui" => cmd_ui(rest),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
             Ok(())
         }
-        other @ ("ui" | "mcp") => {
+        other @ "mcp" => {
             eprintln!("`vidbrief {other}` 尚未实现(见 docs/DESIGN.md §13 里程碑)");
             return ExitCode::from(2);
         }
@@ -363,6 +383,56 @@ fn same_volume_hint(video: &Path, id: &str) -> Option<String> {
     Some(format!("vidbrief init <同一个视频> -p {}", dir.display()))
 }
 
+// ── ui ───────────────────────────────────────────────────────────────
+
+fn cmd_ui(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{UI_USAGE}");
+        return Ok(());
+    }
+    let mut project: Option<String> = None;
+    let mut open_browser = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-open" => open_browser = false,
+            other if is_option(other) => bail!("ui 不认识参数 `{other}`(见 `vidbrief ui -h`)"),
+            _ => {
+                if project.is_some() {
+                    bail!("ui 只接受一个项目,多余的参数:`{arg}`");
+                }
+                project = Some(arg.clone());
+            }
+        }
+    }
+    let name = project.context("用法:vidbrief ui <project> [options]")?;
+    let layout = resolve_project(&name)?;
+    let id = Project::load(&layout.project_json())?.id.to_string();
+
+    // 渲染 → 挂载 → (可选)打开浏览器
+    let path = vidbrief_viz::render_timeline(&layout)?;
+    vidbrief_viz::mount(&id, layout.root())?;
+    let url = vidbrief_viz::url_for(&id, vidbrief_project::layout::PREPROCESS_TIMELINE_FILE)?;
+
+    println!("视图     {}", path.display());
+    println!("服务     {url}");
+    if open_browser {
+        if let Err(e) = vidbrief_viz::browser::open(&url) {
+            eprintln!("提示:{e}");
+        }
+    } else {
+        println!("         (--no-open:请手动打开上面的地址)");
+    }
+    println!();
+    println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。");
+
+    // 服务是后台线程,主线程不能立刻退出 —— 否则服务跟着进程一起没了
+    println!();
+    println!("按 Ctrl+C 结束(这个进程要一直活着,服务才能响应浏览器)。");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
 // ── preprocess ───────────────────────────────────────────────────────
 
 struct PreprocessArgs {
@@ -506,32 +576,56 @@ fn cmd_preprocess(args: &[String]) -> Result<()> {
     }
 
     // ── 转录 ─────────────────────────────────────────────────────────
+    //
+    // 转录失败**不算这一步完成**。差帧图与截图确实已经落盘了(所以不该整体回滚),
+    // 但 `progress.preprocess.done` 是给 `status` 和 agent 看的,标错了就是骗人。
+    // 想只要视觉部分,请显式用 --no-transcribe —— "我知道我在跳过"是用户的选择,
+    // 不该由工具替他把失败说成跳过。
+    let mut transcribe_ok = true;
     if parsed.transcribe {
-        match AsrConfig::resolve() {
-            Ok(cfg) => match transcribe(&video, &layout, &meta, &cfg) {
-                Ok(Some(t)) => println!(
-                    "转录     {} 段,模型 {} ({})",
-                    t.segments.len(),
-                    t.model,
-                    t.language
-                ),
-                Ok(None) => println!("转录     源视频没有音轨,跳过"),
-                Err(e) => {
-                    // 转录失败不该让整轮白跑 —— 差帧图和截图已经落盘了
-                    eprintln!("转录     失败(其余产出保留):{e:#}");
-                }
-            },
-            Err(e) => eprintln!("转录     跳过(未配置 whisper):{e:#}"),
+        match transcribe_project(&video, &layout, &meta) {
+            Ok(Some(t)) => println!(
+                "转录     {} 段,模型 {} ({})",
+                t.segments.len(),
+                t.model,
+                t.language
+            ),
+            // 没有音轨是**合法**的空结果,不算失败
+            Ok(None) => println!("转录     源视频没有音轨,跳过"),
+            Err(e) => {
+                eprintln!("转录     失败:{e:#}");
+                transcribe_ok = false;
+            }
         }
     } else {
         println!("转录     已跳过(--no-transcribe)");
     }
 
-    project.progress.preprocess.mark_done();
-    project.save(&layout.project_json())?;
+    if transcribe_ok {
+        project.progress.preprocess.mark_done();
+        project.save(&layout.project_json())?;
+    } else {
+        // 差帧图与截图保留,但进度不标完成 —— 重跑一次就能补上
+        eprintln!();
+        eprintln!("差帧图与截图已保留;转录未完成,**未**标记步 1 为完成。");
+        eprintln!("修复后重跑:`vidbrief preprocess {}`", parsed.project);
+        bail!("步 1 未完成:转录失败");
+    }
+
+    // ── 视图 ─────────────────────────────────────────────────────────
+    //
+    // DESIGN §5.3:步 1 完成即产出可视化。**渲染失败不算步 1 失败** ——
+    // 材料已经全部落盘,视图只是给人看的界面,没渲染出来可以再跑 `vidbrief ui`。
+    match vidbrief_viz::render_timeline(&layout) {
+        Ok(path) => println!("视图     {}", path.display()),
+        Err(e) => eprintln!("视图     渲染失败(材料不受影响):{e:#}"),
+    }
 
     println!();
-    println!("完成。下一步:`vidbrief status {}` 或让 agent 看图校准", parsed.project);
+    println!(
+        "完成。下一步:`vidbrief ui {}` 打开时间线,或让 agent 看图校准",
+        parsed.project
+    );
     Ok(())
 }
 

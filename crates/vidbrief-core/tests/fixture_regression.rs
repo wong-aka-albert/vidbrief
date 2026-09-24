@@ -14,8 +14,10 @@ use vidbrief_project::{RegionParams, RegionReason, ShotOrigin};
 /// 已知切换点。合成视频在这三个时刻整幅换画面。
 const SWITCH_POINTS: &[f64] = &[20.0, 30.0, 50.0];
 
-/// 命中容差(秒)。采样间隔 1 秒,所以 ±1 秒内就算命中。
-const TOLERANCE: f64 = 1.0;
+/// 命中容差(秒)。**取得很紧**:抽帧时间戳是精确的整数秒,
+/// 切换点应当**正好**命中。早先这里写 ±1.0 —— 那个宽松度正好掩盖了
+/// "fps 滤镜取到区间末尾那一帧"的 bug(见 tests/pipeline_consistency.rs)。
+const TOLERANCE: f64 = 0.01;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

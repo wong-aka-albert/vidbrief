@@ -76,6 +76,13 @@ pub fn detect(curve: &ChangeCurve, params: &RegionParams) -> DenseRegions {
         let lo = i0.saturating_sub(half);
         let hi = (i1 + half).min(n - 1);
         let (start_idx, end_idx) = trim_to_active(&scores, lo, hi, contribution_floor);
+
+        // **单帧不是"密集区"。** 一次硬切换会让它前后共 9 个窗口都超过阈值(每个窗口里
+        // 都有那一个 1.0),于是被误判成"一段热闹"。但按定义,密集区是**持续**活跃的一段;
+        // 单点事件交给孤立峰判据,那里还有突出度把关。
+        if start_idx >= end_idx {
+            continue;
+        }
         found.push(make_region(
             RegionReason::HighDensity,
             changes,
@@ -518,6 +525,21 @@ mod tests {
             }
         }
         scores
+    }
+
+    #[test]
+    fn a_lone_spike_is_not_a_dense_region() {
+        // 一次硬切换会让它前后共 9 个窗口都超过阈值(每个窗口里都有那一个 1.0),
+        // 于是很容易被误判成"一段热闹"。按定义,密集区要**持续**活跃。
+        let mut scores = vec![0.0; 60];
+        scores[30] = 1.0;
+        let regions = detect(&curve(&scores), &params());
+        assert_eq!(regions.regions.len(), 1, "{:#?}", regions.regions);
+        assert_eq!(
+            regions.regions[0].reason,
+            RegionReason::IsolatedPeak,
+            "单帧事件该是孤立峰,不是密集区"
+        );
     }
 
     #[test]

@@ -28,6 +28,54 @@ impl Default for ShotQuality {
     }
 }
 
+/// 取 `video` 在时刻 `t` 的那一帧,返回 RGB24 原始像素。
+///
+/// 与 [`crate::curve::build_curve`] 的抽帧**必须落在同一帧上** ——
+/// 两边都按"第一个 `pts ≥ t` 的帧"取值,而 `build_curve` 的采样表达式保证
+/// 每帧的时间戳正好是整数秒。这条一致性由
+/// `tests/pipeline_consistency.rs` 逐字节钉住。
+pub fn frame_at(video: &Path, t: f64, width: u32, height: u32) -> Result<Vec<u8>> {
+    if !t.is_finite() || t < 0.0 {
+        bail!("抽帧时刻不合法:{t}");
+    }
+    if !video.is_file() {
+        bail!("源视频不存在:{}", video.display());
+    }
+
+    let args = vec![
+        arg("-v"),
+        arg("error"),
+        // `-ss` 放在 `-i` 之前:先快速定位到关键帧再精确解码。ffmpeg 默认会丢帧直到目标时刻,
+        // 所以拿到的是"第一个 pts ≥ t"的帧 —— 与 build_curve 的语义一致
+        arg("-ss"),
+        arg(format!("{t:.6}")),
+        arg("-i"),
+        video.as_os_str().to_os_string(),
+        arg("-frames:v"),
+        arg("1"),
+        arg("-vf"),
+        arg(format!("scale={width}:{height}")),
+        arg("-f"),
+        arg("rawvideo"),
+        arg("-pix_fmt"),
+        arg("rgb24"),
+        arg("-"),
+    ];
+
+    let mut out = ffmpeg::run_ffmpeg_capture(&args)
+        .with_context(|| format!("读取帧失败:t={t:.3}s {}", video.display()))?;
+
+    let need = (width as usize) * (height as usize) * 3;
+    if out.len() < need {
+        bail!(
+            "只读到 {} 字节,不足一帧({need} 字节):t={t:.3}s 可能超出视频末尾",
+            out.len()
+        );
+    }
+    out.truncate(need);
+    Ok(out)
+}
+
 /// 抽 `video` 在时刻 `t` 的那一帧,写到 `out`(JPEG)。
 pub fn extract_frame(video: &Path, t: f64, out: &Path, quality: ShotQuality) -> Result<()> {
     if !t.is_finite() || t < 0.0 {

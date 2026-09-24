@@ -145,7 +145,8 @@ git commit -m "feat(vidbrief-core): 实现变化密集区检测 [260925-01]"
 | `crates/vidbrief-core/` | 步 1 算法核心。**纯函数占一半**(`feature`/`regions`/`shots` 不碰进程),便于毫秒级调试 |
 | `crates/vidbrief-asr/` | ffmpeg 抽音 + whisper-cli 封装 → 结构化转录。**不做任何纠错** |
 | `crates/vidbrief-project/` | **项目目录 + 全部数据结构 + 写锁与并发控制**(格式的代码侧权威) |
-| `crates/vidbrief-viz/` | HTML 视图渲染 + 本地查看服务(视频回跳) |
+| `crates/vidbrief-viz/` | HTML 视图渲染 + **本地查看服务**(绑 `127.0.0.1:0`、进程内单例、挂载表、Range 支持) |
+| `ui/` | 视图模板与前端时间线组件(被 `vidbrief-viz` 用 `include_str!` 编进二进制) |
 | `crates/vidbrief-report/` | Markdown → 图表化 HTML |
 | `crates/vidbrief-mcp/` | MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板) |
 | `crates/vidbrief-cli/` | `vidbrief` 独立命令行(脱离 agent 也能自测);已实现 `init` |
@@ -163,6 +164,8 @@ cp fixtures/test_sample.mp4 /tmp/smoke.mp4
 ./target/debug/vidbrief init /tmp/smoke.mp4 -p /tmp/smoke-proj
 ./target/debug/vidbrief preprocess /tmp/smoke-proj --no-transcribe
 ./target/debug/vidbrief status /tmp/smoke-proj --verify
+# 视图:渲染 + 起服务。--no-open 免得每次跑测试都弹浏览器;它会一直活着,记得关
+./target/debug/vidbrief ui /tmp/smoke-proj --no-open
 ```
 
 **需要显式跑的**(要拉 whisper-cli 与 466MB 模型,约 4 秒):

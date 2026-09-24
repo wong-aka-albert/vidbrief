@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vidbrief 时间线</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3038; --fg: #d8dee9; --dim: #7b8494;
+    --accent: #4aa3ff; --keep: #3fb950; --drop: #6e7681; --track-h: 62px; --sub-h: 30px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  header .spacer { flex: 1; }
+  header .warn { color: #d29922; font-size: 12px; }
+  main { padding: 16px 18px 60px; max-width: 1600px; margin: 0 auto; }
+
+  .video-wrap { background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  video { display: block; width: 100%; max-height: 56vh; background: #000; }
+
+  /* 五层共轴:每一层的 left 都是 (t / duration) * 100% */
+  .stack { position: relative; margin-top: 14px; user-select: none; }
+  .layer { position: relative; border-bottom: 1px solid var(--line); }
+  .layer:last-child { border-bottom: 0; }
+  .layer-label { position: absolute; left: 0; top: 0; z-index: 4; font-size: 11px;
+    color: var(--dim); background: var(--bg); padding: 1px 6px 1px 0; pointer-events: none; }
+
+  #histWrap { height: 110px; background: var(--panel); cursor: crosshair; }
+  #hist { display: block; width: 100%; height: 110px; }
+  #regions { position: absolute; inset: 0; pointer-events: none; }
+
+  #ruler { height: 22px; background: var(--panel); cursor: crosshair; }
+  .tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); }
+  .tick span { position: absolute; left: 3px; top: 3px; font-size: 10px; color: var(--dim); }
+
+  #shots { height: var(--track-h); background: var(--panel); }
+  .shot { position: absolute; top: 5px; height: calc(var(--track-h) - 12px);
+    border: 2px solid var(--keep); border-radius: 3px; overflow: hidden; cursor: pointer;
+    background: #000; transform: translateX(-50%); transition: box-shadow .12s; }
+  .shot img { display: block; height: 100%; width: auto; }
+  .shot:hover { box-shadow: 0 0 0 2px var(--accent); z-index: 5; }
+  .shot.drop { border-color: var(--drop); opacity: .45; }
+  .shot.unchecked { border-style: dashed; }
+  .shot .tag { position: absolute; left: 0; bottom: 0; font-size: 9px; padding: 0 3px;
+    background: #000a; color: var(--fg); }
+
+  #subs { height: var(--sub-h); background: var(--panel); cursor: crosshair; overflow: hidden; }
+  .seg { position: absolute; top: 4px; bottom: 4px; min-width: 1px;
+    background: #4aa3ff33; border-radius: 2px; cursor: pointer; }
+  .seg:hover { background: var(--accent); }
+  .seg.fixed { background: #3fb95055; }
+
+  #playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ff5c5c;
+    pointer-events: none; z-index: 6; }
+  #playhead::before { content: ""; position: absolute; top: -4px; left: -4px;
+    border: 5px solid transparent; border-top-color: #ff5c5c; }
+
+  #tip { position: fixed; z-index: 50; max-width: 420px; display: none;
+    background: #0b0d10ee; border: 1px solid var(--line); border-radius: 5px;
+    padding: 7px 9px; font-size: 12px; line-height: 1.5; pointer-events: none;
+    box-shadow: 0 6px 22px #0009; }
+  #tip .t { color: var(--accent); font-variant-numeric: tabular-nums; }
+  #tip .k { color: var(--dim); }
+
+  .below { display: grid; grid-template-columns: 1fr 440px; gap: 16px; margin-top: 16px; }
+  @media (max-width: 1100px) { .below { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .card h2 { font-size: 12px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line);
+    color: var(--dim); font-weight: 600; }
+  .card .body { padding: 10px 12px; }
+  #now { white-space: pre-wrap; min-height: 3em; }
+  #now .ts { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+
+  .row { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--line);
+    cursor: pointer; align-items: flex-start; }
+  .row:hover { background: #ffffff08; }
+  #shotsPanel .row img { width: 84px; border-radius: 3px; border: 1px solid var(--line); }
+  #shotsPanel .row .txt { flex: 1; min-width: 0; }
+  #shotsPanel .row .h { font-variant-numeric: tabular-nums; color: var(--accent); }
+  #shotsPanel .row .m { color: var(--dim); font-size: 11px; word-break: break-word; }
+  #subList { max-height: 46vh; overflow: auto; }
+  #subList .row.cur { background: #4aa3ff22; }
+  #subList .row .ts { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 78px; }
+  #subList .row .tx { flex: 1; }
+  #subList .row .fix { color: #d29922; }
+  .scroll { max-height: 46vh; overflow: auto; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    vertical-align: -1px; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="pname">…</h1>
+  <span class="meta" id="pmeta"></span>
+  <span class="spacer"></span>
+  <span class="warn" id="warn"></span>
+</header>
+
+<main>
+  <div class="video-wrap"><video id="v" controls preload="metadata" playsinline></video></div>
+
+  <div class="stack" id="stack">
+    <div class="layer" id="histWrap">
+      <span class="layer-label">① 差帧图(每秒变化率)</span>
+      <canvas id="hist"></canvas>
+      <div id="regions"></div>
+    </div>
+    <div class="layer" id="ruler"><span class="layer-label">② 时间轴</span></div>
+    <div class="layer" id="shots"><span class="layer-label">③ 预筛选截图</span></div>
+    <div class="layer" id="subs"><span class="layer-label">④ 语音转文字</span></div>
+    <div id="playhead"></div>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:#4aa3ff"></i>变化率</span>
+    <span><i style="background:#d29922"></i>密集区</span>
+    <span><i style="background:#db61a2"></i>孤立切换</span>
+    <span><i style="background:#3fb950"></i>长静止后的章节起点</span>
+    <span>虚线边框 = 截图未校准</span>
+    <span style="color:var(--fg)">点任意位置跳转 · 拖播放头连续拖 · 空格播放/暂停 · ←→ ±1s(Shift ±10s)</span>
+  </div>
+
+  <div class="below">
+    <div>
+      <div class="card"><h2>当前字幕</h2><div class="body" id="now">—</div></div>
+      <div class="card" style="margin-top:16px">
+        <h2>截图(<span id="shotCount">0</span>)</h2>
+        <div class="scroll" id="shotsPanel"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>全部字幕(<span id="segCount">0</span>)</h2>
+      <div id="subList"></div>
+    </div>
+  </div>
+</main>
+
+<div id="tip"></div>
+
+<script id="vidbrief-data" type="application/json">/*__VIDBRIEF_DATA__*/null</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("vidbrief-data").textContent);
+const $ = (s) => document.querySelector(s);
+const v = $("#v"), stack = $("#stack"), tip = $("#tip");
+const duration = D.project.duration || 1;
+
+v.src = D.video_url;
+
+$("#pname").textContent = D.project.name || D.project.id;
+$("#pmeta").textContent =
+  D.project.id + " · " + fmtTime(duration) + " · " + D.curve.scores.length + " 个采样点 / " +
+  D.regions.length + " 个变化区 / " + D.shots.length + " 张截图 / " + D.segments.length + " 段字幕";
+if (!D.segments.length) $("#warn").textContent = "还没有转录(源视频可能没有音轨)";
+
+function fmtTime(t) {
+  t = Math.max(0, t || 0);
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return String(m).padStart(2, "0") + ":" + s.toFixed(1).padStart(4, "0");
+}
+
+/* ── 差帧图:画一次到离屏 canvas,之后只叠播放头 ─────────── */
+const histWrap = $("#histWrap"), hist = $("#hist"), hctx = hist.getContext("2d");
+const off = document.createElement("canvas");
+let W = 0, H = 0;
+
+function drawHist() {
+  const dpr = window.devicePixelRatio || 1;
+  W = histWrap.clientWidth; H = histWrap.clientHeight;
+  for (const c of [hist, off]) { c.width = W * dpr; c.height = H * dpr; }
+  hist.style.width = W + "px"; hist.style.height = H + "px";
+  const c = off.getContext("2d");
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, W, H);
+
+  const n = D.curve.scores.length;
+  if (!n) return;
+  const bw = W / n;
+  const maxS = Math.max(D.curve.max_score, 1e-6);
+
+  // 区域底色 + 边界
+  const rg = $("#regions");
+  rg.innerHTML = "";
+  for (const r of D.regions) {
+    const x0 = (r.start / duration) * W;
+    const x1 = ((r.end + D.curve.step) / duration) * W;
+    const kind = r.reason === "high_density" ? "#d29922" : (r.reason === "isolated_peak" ? "#db61a2" : "#3fb950");
+    c.fillStyle = kind + "22";
+    c.fillRect(x0, 0, Math.max(1, x1 - x0), H);
+    c.fillStyle = kind + "88";
+    c.fillRect(x0, 0, 1, H);
+    c.fillRect(Math.max(0, x1 - 1), 0, 1, H);
+  }
+
+  // 变化率柱
+  for (let i = 0; i < n; i++) {
+    const s = Math.min(1, D.curve.scores[i] / maxS);
+    const h = s * (H - 14);
+    c.fillStyle = "hsl(" + (205 - 205 * s) + " 85% " + (28 + 34 * s) + "%)";
+    c.fillRect(i * bw, H - h, Math.max(bw * 0.85, 0.6), h);
+  }
+  c.fillStyle = "#2b3038";
+  c.fillRect(0, H - 1, W, 1);
+  paint();
+}
+
+function paint() {
+  const dpr = window.devicePixelRatio || 1;
+  hctx.setTransform(1, 0, 0, 1, 0, 0);
+  hctx.clearRect(0, 0, hist.width, hist.height);
+  hctx.drawImage(off, 0, 0);
+  hctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+/* ── 刻度 ────────────────────────────────────────────────── */
+function drawRuler() {
+  const ruler = $("#ruler");
+  ruler.querySelectorAll(".tick").forEach((e) => e.remove());
+  const W = ruler.clientWidth;
+  const step = [5, 10, 15, 30, 60, 120, 300, 600].find((s) => (s / duration) * W >= 70) || 600;
+  for (let t = 0; t <= duration; t += step) {
+    const el = document.createElement("div");
+    el.className = "tick";
+    el.style.left = (t / duration) * 100 + "%";
+    el.innerHTML = "<span>" + fmtTime(t) + "</span>";
+    ruler.appendChild(el);
+  }
+}
+
+/* ── 截图轨 + 截图面板 ───────────────────────────────────── */
+function drawShots() {
+  const track = $("#shots");
+  track.querySelectorAll(".shot").forEach((e) => e.remove());
+  const panel = $("#shotsPanel");
+  panel.innerHTML = "";
+  $("#shotCount").textContent = D.shots.length;
+
+  for (const s of D.shots) {
+    const el = document.createElement("div");
+    el.className = "shot" + (s.status === "drop" ? " drop" : "") + (s.check ? "" : " unchecked");
+    el.style.left = (s.t / duration) * 100 + "%";
+    el.innerHTML = '<img loading="lazy" src="' + s.url + '" alt="' + s.id + '"><span class="tag">' + s.id + "</span>";
+    el.addEventListener("click", (ev) => { ev.stopPropagation(); seek(s.t); });
+    el.addEventListener("mousemove", (ev) => showTip(ev, shotTip(s)));
+    el.addEventListener("mouseleave", hideTip);
+    track.appendChild(el);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<img loading="lazy" src="' + s.url + '" alt="' + s.id + '">' +
+      '<div class="txt"><div class="h">' + s.id + " · " + fmtTime(s.t) + " · " + s.origin + "</div>" +
+      '<div class="m">' + (s.check ? esc(s.check.type_read) : "<em>未校准</em>") +
+      (s.check && s.check.issues.length ? "<br>⚠ " + esc(s.check.issues.join(" / ")) : "") +
+      "</div></div>";
+    row.addEventListener("click", () => seek(s.t));
+    panel.appendChild(row);
+  }
+}
+
+function shotTip(s) {
+  const c = s.check;
+  return "<div><span class='t'>" + s.id + "</span> <span class='k'>t=" + s.t.toFixed(2) + "s · " +
+    s.origin + (s.region_id != null ? " · 区域 #" + s.region_id : "") + "</span></div>" +
+    (s.reason ? "<div class='k'>补图理由:" + esc(s.reason) + "</div>" : "") +
+    (c
+      ? "<div>" + esc(c.type_read) + "</div><div class='k'>match=" + c.match +
+        " sync=" + c.audio_visual_sync + " 置信=" + c.confidence + "</div>" +
+        (c.issues.length ? "<div>⚠ " + esc(c.issues.join(" / ")) + "</div>" : "")
+      : "<div class='k'>尚未校准</div>");
+}
+
+/* ── 字幕轨 + 字幕面板 ───────────────────────────────────── */
+const subRows = [];
+function drawSubs() {
+  const track = $("#subs");
+  track.querySelectorAll(".seg").forEach((e) => e.remove());
+  const list = $("#subList");
+  list.innerHTML = "";
+  subRows.length = 0;
+  $("#segCount").textContent = D.segments.length;
+
+  D.segments.forEach((sg, i) => {
+    const el = document.createElement("div");
+    el.className = "seg" + (sg.corrected ? " fixed" : "");
+    el.style.left = (sg.start / duration) * 100 + "%";
+    el.style.width = Math.max(((sg.end - sg.start) / duration) * 100, 0.15) + "%";
+    el.addEventListener("mousemove", (ev) => showTip(ev,
+      "<div class='t'>" + fmtTime(sg.start) + " – " + fmtTime(sg.end) + "</div><div>" + esc(sg.text) + "</div>" +
+      (sg.correction ? "<div class='k'>纠错:" + esc(sg.correction.note) + " — " + esc(sg.correction.reason) + "</div>" : "")));
+    el.addEventListener("mouseleave", hideTip);
+    el.addEventListener("click", (ev) => { ev.stopPropagation(); seek(sg.start + 0.01); });
+    track.appendChild(el);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = "<span class='ts'>" + fmtTime(sg.start) + "</span><span class='tx'>" + esc(sg.text) +
+      (sg.correction ? "<span class='fix'> ✎ " + esc(sg.correction.note) + "</span>" : "") + "</span>";
+    row.addEventListener("click", () => seek(sg.start + 0.01));
+    list.appendChild(row);
+    subRows.push(row);
+  });
+}
+
+/* ── 播放头 + 当前字幕 ───────────────────────────────────── */
+const playhead = $("#playhead");
+let curSeg = -1;
+
+function syncTo(t) {
+  playhead.style.left = Math.min(100, Math.max(0, (t / duration) * 100)) + "%";
+
+  let idx = -1;
+  for (let i = 0; i < D.segments.length; i++) {
+    if (t >= D.segments[i].start && t <= D.segments[i].end) { idx = i; break; }
+  }
+  if (idx === curSeg) return;
+  if (subRows[curSeg]) subRows[curSeg].classList.remove("cur");
+  curSeg = idx;
+  const now = $("#now");
+  if (idx < 0) { now.textContent = "—"; return; }
+
+  const sg = D.segments[idx];
+  now.innerHTML = "<span class='ts'>" + fmtTime(sg.start) + "</span>" + esc(sg.text) +
+    (sg.correction ? "\n✎ " + esc(sg.correction.note) + "(" + esc(sg.correction.reason) + ")" : "");
+
+  const r = subRows[idx];
+  if (r) {
+    r.classList.add("cur");
+    const box = $("#subList");
+    if (r.offsetTop < box.scrollTop || r.offsetTop > box.scrollTop + box.clientHeight - 30) {
+      box.scrollTop = r.offsetTop - box.clientHeight / 2;
+    }
+  }
+}
+
+v.addEventListener("timeupdate", () => syncTo(v.currentTime));
+v.addEventListener("seeked", () => syncTo(v.currentTime));
+
+/* ── 跳转 / 拖动 ─────────────────────────────────────────── */
+function seek(t) {
+  const upper = Math.max(0, (v.duration || duration) - 0.05);
+  v.currentTime = Math.min(Math.max(t, 0), upper);
+  syncTo(v.currentTime);
+}
+
+function timeAt(clientX) {
+  const r = stack.getBoundingClientRect();
+  const ratio = (clientX - r.left) / r.width;
+  return Math.min(Math.max(ratio, 0), 1) * duration;
+}
+
+let dragging = false;
+stack.addEventListener("mousedown", (ev) => {
+  if (ev.target.closest(".shot") || ev.target.closest(".seg")) return;
+  dragging = true;
+  seek(timeAt(ev.clientX));
+  ev.preventDefault();
+});
+window.addEventListener("mousemove", (ev) => { if (dragging) seek(timeAt(ev.clientX)); });
+window.addEventListener("mouseup", () => { dragging = false; });
+
+const ruler = $("#ruler");
+histWrap.addEventListener("mousemove", (ev) => {
+  const t = timeAt(ev.clientX);
+  const s = D.curve.scores[Math.round(t / D.curve.step)];
+  showTip(ev, "<div class='t'>" + fmtTime(t) + "</div>" +
+    (s == null ? "" : "<div>变化率 <b>" + s.toFixed(3) + "</b></div>") + regionAt(t));
+});
+histWrap.addEventListener("mouseleave", hideTip);
+ruler.addEventListener("mousemove", (ev) => showTip(ev, "<div class='t'>" + fmtTime(timeAt(ev.clientX)) + "</div>"));
+ruler.addEventListener("mouseleave", hideTip);
+
+function regionAt(t) {
+  const r = D.regions.find((x) => t >= x.start && t <= x.end);
+  return r ? "<div class='k'>区域 #" + r.id + " · " + r.reason + " · 峰值 " + r.peak_score.toFixed(3) +
+    " @ " + fmtTime(r.peak_t) + "</div>" : "";
+}
+
+/* ── 气泡 ────────────────────────────────────────────────── */
+function showTip(ev, html) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const pad = 14;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  const r = tip.getBoundingClientRect();
+  if (x + r.width > window.innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > window.innerHeight - 8) y = ev.clientY - r.height - pad;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ── 键盘 ────────────────────────────────────────────────── */
+window.addEventListener("keydown", (ev) => {
+  if (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA") return;
+  if (ev.code === "Space") { v.paused ? v.play() : v.pause(); ev.preventDefault(); }
+  if (ev.code === "ArrowLeft") { seek(v.currentTime - (ev.shiftKey ? 10 : 1)); ev.preventDefault(); }
+  if (ev.code === "ArrowRight") { seek(v.currentTime + (ev.shiftKey ? 10 : 1)); ev.preventDefault(); }
+});
+
+/* ── 启动 ────────────────────────────────────────────────── */
+window.addEventListener("resize", () => { drawHist(); drawRuler(); });
+drawHist(); drawRuler(); drawShots(); drawSubs(); syncTo(0);
+</script>
+</body>
+</html>

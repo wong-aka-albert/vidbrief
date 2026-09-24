@@ -58,6 +58,21 @@ impl CurveOptions {
     }
 }
 
+/// 抽帧用的选取表达式:**每个采样区间取第一帧**,而且时间戳是**绝对**的。
+///
+/// **为什么不用 `fps=N` 滤镜**(这是个真踩过的坑):`fps` 滤镜按 `round(t × N)` 把输入帧
+/// 归到输出序号上,于是一个序号对应的是**区间末尾**那一帧。25fps 的素材上,
+/// 输出序号 3 实际是 t=3.46 的画面 —— 而 `change_curve.json` 里记的是 `t=3.0`。
+/// 后果:`extract_frame(t)` 用 `-ss 3` 取的是 **t=3.00 那一帧**,和"被分析的那一帧"
+/// **不是同一帧**。硬切换正好落在整秒时看不出来(两侧都在同一个镜头里),
+/// 但切换落在 t=20.1 时就会**截到切换前那一侧**。
+///
+/// 这个表达式用绝对时间判断("这一帧所在的整数区间和上一帧不同吗"),所以
+/// **不会累积漂移**,选出来的帧时间戳正好是 `0, 1, 2, …`,与 `-ss <整数>` 完全对齐。
+fn select_expr(fps: f64) -> String {
+    format!("isnan(prev_selected_t)+gt(floor(t*{fps}),floor(prev_selected_t*{fps}))")
+}
+
 /// 按宽高比缩到 `out_w`,并**向上取到偶数**(H.264 系要求偶数,ffmpeg 的 `-2` 也是这个意思)。
 fn even_height(out_w: u32, src_w: u32, src_h: u32) -> u32 {
     let h = (out_w as f64 * src_h as f64 / src_w as f64).round().max(2.0) as u32;
@@ -85,11 +100,16 @@ pub fn build_curve(
         video.as_os_str().to_os_string(),
         arg("-vf"),
         arg(format!(
-            "fps={},scale={}:{}",
-            opts.fps, opts.width, opts.height
+            "select='{}',scale={}:{}",
+            select_expr(opts.fps),
+            opts.width,
+            opts.height
         )),
         arg("-an"), // 不要音频
         arg("-sn"), // 不要字幕
+        // 关掉 ffmpeg 的自动补帧:它会把 select 选出的帧再按某个帧率复制一遍
+        arg("-fps_mode"),
+        arg("passthrough"),
         arg("-f"),
         arg("rawvideo"),
         arg("-pix_fmt"),

@@ -10,10 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+serde_json.workspace = true
 vidbrief-asr.workspace = true
 vidbrief-core.workspace = true
 vidbrief-project.workspace = true
-serde_json.workspace = true
+vidbrief-viz.workspace = true
 
 [dev-dependencies]
 jsonschema = { version = "0.57", default-features = false }

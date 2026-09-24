@@ -56,6 +56,20 @@ pub fn run_ffmpeg(args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
+/// 跑一个 ffmpeg 命令,把 stdout 读成字节(用于 rawvideo 取帧)。
+pub fn run_ffmpeg_capture(args: &[OsString]) -> Result<Vec<u8>> {
+    let bin = ffmpeg_bin();
+    let out = Command::new(&bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| anyhow::anyhow!("{}\n底层错误:{e}", missing_binary_error(&bin, "ffmpeg")))?;
+    if !out.status.success() {
+        bail!("{} 执行失败({}):\n{}", bin.to_string_lossy(), out.status, tail_of(&out.stderr));
+    }
+    Ok(out.stdout)
+}
+
 /// 取 `ffprobe -print_format json` 的结果。
 pub fn ffprobe_json(video: &Path) -> Result<serde_json::Value> {
     let bin = ffprobe_bin();

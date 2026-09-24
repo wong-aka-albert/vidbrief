@@ -26,10 +26,30 @@ pub use whisper::Config;
 /// 转码出来的 WAV 参数(whisper.cpp 只认 16kHz 单声道 PCM)。
 pub const SAMPLE_RATE: u32 = 16_000;
 
+/// 转录一个项目:**先看有没有音轨,再去找模型**。
+///
+/// 顺序很重要。没有音轨的视频(如合成回归素材)压根不需要 whisper,
+/// 先 `Config::resolve()` 会因为"找不到模型"而失败 —— 那是在为一个**根本不需要**的东西报错。
+/// 用户没装 whisper 却被要求装,只因为这个视频没有音轨。
+pub fn transcribe_project(
+    video: &Path,
+    layout: &Layout,
+    meta: &VideoMeta,
+) -> Result<Option<Transcript>> {
+    if !has_audio(video)? {
+        return Ok(None);
+    }
+    let cfg = Config::resolve()?;
+    transcribe(video, layout, meta, &cfg)
+}
+
 /// 抽音 + 转录 + 解析,并把 `transcript.srt/.txt/.vtt` 与 `transcript.json` 落盘。
 ///
 /// - 源视频没有音轨 → `Ok(None)`(不是错误)
 /// - `layout` 决定三个副产物与 `transcript.json` 的位置
+///
+/// 配置已经由调用方解析好了。一般应该用 [`transcribe_project`] —— 它会**先判断
+/// 需不需要转录**,避免为一段没有音轨的视频去要模型。
 pub fn transcribe(
     video: &Path,
     layout: &Layout,

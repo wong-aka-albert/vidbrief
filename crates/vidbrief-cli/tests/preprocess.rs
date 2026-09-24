@@ -16,7 +16,7 @@ use vidbrief_project::{ChangeCurve, DenseRegions, Layout, Project, Shots};
 
 /// 已知切换点,与 `crates/vidbrief-core/tests/fixture_regression.rs` 一致。
 const SWITCH_POINTS: &[f64] = &[20.0, 30.0, 50.0];
-const TOLERANCE: f64 = 1.0;
+const TOLERANCE: f64 = 0.01;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -247,7 +247,7 @@ fn flags_can_narrow_the_work() {
     assert!(!layout.shots_json().is_file(), "--no-shots 不该写截图清单");
 
     // 换采样参数
-    let out = run_in(&tmp.0, &["preprocess", "test-sample", "-f", "2", "-w", "320", "--no-shots"]);
+    let out = run_in(&tmp.0, &["preprocess", "test-sample", "-f", "2", "-w", "320", "--no-shots", "--no-transcribe"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let curve: ChangeCurve = vidbrief_project::read(&layout.change_curve()).unwrap();
     assert_eq!(curve.fps_sampled, 2.0);
@@ -257,6 +257,74 @@ fn flags_can_narrow_the_work() {
         "2fps 采样 60 秒应有一百多个点,实际 {}",
         curve.changes.len()
     );
+}
+
+/// 转录失败**不算这一步完成**。
+///
+/// 这条来自一次真实踩坑:whisper 找不到时,`preprocess` 打印了"转录失败"却仍然写了
+/// `preprocess.done = true` 并以**退出码 0** 结束 —— 脚本和 agent 会以为这一步做完了。
+/// 进度标记是给人看的,标错了就是骗人。想只要视觉部分,请显式 `--no-transcribe`。
+#[test]
+fn a_failed_transcription_does_not_mark_the_step_done() {
+    let tmp = TempDir::new("asr-fail");
+    let video = tmp.stage_video();
+    assert!(run_in(&tmp.0, &["init", video.to_str().unwrap()]).status.success());
+    let layout = Layout::for_project(tmp.0.join("projects"), "test-sample");
+
+    // ① 素材**没有音轨** → 合法跳过,算完成
+    let out = run_in(&tmp.0, &["preprocess", "test-sample"]);
+    assert!(out.status.success(), "无音轨应当仍算完成:\n{}", stderr(&out));
+    assert!(stdout(&out).contains("没有音轨"), "{}", stdout(&out));
+    let mut project = Project::load(&layout.project_json()).unwrap();
+    assert!(project.progress.preprocess.done, "没音轨可转,这一步就算做完了");
+    assert!(!layout.transcript().exists());
+
+    // ② 换成**有音轨**的视频,但让 whisper 找不到 → 必须判失败
+    let with_audio = tmp.0.join("with_audio.mp4");
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=3"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=3"])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y"])
+        .arg(&with_audio)
+        .output();
+    match made {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            eprintln!("跳过 ②:本机 ffmpeg 造不出带音轨的测试片");
+            return;
+        }
+    }
+
+    let project_path = layout.rel(project.source.path.as_str());
+    std::fs::remove_file(&project_path).unwrap();
+    std::fs::copy(&with_audio, &project_path).unwrap();
+    let meta = vidbrief_core::probe(&project_path, project.source.path.clone()).unwrap();
+    meta.save(&layout.video_meta()).unwrap();
+
+    project.progress.preprocess = Default::default();
+    project.save(&layout.project_json()).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vidbrief"))
+        .current_dir(&tmp.0)
+        .env("VIDBRIEF_WHISPER_BIN", "definitely-not-whisper")
+        .env("VIDBRIEF_WHISPER_MODEL", "definitely-not-a-model.bin")
+        .args(["preprocess", "test-sample"])
+        .output()
+        .expect("无法启动 vidbrief");
+
+    assert!(
+        !out.status.success(),
+        "视频确实有音轨、whisper 又用不了,必须判失败:\n{}",
+        stdout(&out)
+    );
+    let project = Project::load(&layout.project_json()).unwrap();
+    assert!(
+        !project.progress.preprocess.done,
+        "转录没完成就不该标记步 1 已完成"
+    );
+    // 但视觉产出要保留 —— 重跑时不必重算差帧图
+    assert!(layout.change_curve().is_file(), "已算好的差帧图不该被丢掉");
+    assert!(layout.shots_json().is_file(), "已抽好的截图不该被丢掉");
 }
 
 #[test]

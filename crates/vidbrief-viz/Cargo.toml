@@ -2,6 +2,12 @@
 name = "vidbrief-viz"
 version.workspace = true
 edition.workspace = true
-description = "时间线/校准对照表 HTML 渲染(含视频回跳)与本地查看服务"
+description = "HTML 视图渲染 + 本地查看服务(视频回跳)"
 
 [dependencies]
+anyhow.workspace = true
+open.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+vidbrief-project.workspace = true
