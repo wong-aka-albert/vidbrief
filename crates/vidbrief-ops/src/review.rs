@@ -141,7 +141,21 @@ pub fn state(opened: &OpenProject) -> Result<ReviewState> {
         }
         match &shot.check {
             None => out.unchecked.shots.push(shot.id.to_string()),
-            Some(check) if check.needs_review() => out.needs_user.shots.push(shot.id.to_string()),
+            // 「要人拍板」的判据只有一个:**模型自己说它没把握**(`confidence: low`)。
+            //
+            // **不用 [`vidbrief_project::ShotCheck::needs_review`]** —— 那个函数答的是另一个
+            // 问题:"这张图值不值得人看一眼"(把握低 / 报了问题 / 图文不符),它是**视图**的
+            // 入口条件。拿它当门的判据会出人命:`issues` 非空的意思是"**我有话要说**",
+            // 不是"我定不了" —— 而模型如实写「画面上没有标题文字,本节标题无法核实」
+            // 正是 instructions 要求它做的。**诚实反而过不去门。**
+            //
+            // M4 第四轮真 agent 实测到了这个死结:7 张卡住的图里**没有一张是把握低**,
+            // 全是反复写进 `issues` 的观察,而模型给它们**全打了 `high`** ——
+            // 判据和模型自己的判断完全脱节,它只剩"签字放行"一条路,
+            // 而门自己的报错里写着「别把发现改成没发现」。
+            Some(check) if check.confidence == Confidence::Low => {
+                out.needs_user.shots.push(shot.id.to_string())
+            }
             Some(_) => {}
         }
     }
@@ -495,31 +509,43 @@ mod tests {
     /// 给一张图写回结论。
     ///
     /// 不走 `record_shot_check`:那要构造一堆上下文,而这里测的是门。
-    /// `contested` = 模型看出来有问题、它定不了。
-    fn check_shot(fake: &Fake, id: u32, contested: bool) {
+    ///
+    /// **默认就带一条 `issues`,也默认 `match = true`** —— 真 agent 就是这么写的:
+    /// 「画面无任何标题文字,本节标题无法从画面上核实」这类**观察**。
+    /// 把它写成默认,是因为"`issues` 非空"恰恰是这段代码最容易被判错的那种输入。
+    fn check_shot(fake: &Fake, id: u32, confidence: vidbrief_project::Confidence) {
+        check_shot_with(fake, id, confidence, true);
+    }
+
+    /// 同上,但可以指定 `match`。`match = false` 是"画面与口播对不上"这种**发现**。
+    fn check_shot_with(
+        fake: &Fake,
+        id: u32,
+        confidence: vidbrief_project::Confidence,
+        matches: bool,
+    ) {
         let path = fake.layout().shots_json();
         let mut shots = vidbrief_project::Shots::load(&path).unwrap();
         let shot = shots
             .get_mut(vidbrief_project::ShotId::new(id).unwrap())
             .unwrap();
         shot.check = Some(vidbrief_project::ShotCheck {
-            r#match: !contested,
+            r#match: matches,
             audio_visual_sync: true,
             type_read: "画面内容".into(),
             neighbor_text: None,
-            issues: if contested {
-                vec!["画面与口播对不上".into()]
-            } else {
-                Vec::new()
-            },
-            confidence: if contested {
-                vidbrief_project::Confidence::Low
-            } else {
-                vidbrief_project::Confidence::High
-            },
+            issues: vec!["画面无标题文字,本节标题无法从画面上核实".into()],
+            confidence,
             checked_at: vidbrief_project::now(),
         });
         shots.save(&path).unwrap();
+    }
+
+    fn high() -> vidbrief_project::Confidence {
+        vidbrief_project::Confidence::High
+    }
+    fn low() -> vidbrief_project::Confidence {
+        vidbrief_project::Confidence::Low
     }
 
     /// 报告这些转录段审过了。
@@ -573,8 +599,8 @@ mod tests {
         let fake = two_shots("review-autopilot");
         let opened = fake.open();
 
-        check_shot(&fake, 1, false);
-        check_shot(&fake, 2, false);
+        check_shot(&fake, 1, high());
+        check_shot(&fake, 2, high());
         review_segments(&opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("活干完了就该过");
@@ -596,8 +622,8 @@ mod tests {
         let fake = two_shots("review-needs-user");
         let opened = fake.open();
 
-        check_shot(&fake, 1, false);
-        check_shot(&fake, 2, true); // 这一张模型定不了
+        check_shot(&fake, 1, high());
+        check_shot(&fake, 2, low()); // 这一张模型自己说没把握
         review_segments(&opened, &[1, 2]);
 
         let err = gate_calibrate(&opened).unwrap_err().to_string();
@@ -613,8 +639,8 @@ mod tests {
     fn uncertain_segments_count_as_waiting_for_the_user() {
         let fake = two_shots("review-uncertain");
         let opened = fake.open();
-        check_shot(&fake, 1, false);
-        check_shot(&fake, 2, false);
+        check_shot(&fake, 1, high());
+        check_shot(&fake, 2, high());
 
         crate::conclusions::apply_corrections(
             &opened,
@@ -641,8 +667,8 @@ mod tests {
     fn a_waiver_covers_only_the_batch_that_was_pending() {
         let fake = two_shots("review-waiver");
         let mut opened = fake.open();
-        check_shot(&fake, 1, true);
-        check_shot(&fake, 2, false);
+        check_shot(&fake, 1, low());
+        check_shot(&fake, 2, high());
         review_segments(&opened, &[1, 2]);
 
         assert!(gate_calibrate(&opened).is_err(), "先得真被挡住");
@@ -651,7 +677,7 @@ mod tests {
         gate_calibrate(&opened).expect("拍板了,这一批就放过");
 
         // 又冒出来一条要拍板的
-        check_shot(&fake, 2, true);
+        check_shot(&fake, 2, low());
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s002"), "新冒出来的那条要点出来:{err}");
         assert!(
@@ -678,10 +704,62 @@ mod tests {
             shots.save(&path).unwrap();
         }
         let opened = fake.open();
-        check_shot(&fake, 1, false);
+        check_shot(&fake, 1, high());
         review_segments(&opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("判了 drop 的图不该挡着");
+    }
+
+    /// **「有话要说」不等于「定不了」。**
+    ///
+    /// 这是 M4 第四轮真 agent 联调逼出来的:那一轮 7 张卡在"要拍板"的图里
+    /// **没有一张是把握低**,全是模型如实写下的观察(「画面无标题文字,本节标题
+    /// 无法从画面上核实」),而它给它们**全打了 `high`**。
+    ///
+    /// 旧的判据是 `needs_review()`(把握低 **或 issues 非空** 或 match=false)——
+    /// 拿它当门口径,等于**诚实反而过不去门**:模型照 instructions 的要求如实写
+    /// 「看不出来」,就永远到不了"已核验";要过门只剩两条路,把观察抹掉,或者签字。
+    /// 而门自己的报错里写着「别把发现改成没发现」。它选了签字。
+    ///
+    /// 所以:**判据只有一个 —— 模型自己说它没把握**(`confidence: low`)。
+    /// `issues` 与 `match` 照常记录、照常显示,只是不再驱动门。
+    #[test]
+    fn findings_do_not_make_a_shot_need_the_user() {
+        let fake = two_shots("review-findings");
+        let opened = fake.open();
+        // 满满一条 issues,而且判了 match=false —— 都是有话要说,不是定不了
+        check_shot_with(&fake, 1, high(), false);
+        check_shot_with(&fake, 2, high(), false);
+        review_segments(&opened, &[1, 2]);
+
+        gate_calibrate(&opened).expect("模型说它有把握,门就该放行 —— 哪怕它记了一堆发现");
+
+        // 反过来:模型自己说没把握,哪怕一句 issues 都没有,也要等人
+        let fake2 = two_shots("review-undecided");
+        {
+            let path = fake2.layout().shots_json();
+            let mut shots = vidbrief_project::Shots::load(&path).unwrap();
+            shots
+                .get_mut(vidbrief_project::ShotId::new(1).unwrap())
+                .unwrap()
+                .check = Some(vidbrief_project::ShotCheck {
+                r#match: true,
+                audio_visual_sync: true,
+                type_read: "画面内容".into(),
+                neighbor_text: None,
+                issues: Vec::new(),
+                confidence: low(),
+                checked_at: vidbrief_project::now(),
+            });
+            shots.save(&path).unwrap();
+        }
+        let opened2 = fake2.open();
+        check_shot(&fake2, 2, high());
+        review_segments(&opened2, &[1, 2]);
+
+        let err = gate_calibrate(&opened2).unwrap_err().to_string();
+        assert!(err.contains("等人拍板"), "{err}");
+        assert!(err.contains("s001"), "{err}");
     }
 
     #[test]

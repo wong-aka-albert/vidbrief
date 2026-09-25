@@ -85,8 +85,17 @@ pub struct ShotCounts {
     pub keep: usize,
     /// 还没被 agent 看过的。
     pub unchecked: usize,
-    /// 需要人来裁决的(把握低 / 报了问题 / 判定图文不符)。
-    pub needing_review: usize,
+    /// **有情况、值得人看一眼**的(把握低 / 报了问题 / 判定图文不符)。
+    ///
+    /// ⚠️ 这是**视图口径**,不是门口径。它叫 `needs_look` 而不是 `needing_review`,
+    /// 就是因为后者在审核门那边指的是另一件事:"**模型自己说它定不了**"
+    /// (`confidence: low`)。同名不同义,读的人(尤其模型)必然把它们混成一件 ——
+    /// M4 第四轮实测:模型在 `list_shots` 里看到 `needing_review: 7`,以为那 7 张
+    /// 就是门要的"待拍板",于是反复重写结论也过不去,最后只能签字放行。
+    ///
+    /// 两个问题都得问,但答案不一样:**这个**说"这张图有内容,值得看";
+    /// **门那个**说"这件事我拿不了主意,得人来"。
+    pub needs_look: usize,
 }
 
 impl ShotCounts {
@@ -95,7 +104,7 @@ impl ShotCounts {
             total: shots.shots.len(),
             keep: shots.usable().count(),
             unchecked: shots.unchecked().count(),
-            needing_review: shots.needing_review().count(),
+            needs_look: shots.needing_review().count(),
         }
     }
 }

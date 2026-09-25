@@ -710,7 +710,7 @@ fn print_materials(m: &vidbrief_ops::Materials) {
     match m.shots {
         Some(s) => println!(
             "  截图     {} 张(留用 {},未校准 {},待裁决 {})",
-            s.total, s.keep, s.unchecked, s.needing_review
+            s.total, s.keep, s.unchecked, s.needs_look
         ),
         None => println!("  截图     —"),
     }

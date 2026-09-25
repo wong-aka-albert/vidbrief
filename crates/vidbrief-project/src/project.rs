@@ -113,16 +113,21 @@ pub struct Progress {
     pub report: StepProgress,
 }
 
-/// 确认当时数下来的四项。**一变就作废**。
+/// 确认当时数下来的四项。
 ///
 /// 四项全是服务端自己数得出来的东西 —— 不依赖 agent 自报,也不依赖"谁签的"
 /// (那拿不到:MCP 握手里只有客户端名,没有模型名)。
+///
+/// ⚠️ **名字很像,口径要分清**(M4 第四轮实测就是在这儿混起来的):
+/// - `needing_review` 是**门口径** —— "**模型自己说它定不了吗**"(`confidence: low`);
+/// - `list_shots` 里那个同名计数是**视图口径** —— "这张图值不值得人看一眼"
+///   (把握低 / 报了问题 / 图文不符)。它已改叫 `needs_look`,因为两个问题不一样。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewCounts {
-    /// 还没校准的截图张数。
+    /// 还没核验的截图张数。
     pub unchecked: usize,
-    /// 需要人裁决的截图张数(把握低 / 报了问题 / 图文不符)。
+    /// 模型核验过、但标了"定不了"、等用户拍板的截图张数。
     pub needing_review: usize,
     /// 还没处理过的补图候选条数。
     pub supplement_pending: usize,
