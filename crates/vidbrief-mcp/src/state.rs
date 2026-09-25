@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use vidbrief_ops::OpenProject;
+use vidbrief_project::layout::identity;
 use vidbrief_project::lock::{LockGuard, acquire};
 
 /// 本进程的会话标识。写进 `project.lock`,用来回答"是哪个会话占着"。
@@ -63,7 +64,7 @@ impl State {
     /// 记下"这个会话碰过这个项目"。
     pub fn note(&self, dir: &Path, id: &str) {
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        seen.insert(dir.to_path_buf(), id.to_string());
+        seen.insert(identity(dir), id.to_string());
     }
 
     /// 本会话碰过的项目:`(项目根, 项目 id)`。
@@ -83,8 +84,13 @@ impl State {
     /// 确保本进程持有该项目的写锁(已持有则直接返回)。
     ///
     /// **这是阻塞调用**(要开文件、上锁),必须放在 `spawn_blocking` 里。
+    ///
+    /// 键一律走 [`identity`]:调用方给的是 `e2e`、`projects/e2e` 还是绝对路径,
+    /// 在这里必须收敛成同一个值 —— 否则同一个项目在内存里会有好几把"锁",
+    /// 缓存不命中就会去真加锁,而 OS 锁是同进程跨 handle 也生效的,
+    /// 结果是自己报"项目正被另一个会话写入",那个"另一个会话"就是它自己。
     pub fn ensure_write_lock(&self, opened: &OpenProject) -> Result<()> {
-        let dir = opened.dir().to_path_buf();
+        let dir = identity(opened.dir());
         {
             let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
             if locks.contains_key(&dir) {
@@ -103,7 +109,7 @@ impl State {
     /// 本进程是否持有该项目的写锁。
     pub fn holds_lock(&self, dir: &Path) -> bool {
         let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-        locks.contains_key(dir)
+        locks.contains_key(&identity(dir))
     }
 
     /// 拿到"这个项目的写操作"名额。
@@ -111,9 +117,10 @@ impl State {
     /// 用法:`let _slot = state.serialize(dir).await;` —— 直到 `_slot` 析构为止,
     /// 同一项目上的其它写操作都在排队。
     pub async fn serialize(&self, dir: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = identity(dir);
         let slot = {
             let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
-            busy.entry(dir.to_path_buf())
+            busy.entry(key)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };

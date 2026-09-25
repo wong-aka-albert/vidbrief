@@ -20,27 +20,36 @@
 //!
 //! 所以 JSON 里的 `pid` / `host` / `opened_at` 只用来回答人问的那句"这是谁开的"。
 //!
+//! ## 锁加在哪儿(Windows 上的一条硬经验)
+//!
+//! 锁不锁文件内容,而是锁**文件末尾之外的一个字节**。
+//!
+//! 起因是实测:Windows 的字节区间锁是**强制**的 —— 锁住哪一段,别的 handle 连**读**
+//! 那一段都会被拒(`ERROR_LOCK_VIOLATION` 33)。而"谁占着这个项目"恰恰写在文件内容里,
+//! **第二个会话最需要读到它**。锁整份文件 = 把最该被读到的东西锁得读不了,
+//! 于是第二个会话只能干巴巴地说一句"占用者信息不可读"。
+//!
+//! 实测对比(仓库外的一次性探针):
+//!
+//! | | 锁整份文件(std `File::try_lock`) | 锁末尾之外的 1 字节 |
+//! |---|---|---|
+//! | 第二个进程抢锁 | 失败 ✅ | 失败 ✅ |
+//! | 第二个进程**读内容** | `Os { code: 33 }` ❌ | `Ok("{\"session\":…}")` ✅ |
+//! | 释放后再抢 | 成功 ✅ | 成功 ✅ |
+//!
+//! 所以 Windows 走 [`os_lock`] 里的 `LockFileEx`,锁在一个文件永远到不了的偏移上:
+//! **互斥照旧,内容自由可读**。Unix 的 `flock` 是**咨询**锁,本来就不挡读取,照常用标准库。
+//!
+//! 代价是两边锁的**范围**不一样。同一份项目目录被两种平台的机器同时挂载着写,是病态用法,
+//! 不值得为它牺牲"第二个人能看见是谁占着"这件天天发生的事。
+//!
 //! **为什么写 JSON 不能用 [`crate::json::write_atomic`]**:那是"写临时文件 → rename",
 //! 而 rename 会让目录项指向**另一个文件标识**(inode / Windows 上的文件对象),
 //! 锁恰恰是挂在文件标识上的 —— 一 rename,锁就留在没人再打开的那个旧文件上,互斥当场失效。
 //! 所以这里必须**原地写**:`set_len(0)` → `seek(0)` → `write_all`。
-//!
-//! ## 平台差异(影响"报错说不说得清是谁占着")
-//!
-//! Unix 上的 `flock` 是**咨询锁**(只约束同样来加锁的进程),文件该读照样能读;
-//! Windows 上的字节区间锁是**强制**的 —— 持锁期间别的 handle 连 `read` 都会拿到
-//! `ERROR_LOCK_VIOLATION`(33),**同进程里再开一个 handle 也一样**(已实测)。
-//!
-//! 于是:本进程持有锁时,[`peek`] 先查**进程内登记表**(那一路文件根本读不到);
-//! 而**跨进程**时(真·另一个 agent 会话)它在 Windows 上只能读失败,于是一句
-//! "占用者信息不可读" —— 这是平台的硬限制,不是这里的疏漏。
-//!
-//! 反过来说,持有者崩溃后 OS 释放了锁、JSON 却还留在文件里:这时(以及 Unix 上任何时候)
-//! [`peek`] **能**告诉你"上一个占着的人是谁",对排查"项目怎么打不开了"很有用。
-//! 也正因为读到的可能是残留信息,**peek 的结果不能当判据用**。
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -100,8 +109,8 @@ impl ProjectLock {
 pub struct LockGuard {
     /// 加了独占锁的文件句柄。锁挂在它身上,句柄一关锁就没了,所以要留到 drop。
     file: File,
-    /// 锁文件路径。drop 时用它清理进程内登记表,报错时用它说清是哪个文件。
-    path: PathBuf,
+    /// 进程内登记表的键(**项目身份**,不是调用方给的路径原样 —— 见 [`lock_key`])。
+    key: PathBuf,
     /// 已经写进文件的那份信息。
     info: ProjectLock,
 }
@@ -126,10 +135,10 @@ pub fn acquire(layout: &Layout, session: &str) -> Result<LockGuard> {
         .open(&path)
         .with_context(|| format!("打开锁文件失败:{}", path.display()))?;
 
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            // 有人占着。谁占着只能靠诊断信息问(见模块文档):问得出来就报出来,问不出来就说不可读。
+    match os_lock::try_lock(&file) {
+        os_lock::Outcome::Acquired => {}
+        os_lock::Outcome::Busy => {
+            // 有人占着。谁占着只能靠诊断信息问(见模块文档):问得出来就报出来,问不出来就说读不到。
             match peek(layout) {
                 Some(holder) => bail!(
                     "项目正被另一个会话写入,拿不到写锁:{} (pid {},主机 {},打开于 {})。\
@@ -141,13 +150,14 @@ pub fn acquire(layout: &Layout, session: &str) -> Result<LockGuard> {
                     path.display()
                 ),
                 None => bail!(
-                    "项目正被另一个会话写入,拿不到写锁:占用者信息不可读(Windows 上对方持有 \
-                     OS 锁期间这一段连读都不让;文件:{})。等这个会话结束再来,或只读打开该项目。",
+                    "项目正被另一个会话写入,拿不到写锁:占用者信息读不出来\
+                     (对方刚好处在写入的瞬间,或文件被截断了;锁文件:{})。\
+                     等这个会话结束再来,或只读打开该项目。",
                     path.display()
                 ),
             }
         }
-        Err(TryLockError::Error(e)) => {
+        os_lock::Outcome::Failed(e) => {
             // 不是"别人占着"而是加锁本身出错(权限、文件系统不支持……),如实报出来别装成撞锁。
             return Err(Error::new(e).context(format!("取项目写锁失败:{}", path.display())));
         }
@@ -158,16 +168,17 @@ pub fn acquire(layout: &Layout, session: &str) -> Result<LockGuard> {
     if let Err(e) = write_in_place(&mut file, &info, &path) {
         // 写不进去就等于这个凭证不可信 —— 先解锁再报错,别让调用方拿着一个
         // "锁着但文件里没有自己"的 guard 去写项目。
-        let _ = file.unlock();
+        os_lock::unlock(&file);
         return Err(e);
     }
 
-    // 登记到进程内表里:Windows 上锁区不可读,同进程的第二个会话只能靠这张表知道谁占着。
+    // 登记到进程内表里:比读文件快,而且躲开了"正巧读到对方刚截断成 0 字节"的窗口。
+    let key = lock_key(layout);
     if let Ok(mut held) = held_in_process().lock() {
-        held.insert(path.clone(), info.clone());
+        held.insert(key.clone(), info.clone());
     }
 
-    Ok(LockGuard { file, path, info })
+    Ok(LockGuard { file, key, info })
 }
 
 /// 不取锁,只读一眼当前持有者是谁(给状态展示与错误信息用)。
@@ -177,17 +188,33 @@ pub fn acquire(layout: &Layout, session: &str) -> Result<LockGuard> {
 pub fn peek(layout: &Layout) -> Option<ProjectLock> {
     let path = layout.lock_file();
 
-    // 先看进程内登记表:本进程若正持有,它就是最准的一份。
-    // (文件那一路在 Windows 上连自己都读不到;在 Unix 上也可能被别的进程硬写坏。)
-    if let Some(info) = held_in_process().lock().ok()?.get(&path) {
+    // 先看进程内登记表:比读文件快,而且躲开了"正巧读到对方刚截断成 0 字节"的窗口。
+    if let Some(info) = held_in_process().lock().ok()?.get(&lock_key(layout)) {
         return Some(info.clone());
     }
 
     // 再读文件:它能给出**本进程之外**的持有者,以及上个进程崩溃后残留的那一份。
-    // 读不出来不算错误:文件还没建、刚被上一位持有者截断成空、JSON 坏掉、
-    // 或者(Windows)对方正锁着这一段不让读 —— 都只是"这一路问不出来"。
+    // 读不出来不算错误:文件还没建、刚被上一位持有者截断成空、JSON 坏掉 ——
+    // 都只是"这一路问不出来"。
+    //
+    // 这里能读到内容,靠的是**锁加在文件之外**(见模块文档):换作锁整份文件,
+    // Windows 上这一行会稳定地失败,而它恰恰是第二个会话唯一想问的东西。
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// 进程内登记表与 [`peek`] 共用的键:**项目目录的身份**,不是调用方给的路径原样。
+///
+/// 为什么必须规范化:`projects/e2e`、`./projects/e2e`、`E:\…\projects\e2e`、`PROJECTS/E2E`
+/// 在 Windows 上是同一个目录,但作为字符串是四个不同的值。拿原样当键,"同一个项目"
+/// 在内存里就变成四个 —— 于是**自己把自己挡在门外**:第二次取锁时这张表没命中,
+/// 真去调 `try_lock`,而 OS 锁是同进程跨 handle 也生效的,直接报
+/// "项目正被另一个会话写入",那个"另一个会话"就是它自己。
+///
+/// 这不是假想:`create_project` 回的是 `projects/<id>`,`list_projects` 回的是绝对路径,
+/// 而工具描述里明确告诉 agent"两种写法都认"。
+fn lock_key(layout: &Layout) -> PathBuf {
+    crate::layout::identity(layout.root())
 }
 
 /// 把锁信息原地写进已加锁的文件。
@@ -210,18 +237,169 @@ fn write_in_place(file: &mut File, info: &ProjectLock, path: &Path) -> Result<()
     Ok(())
 }
 
-/// 本进程内正持有的锁:锁文件路径 → 锁信息。
+/// 本进程内正持有的锁:**项目身份** → 锁信息。
 ///
-/// 为什么要有这张表:Windows 上的锁是**强制**的,持锁期间连自己换个 handle 都读不了这个
-/// 文件(实测 `ERROR_LOCK_VIOLATION` 33),而"同进程里第二次取锁"恰恰是最常见的撞锁场景,
-/// 报错又最需要"是谁占着"这句话 —— 除了内存里记一份,没别的路能回答它。
-///
-/// 路径按调用方给的原样做键(不做规范化:那要碰文件系统,而这张表只是兜底)。
-/// 键对不上最多让报错退化成"占用者信息不可读",不会影响正确性 —— 互斥由 OS 锁保证。
-/// 每条路径至多一条记录:OS 锁已经保证同进程里不会有第二个 guard 拿到它。
+/// 为什么要有这张表:它比读文件快一步,而且躲开了"正巧读到对方刚 `set_len(0)`"的窗口
+/// (持有者换手时会先截断再写)。键用 [`lock_key`],不用调用方给的路径原样。
 fn held_in_process() -> &'static Mutex<HashMap<PathBuf, ProjectLock>> {
     static HELD: OnceLock<Mutex<HashMap<PathBuf, ProjectLock>>> = OnceLock::new();
     HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 加锁 / 解锁的**平台差异都收在这里**。
+///
+/// 对外只有三件事:拿到了、别人占着、加锁本身出错。调用方不需要知道
+/// Windows 锁的是文件之外的一个字节、Unix 锁的是整份文件。
+mod os_lock {
+    #[cfg(not(windows))]
+    use std::fs::File;
+    use std::io;
+
+    pub enum Outcome {
+        Acquired,
+        /// 别人占着。**这不是错误**,是"等会儿再来"。
+        Busy,
+        /// 加锁这个动作本身失败了(权限、文件系统不支持……)。
+        Failed(io::Error),
+    }
+
+    // ── Unix / 其它:标准库的 flock 就够 ──────────────────────────────
+    //
+    // `flock` 是**咨询**锁:它只约束同样来加锁的进程,文件该读照样能读。
+    // 所以"第二个会话读不到持有者"这件事在 Unix 上根本不存在,不需要特殊处理。
+    #[cfg(not(windows))]
+    pub fn try_lock(file: &File) -> Outcome {
+        use std::fs::TryLockError;
+        match file.try_lock() {
+            Ok(()) => Outcome::Acquired,
+            Err(TryLockError::WouldBlock) => Outcome::Busy,
+            Err(TryLockError::Error(e)) => Outcome::Failed(e),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn unlock(file: &File) {
+        // 失败也无所谓:句柄随 guard 一起关闭时 OS 会释放。drop 里不能 panic。
+        let _ = file.unlock();
+    }
+
+    // ── Windows:锁文件**之外**的一个字节 ────────────────────────────
+    //
+    // 为什么不用标准库的 `File::try_lock`:`LockFileEx` 是**强制**锁 ——
+    // 锁住哪一段,别的 handle 连读那一段都会被拒(实测 `ERROR_LOCK_VIOLATION` 33)。
+    // 而锁整份文件就等于把"谁占着"这句话锁得没人读得到。
+    // 锁在一个文件永远到不了的偏移上,互斥照旧而内容自由可读(实测见模块文档)。
+    #[cfg(windows)]
+    pub use windows_impl::{try_lock, unlock};
+
+    #[cfg(windows)]
+    mod windows_impl {
+        use std::ffi::c_void;
+        use std::fs::File;
+        use std::io;
+        use std::os::windows::io::AsRawHandle;
+
+        use super::Outcome;
+
+        /// 锁的落点:**远超任何真实文件长度**的一个字节。
+        ///
+        /// `LockFileEx` 明确允许锁定超出文件末尾的范围("Locking a region that goes beyond
+        /// the current end-of-file position is not an error"),所以这一格永远不会与内容相交。
+        /// 取 2^63 附近是因为它离任何可能的视频/JSON 都足够远,又不会溢出 64 位偏移。
+        const LOCK_OFFSET_LOW: u32 = 0xFFFF_FF00;
+        const LOCK_OFFSET_HIGH: u32 = 0x7FFF_FFFF;
+
+        const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
+        const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
+        /// `ERROR_LOCK_VIOLATION` —— 撞上别人持有的锁。
+        const ERROR_LOCK_VIOLATION: u32 = 33;
+
+        /// `OVERLAPPED`。这里只用得到偏移那两格与事件句柄,但要**按原样排布**:
+        /// 前两个字段由系统填写,漏了它们后面全部错位。
+        #[repr(C)]
+        struct Overlapped {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            h_event: *mut c_void,
+        }
+
+        impl Overlapped {
+            fn at_lock_offset() -> Self {
+                Self {
+                    internal: 0,
+                    internal_high: 0,
+                    offset: LOCK_OFFSET_LOW,
+                    offset_high: LOCK_OFFSET_HIGH,
+                    h_event: std::ptr::null_mut(),
+                }
+            }
+        }
+
+        // 手写 FFI 而不是拉 windows-sys:用到的只有这两个函数加一个 GetLastError,
+        // 而 windows-sys 是几千个绑定的宏生成物。代价是 OVERLAPPED 的排布得自己保证 ——
+        // 所以 `lock_and_read_content_are_independent` 那条测试是有意写死的:
+        // 排布错了它就会因为读不到内容或抢不到锁而失败。
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LockFileEx(
+                handle: *mut c_void,
+                flags: u32,
+                reserved: u32,
+                bytes_low: u32,
+                bytes_high: u32,
+                overlapped: *mut Overlapped,
+            ) -> i32;
+            fn UnlockFileEx(
+                handle: *mut c_void,
+                reserved: u32,
+                bytes_low: u32,
+                bytes_high: u32,
+                overlapped: *mut Overlapped,
+            ) -> i32;
+            fn GetLastError() -> u32;
+        }
+
+        pub fn try_lock(file: &File) -> Outcome {
+            let mut ov = Overlapped::at_lock_offset();
+            // SAFETY:句柄来自还活着的 `File`;`ov` 在整个调用期间有效且排布正确;
+            // 锁的范围是常数,与文件内容不相交。
+            let ok = unsafe {
+                LockFileEx(
+                    file.as_raw_handle() as *mut c_void,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    &mut ov,
+                )
+            };
+            if ok != 0 {
+                return Outcome::Acquired;
+            }
+            let code = unsafe { GetLastError() };
+            if code == ERROR_LOCK_VIOLATION {
+                Outcome::Busy
+            } else {
+                Outcome::Failed(io::Error::from_raw_os_error(code as i32))
+            }
+        }
+
+        pub fn unlock(file: &File) {
+            let mut ov = Overlapped::at_lock_offset();
+            // SAFETY:同 `try_lock`。失败也无所谓,见 `unlock` 的通用说明。
+            let _ = unsafe {
+                UnlockFileEx(
+                    file.as_raw_handle() as *mut c_void,
+                    0,
+                    1,
+                    0,
+                    &mut ov,
+                )
+            };
+        }
+    }
 }
 
 impl Drop for LockGuard {
@@ -232,9 +410,9 @@ impl Drop for LockGuard {
         let _ = self.file.set_len(0);
         // 之后所有错误一律忽略:drop 里不能 panic,也没人接得住错误。解锁失败最坏也只是
         // 句柄随 guard 一起关闭时由 OS 顺带释放,不影响互斥的正确性。
-        let _ = self.file.unlock();
+        os_lock::unlock(&self.file);
         if let Ok(mut held) = held_in_process().lock() {
-            held.remove(&self.path);
+            held.remove(&self.key);
         }
     }
 }
@@ -427,17 +605,50 @@ mod tests {
         let (dir, layout) = tmp_project("unreadable");
 
         let holder = acquire(&layout, "session-x").unwrap();
+
+        // 模拟"这一路问不出来":持有者正卡在 `set_len(0)` 与 `write_all` 之间,
+        // 或者文件被别的进程写坏了。**内容区不受锁保护**(锁加在文件之外,见模块文档),
+        // 所以另开一个 handle 截断它是做得到的 —— 换作锁整份文件,这一步会直接失败。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(layout.lock_file())
+            .expect("另开一个 handle 写内容区")
+            .set_len(0)
+            .expect("截断内容区");
+
+        // 进程内那张表也得清掉,否则 peek 走的是内存那一路(它比读文件快,也优先)
         held_in_process()
             .lock()
             .unwrap()
-            .remove(&layout.lock_file());
+            .remove(&lock_key(&layout));
 
         let err = acquire(&layout, "session-y").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("拿不到写锁"), "报错该说明是撞锁:{msg}");
         assert!(
-            msg.contains("占用者信息不可读"),
-            "读不到持有者时应如实说不可读,而不是编一个:{msg}"
+            msg.contains("占用者信息读不出来"),
+            "读不到持有者时应如实说读不出来,而不是编一个:{msg}"
+        );
+
+        drop(holder);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **锁加在文件之外**这件事的验收:持有锁期间,另一个句柄必须能读到文件内容。
+    ///
+    /// 这是 Windows 上的关键差异 —— `LockFileEx` 是强制锁,锁住哪一段别人就连读都读不了。
+    /// 一旦有人把实现改回"锁整份文件"(比如图省事用回 `File::try_lock`),
+    /// 这条测试会立刻红:那样第二个会话永远说不出"是谁占着"。
+    #[test]
+    fn another_handle_can_read_the_content_while_locked() {
+        let (dir, layout) = tmp_project("readable");
+
+        let holder = acquire(&layout, "session-readable").unwrap();
+        let text = std::fs::read_to_string(layout.lock_file())
+            .expect("持锁期间内容必须读得到 —— 否则第二个会话问不出是谁占着");
+        assert!(
+            text.contains("session-readable"),
+            "读到的应当是持有者信息:{text}"
         );
 
         drop(holder);

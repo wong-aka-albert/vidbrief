@@ -481,6 +481,62 @@ fn head(text: &str, limit: usize) -> String {
 }
 
 #[test]
+fn the_same_project_pointed_at_two_ways_is_still_one_project() {
+    let dir = TempDir::new("identity");
+    let video = dir.stage_video();
+    let mut client = McpClient::start(dir.path());
+    client.initialize();
+
+    let created = client.call_tool(
+        "create_project",
+        json!({"video_path": video.display().to_string(), "name": "ident"}),
+    );
+    assert!(!tool_failed(&created), "{}", first_text(&created));
+
+    // 第一次写:用**项目名**指项目
+    let first = client.call_tool(
+        "write_note",
+        json!({"project_id": "ident", "path": "02_calibrate/cross_validate.md", "md": "第一次"}),
+    );
+    assert!(!tool_failed(&first), "{}", first_text(&first));
+
+    // 从 list_projects 拿到**另一种写法**(它给的是绝对路径),再写一次。
+    // 同一个项目不该因为写法不同就被自己挡在门外。
+    let listed = client.call_tool("list_projects", json!({}));
+    let listed: Value = serde_json::from_str(&first_text(&listed)).expect("应当是 JSON");
+    let other_form = listed["projects"][0]["dir"]
+        .as_str()
+        .expect("列表里该有目录")
+        .to_string();
+    assert!(
+        Path::new(&other_form).is_absolute(),
+        "这条测试的前提是 list_projects 给的是绝对路径,实际:{other_form}"
+    );
+
+    let second = client.call_tool(
+        "write_note",
+        json!({
+            "project_id": other_form,
+            "path": "02_calibrate/cross_validate.md",
+            "md": "第二次",
+            "mode": "append",
+        }),
+    );
+    assert!(
+        !tool_failed(&second),
+        "同一个项目换个写法就被自己挡住了:{}\n(先用的 `ident`,后用 `{other_form}`)",
+        first_text(&second)
+    );
+
+    // 两次都写进去了
+    let text = std::fs::read_to_string(
+        dir.path().join("projects/ident/02_calibrate/cross_validate.md"),
+    )
+    .expect("文件该在");
+    assert!(text.contains("第一次") && text.contains("第二次"), "{text}");
+}
+
+#[test]
 fn a_second_session_cannot_write_while_the_first_holds_the_lock() {
     let dir = TempDir::new("lock");
     let video = dir.stage_video();
@@ -514,4 +570,16 @@ fn a_second_session_cannot_write_while_the_first_holds_the_lock() {
     let text = first_text(&write);
     assert!(text.contains("另一个会话"), "要说清是被谁挡下的:{text}");
     assert!(text.contains("只读"), "还要说清哪些还能用:{text}");
+
+    // **这是跨进程**读到的:两个 McpClient 是两个进程,第一个进程的 OR 锁对第二个进程生效,
+    // 而第二个进程仍然读得到"是谁占着"。这条断言就是那个平台差异处理的验收 ——
+    // 锁整份文件的话,这里只会是一句"占用者信息读不出来"。
+    assert!(
+        text.contains("mcp#"),
+        "跨进程没能报出占用者是谁(锁的范围是不是又盖住文件内容了?):{text}"
+    );
+    assert!(
+        !text.contains("读不出来"),
+        "占用者信息应当读得到:{text}"
+    );
 }

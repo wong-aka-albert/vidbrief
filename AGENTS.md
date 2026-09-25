@@ -82,7 +82,7 @@ rg 'pattern' -g '!target' -g '!*.bin'   # glob 排除
 默认放在 `./projects/`(已 gitignore)。
 
 **当前进度**:M0(数据模型 + 目录骨架 + `vidbrief init`)、M1(差帧/密集区/抽帧/转录)、
-M2(时间线视图 + 本地查看服务)、**M3(MCP stdio 服务 + 19 个工具 + 写锁)** 均已完成;
+M2(时间线视图 + 本地查看服务)、**M3(MCP stdio 服务 + 20 个工具 + 写锁)** 均已完成;
 下一步 **M4**(步 2 校准循环:对照表视图 + 在真实 agent 上联调)。详见 [`docs/devlog/PLAN.md`](docs/devlog/PLAN.md)。
 
 **两条实现层面的硬约束**(踩过就知道疼):

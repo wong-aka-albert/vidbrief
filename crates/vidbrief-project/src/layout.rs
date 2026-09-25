@@ -232,6 +232,35 @@ pub fn video_rel() -> RelPath {
     RelPath::new(VIDEO_REL).expect("VIDEO_REL 是硬编码的合法常量")
 }
 
+/// 一个项目的**身份**:同一个项目无论用哪种写法指过来,都该得到同一个值。
+///
+/// 拿它当进程内 map 的键。为什么不能用调用方给的路径原样:
+/// `projects/e2e`、`./projects/e2e`、`E:\…\projects\e2e`、`PROJECTS/E2E`
+/// 在 Windows 上是**同一个目录**,但作为字符串是四个不同的值 ——
+/// 拿原样当键,"同一个项目"在内存里就成了四个,轻则重复登记,重则**自己把自己锁在门外**
+/// (第二个键没命中缓存,真去加锁,而 OS 锁是同进程跨 handle 也生效的)。
+///
+/// 两步都不能省:
+/// 1. `canonicalize` 解析 `.` / `..` / 相对路径 / 软链接,并在 Windows 上取回**磁盘上的真实大小写**;
+/// 2. [`simplify_path`](crate::source::simplify_path) 剥掉它顺手加上的 `\\?\` 前缀 ——
+///    否则 `\\?\E:\a` 与 `E:\a` 又成了两个值,等于白做。
+///
+/// 目录还不存在时(建项目**之前**)`canonicalize` 会失败,那时退回原样:
+/// 反正这一刻也还没有别人认得这个项目。
+pub fn identity(dir: &Path) -> PathBuf {
+    match dir.canonicalize() {
+        Ok(real) => crate::source::simplify_path(&real),
+        Err(_) => dir.to_path_buf(),
+    }
+}
+
+impl Layout {
+    /// 这个项目的身份。见 [`identity`]。
+    pub fn identity(&self) -> PathBuf {
+        identity(&self.root)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
