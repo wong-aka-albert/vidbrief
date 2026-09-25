@@ -1,0 +1,17 @@
+[package]
+name = "vidbrief-ops"
+version.workspace = true
+edition.workspace = true
+description = "项目上的动作:建项目 / 跑一步 / 取材料 / 存结论 —— CLI 与 MCP 共用的一层"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+vidbrief-asr.workspace = true
+vidbrief-core.workspace = true
+vidbrief-project.workspace = true
+vidbrief-viz.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

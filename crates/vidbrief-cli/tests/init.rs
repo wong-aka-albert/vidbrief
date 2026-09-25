@@ -361,13 +361,22 @@ fn falling_back_to_copy_always_explains_itself() {
 }
 
 #[test]
-fn unimplemented_commands_exit_two_and_say_so() {
-    for cmd in ["mcp"] {
-        let out = run_in(&std::env::temp_dir(), &[cmd]);
-        assert_eq!(out.status.code(), Some(2), "{cmd} 应以退出码 2 结束");
-        let err = stderr(&out);
-        assert!(err.contains("尚未实现"), "{cmd}:{err}");
-        assert!(err.contains("DESIGN.md"), "{cmd} 应指向设计文档:{err}");
+fn every_documented_subcommand_is_recognised() {
+    // `mcp` 曾经在这里被断言"未实现、退出码 2"。它现在是**真能用的**子命令,
+    // 所以那条断言换成了端到端握手(见 tests/mcp.rs)。这里只守"没有未知子命令"。
+    let cwd = std::env::temp_dir();
+    for cmd in ["init", "preprocess", "status", "ui", "mcp"] {
+        let out = run_in(&cwd, &[cmd, "-h"]);
+        assert!(
+            out.status.success(),
+            "{cmd} -h 应当成功(说明这个子命令存在):{}",
+            stderr(&out)
+        );
+        assert!(
+            !stderr(&out).contains("未知子命令"),
+            "{cmd} 被当成未知子命令了:{}",
+            stderr(&out)
+        );
     }
 }
 

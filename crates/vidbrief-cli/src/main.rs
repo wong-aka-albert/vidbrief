@@ -1,19 +1,17 @@
 //! `vidbrief` —— 独立命令行入口(脱离 agent 也能测试与使用)。
 //!
-//! 子命令见 `docs/DESIGN.md` §10.5。当前已实现 `init`,其余在各里程碑补齐。
+//! 子命令见 `docs/DESIGN.md` §10.5。**这里只做三件事**:解析参数、调 `vidbrief-ops`、
+//! 把结果说给人听。任何"该做什么"的判断都属于动作层 —— 否则 MCP 那边就得再写一遍。
+//!
+//! 唯一的例外是 `mcp`:它把进程交给 `vidbrief-mcp` 的 stdio 服务,之后 stdout 归协议所有。
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use vidbrief_asr::transcribe_project;
-use vidbrief_core::{
-    CurveOptions, ShotQuality, analyze, extract_shots, plan_shots,
-};
-use vidbrief_project::{
-    Health, Layout, Materialized, Project, ProjectId, RegionParams, SourceLink, VideoMeta,
-    check_source_link, human_size, materialize, simplify_path, verify_content, video_rel_for,
-};
+use vidbrief_ops::{OpenProject, PreprocessOptions, Stage, TranscriptOutcome};
+use vidbrief_project::{SourceLink, human_size};
 
 const USAGE: &str = "\
 vidbrief —— 视频图文总结 MCP 工具集
@@ -25,7 +23,7 @@ Commands:
   preprocess <project>      步 1:差帧图 / 密集区 / 截图 / 转录
   status <project>          查看项目状态与健康检查
   ui <project>              渲染时间线视图 + 起本地服务 + 打开浏览器
-  mcp [--stdio]             启动 MCP 服务
+  mcp [--stdio]             启动 MCP 服务(stdio 传输,供 agent 接入)
   help                      显示本条用法
 
 Run `vidbrief <command> -h` for the options of a command.
@@ -97,6 +95,10 @@ Options:
   dense_regions.json  变化密集区
   shots.json + shots/ 预筛选截图
   transcript.json     + .srt/.txt/.vtt(源视频没有音轨时跳过)
+
+说明:
+  - 会先取项目写锁;若另一个会话正开着这个项目,这里会直接拒绝而不是硬写
+    (`docs/DESIGN.md` §4.7)。查看视图不受影响。
 ";
 
 const UI_USAGE: &str = "\
@@ -116,6 +118,22 @@ Options:
   - 起一个绑在 127.0.0.1 的静态服务把项目目录发布出去 —— **必须有它浏览器才能 seek**
     (`file://` 打开时对本地媒体有跨域限制,时间轴点了不跳)
   - 端口由操作系统分配,不会和别的东西撞车;只监听回环地址,局域网访问不到
+  - 不取写锁:它写的是**派生视图**不是材料,两个会话同时渲染也不会坏事
+";
+
+const MCP_USAGE: &str = "\
+vidbrief mcp —— 启动 MCP 服务
+
+Usage: vidbrief mcp [--stdio]
+
+Options:
+      --stdio              用 stdio 传输(默认,也是唯一已实现的)
+  -h, --help               显示本条用法
+
+说明:
+  - **这是给 agent 用的入口**:客户端把本进程拉起来,用 stdin/stdout 走 JSON-RPC
+  - stdout 从此归协议所有 —— 本命令不会往 stdout 打印任何东西(诊断都在 stderr)
+  - 工具清单见 docs/DESIGN.md §11;提示模板 P1–P5 见 §10.4
 ";
 
 fn main() -> ExitCode {
@@ -131,13 +149,10 @@ fn main() -> ExitCode {
         "status" => cmd_status(rest),
         "preprocess" => cmd_preprocess(rest),
         "ui" => cmd_ui(rest),
+        "mcp" => cmd_mcp(rest),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
             Ok(())
-        }
-        other @ "mcp" => {
-            eprintln!("`vidbrief {other}` 尚未实现(见 docs/DESIGN.md §13 里程碑)");
-            return ExitCode::from(2);
         }
         other => {
             eprintln!("未知子命令:`{other}`\n");
@@ -154,6 +169,51 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ── 通用的参数解析小工具 ─────────────────────────────────────────────
+
+/// 看起来像选项(以 `-` 开头且不止一个字符)。单独的 `-` 视为普通参数。
+fn is_option(arg: &str) -> bool {
+    arg.starts_with('-') && arg.len() > 1
+}
+
+/// 取选项的值:`-k=v` / `--k=v` 用等号右边,`-k v` / `--k v` 吃下一个参数。
+fn take_value(args: &[String], i: &mut usize, inline: Option<String>, what: &str) -> Result<String> {
+    if let Some(value) = inline {
+        return Ok(value);
+    }
+    *i += 1;
+    args.get(*i)
+        .cloned()
+        .with_context(|| format!("{what} 后面缺少取值"))
+}
+
+/// 把 `--k=v` 拆成 `("--k", Some("v"))`。
+fn split_option(arg: &str) -> (&str, Option<String>) {
+    match arg.split_once('=') {
+        Some((k, v)) if is_option(k) => (k, Some(v.to_string())),
+        _ => (arg, None),
+    }
+}
+
+/// 收集位置参数(最多一个),顺便把不认识的选项骂回去。
+fn one_positional(args: &[String], cmd: &str, what: &str) -> Result<String> {
+    let mut found: Option<String> = None;
+    for arg in args {
+        if is_option(arg) {
+            bail!("{cmd} 不认识参数 `{arg}`(见 `vidbrief {cmd} -h`)");
+        }
+        if found.is_some() {
+            bail!("{cmd} 只接受一个{what},多余的参数:`{arg}`");
+        }
+        found = Some(arg.clone());
+    }
+    found.with_context(|| format!("用法:vidbrief {cmd} <{what}> [options](见 `vidbrief {cmd} -h`)"))
+}
+
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--help")
 }
 
 // ── init ─────────────────────────────────────────────────────────────
@@ -175,12 +235,7 @@ fn parse_init(args: &[String]) -> Result<InitArgs> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        // 支持 `--k=v` / `-k=v` 的等号写法(短选项不加等号,如 `-p x`)
-        let (key, inline) = match arg.split_once('=') {
-            Some((k, v)) if is_option(k) => (k, Some(v.to_string())),
-            _ => (arg.as_str(), None),
-        };
-
+        let (key, inline) = split_option(arg);
         match key {
             "-n" | "--name" => name = Some(take_value(args, &mut i, inline, key)?),
             "-t" | "--title" => title = Some(take_value(args, &mut i, inline, key)?),
@@ -209,132 +264,42 @@ fn parse_init(args: &[String]) -> Result<InitArgs> {
     })
 }
 
-/// 看起来像选项(以 `-` 开头且不止一个字符)。单独的 `-` 视为普通参数。
-fn is_option(arg: &str) -> bool {
-    arg.starts_with('-') && arg.len() > 1
-}
-
-/// 取选项的值:`-k=v` / `--k=v` 用等号右边,`-k v` / `--k v` 吃下一个参数。
-fn take_value(args: &[String], i: &mut usize, inline: Option<String>, what: &str) -> Result<String> {
-    if let Some(value) = inline {
-        return Ok(value);
-    }
-    *i += 1;
-    args.get(*i)
-        .cloned()
-        .with_context(|| format!("{what} 后面缺少取值"))
-}
-
-/// 从目录路径的最后一段推导 id(`/tmp/vb/s4` → `s4`)。
-///
-/// 路径以 `.` / `..` 结尾,或末段净化不出 ASCII 时返回 `None`(交给下一优先级)。
-fn id_from_dir(dir: &Path) -> Option<String> {
-    ProjectId::from_video_stem(dir.file_name()?.to_str()?)
-}
-
 fn cmd_init(args: &[String]) -> Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    if wants_help(args) {
         print!("{INIT_USAGE}");
         return Ok(());
     }
     let parsed = parse_init(args)?;
 
-    let video = parsed
-        .video
-        .canonicalize()
-        .with_context(|| format!("找不到视频文件:{}", parsed.video.display()))?;
-    if !video.is_file() {
-        bail!("不是文件:{}", video.display());
-    }
-
-    let stem = video
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
-
-    // 项目 id 的优先级:--name → -p 的最后一段 → 视频文件名净化
-    let base = match &parsed.name {
-        Some(raw) => ProjectId::from_video_stem(raw)
-            .with_context(|| format!("--name `{raw}` 净化后为空,请用一个 ASCII 名字"))?,
-        None => {
-            let from_dir = parsed.project_dir.as_deref().and_then(id_from_dir);
-            from_dir
-                .or_else(|| ProjectId::from_video_stem(&stem))
-                .with_context(|| {
-                    let source = match &parsed.project_dir {
-                        Some(dir) => format!("文件名 `{stem}` 或目录名 `{}`", dir.display()),
-                        None => format!("文件名 `{stem}`"),
-                    };
-                    format!("无法从{source}推导项目 id(可能是中文名),请用 --name 指定一个 ASCII 名字")
-                })?
-        }
-    };
-
-    // 目录:显式 -p 就用它本身;否则 projects/<id>,冲突时加后缀
-    let (id, layout) = match &parsed.project_dir {
-        Some(dir) => (ProjectId::new(base)?, Layout::new(dir)),
-        None => {
-            let root = Path::new(vidbrief_project::layout::PROJECTS_DIR);
-            let id = ProjectId::dedupe(&base, |candidate| root.join(candidate).exists());
-            let id = ProjectId::new(id)?;
-            let layout = Layout::for_project(root, id.as_ref());
-            (id, layout)
-        }
-    };
-
-    if layout.root().exists() {
-        bail!("项目目录已存在,拒绝覆盖:{}", layout.root().display());
-    }
-    layout.create_dirs()?;
-
-    // 把源视频放进项目(硬链接 → 软链接 → 复制,按代价从低到高)
-    let rel = video_rel_for(&video);
-    let dst = layout.rel(rel.as_str());
-
-    // 动手**之前**先预判:要复制几百 MB 的话,别让用户干等到结束才知道在等什么
-    if let Ok(placement) = vidbrief_project::plan(&video, &dst) {
-        if placement.will_copy_across_volumes() {
+    // 跨卷复制要好几秒,**在动手之前**先说出来
+    let mut on_notice = |notice: vidbrief_ops::Notice| match notice {
+        vidbrief_ops::Notice::CrossVolumeCopy { size_bytes, hint } => {
             println!(
                 "  预判     素材与项目不在同一个卷(盘),硬链接用不了 —— 即将复制 {}",
-                vidbrief_project::human_size(placement.size_bytes)
+                human_size(size_bytes)
             );
-            if let Some(hint) = same_volume_hint(&video, id.as_ref()) {
+            if let Some(hint) = hint {
                 println!("           想省下这份空间,把项目建到素材同卷:{hint}");
             }
         }
-    }
+    };
 
-    let placed: Materialized = materialize(&video, &dst)?;
+    let created = vidbrief_ops::create(
+        &vidbrief_ops::CreateOptions {
+            video: parsed.video,
+            name: parsed.name,
+            title: parsed.title,
+            project_dir: parsed.project_dir,
+        },
+        &mut on_notice,
+    )?;
 
-    // 探测的是项目里那一份(符号链接的情况会跟随到原文件)
-    let meta = vidbrief_core::probe(&dst, rel.clone())?;
-    meta.save(&layout.video_meta())?;
-
-    let title = parsed.title.clone().unwrap_or_else(|| stem.clone());
-    // `canonicalize` 在 Windows 上会带上 `\\?\` 前缀;写进 project.json 之前去掉,
-    // 否则这个字段对人就没法看了
-    let original = simplify_path(&video);
-    let mut project = Project::new(
-        id.clone(),
-        title,
-        rel,
-        original.display().to_string(),
-        placed.link,
-    );
-    project.save(&layout.project_json())?;
-
-    print_summary(&layout, &project, &meta, &original, &placed.fallbacks);
+    print_summary(&created);
     Ok(())
 }
 
-fn print_summary(
-    layout: &Layout,
-    project: &Project,
-    meta: &VideoMeta,
-    original: &Path,
-    fallbacks: &[String],
-) {
+fn print_summary(created: &vidbrief_ops::Created) {
+    let meta = &created.meta;
     let fps = match meta.fps {
         Some(fps) => format!(" @ {fps:.3} fps"),
         None => String::new(),
@@ -345,28 +310,31 @@ fn print_summary(
     };
     let codec = meta.codec.as_deref().unwrap_or("编码未知");
 
-    println!("项目已建立:{}", project.id);
-    println!("  目录     {}", display_dir(layout.root()));
-    println!("  入口     {}", layout.project_json().display());
+    println!("项目已建立:{}", created.project.id);
+    println!("  目录     {}", display_dir(created.layout.root()));
+    println!("  入口     {}", created.layout.project_json().display());
     println!(
         "  源视频   {} → {}",
-        original.display(),
-        project.source.path
+        created.original.display(),
+        created.project.source.path
     );
-    println!("  引入     {}", link_note(project.source.link, meta.size_bytes));
-    for reason in fallbacks {
+    println!(
+        "  引入     {}",
+        link_note(created.project.source.link, meta.size_bytes)
+    );
+    for reason in &created.fallbacks {
         println!("           └ {reason}");
     }
     println!("  时长     {:.1}s  {size}{fps}  {codec}", meta.duration);
     println!("  指纹     sha256:{}", meta.sha256);
-    if !project.source.link.is_self_contained() {
+    if !created.project.source.link.is_self_contained() {
         println!("  警告     项目**不**自包含:源文件一旦移动或删除即失效,打包时还可能变成坏链接");
     }
     println!();
     println!("下一步:");
     println!(
         "  vidbrief preprocess {}    # 步 1:差帧图 / 转录 / 预筛选截图",
-        layout.root().display()
+        created.layout.root().display()
     );
 }
 
@@ -377,97 +345,31 @@ fn link_note(link: SourceLink, size_bytes: u64) -> String {
     link.describe(size_bytes)
 }
 
-/// 给出"把项目建到素材同卷"的具体命令,而不是只说一句"建议同卷"。
-fn same_volume_hint(video: &Path, id: &str) -> Option<String> {
-    let dir = simplify_path(video).parent()?.join("vidbrief").join(id);
-    Some(format!("vidbrief init <同一个视频> -p {}", dir.display()))
-}
-
-// ── ui ───────────────────────────────────────────────────────────────
-
-fn cmd_ui(args: &[String]) -> Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{UI_USAGE}");
-        return Ok(());
-    }
-    let mut project: Option<String> = None;
-    let mut open_browser = true;
-    for arg in args {
-        match arg.as_str() {
-            "--no-open" => open_browser = false,
-            other if is_option(other) => bail!("ui 不认识参数 `{other}`(见 `vidbrief ui -h`)"),
-            _ => {
-                if project.is_some() {
-                    bail!("ui 只接受一个项目,多余的参数:`{arg}`");
-                }
-                project = Some(arg.clone());
-            }
-        }
-    }
-    let name = project.context("用法:vidbrief ui <project> [options]")?;
-    let layout = resolve_project(&name)?;
-    let id = Project::load(&layout.project_json())?.id.to_string();
-
-    // 渲染 → 挂载 → (可选)打开浏览器
-    let path = vidbrief_viz::render_timeline(&layout)?;
-    vidbrief_viz::mount(&id, layout.root())?;
-    let url = vidbrief_viz::url_for(&id, vidbrief_project::layout::PREPROCESS_TIMELINE_FILE)?;
-
-    println!("视图     {}", path.display());
-    println!("服务     {url}");
-    if open_browser {
-        if let Err(e) = vidbrief_viz::browser::open(&url) {
-            eprintln!("提示:{e}");
-        }
-    } else {
-        println!("         (--no-open:请手动打开上面的地址)");
-    }
-    println!();
-    println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。");
-
-    // 服务是后台线程,主线程不能立刻退出 —— 否则服务跟着进程一起没了
-    println!();
-    println!("按 Ctrl+C 结束(这个进程要一直活着,服务才能响应浏览器)。");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
-}
-
 // ── preprocess ───────────────────────────────────────────────────────
 
-struct PreprocessArgs {
-    project: String,
-    fps: f64,
-    width: u32,
-    transcribe: bool,
-    shots: bool,
-}
-
-fn parse_preprocess(args: &[String]) -> Result<PreprocessArgs> {
+fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
     let mut project: Option<String> = None;
-    let mut fps = vidbrief_project::curve::DEFAULT_FPS_SAMPLED;
-    let mut width = vidbrief_project::curve::DEFAULT_WIDTH;
-    let mut transcribe = true;
-    let mut shots = true;
+    let mut opts = PreprocessOptions::default();
 
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        let (key, inline) = match arg.split_once('=') {
-            Some((k, v)) if is_option(k) => (k, Some(v.to_string())),
-            _ => (arg.as_str(), None),
-        };
+        let (key, inline) = split_option(arg);
         match key {
             "-f" | "--fps" => {
                 let raw = take_value(args, &mut i, inline, key)?;
-                fps = raw.parse().with_context(|| format!("--fps 不是数字:`{raw}`"))?;
+                opts.fps = raw
+                    .parse()
+                    .with_context(|| format!("--fps 不是数字:`{raw}`"))?;
             }
             "-w" | "--width" => {
                 let raw = take_value(args, &mut i, inline, key)?;
-                width = raw.parse().with_context(|| format!("--width 不是整数:`{raw}`"))?;
+                opts.width = raw
+                    .parse()
+                    .with_context(|| format!("--width 不是整数:`{raw}`"))?;
             }
-            "--no-transcribe" => transcribe = false,
-            "--no-shots" => shots = false,
+            "--no-transcribe" => opts.transcribe = false,
+            "--no-shots" => opts.shots = false,
             other if is_option(other) => {
                 bail!("preprocess 不认识参数 `{other}`(见 `vidbrief preprocess -h`)")
             }
@@ -481,153 +383,109 @@ fn parse_preprocess(args: &[String]) -> Result<PreprocessArgs> {
         i += 1;
     }
 
-    if fps <= 0.0 || !fps.is_finite() {
-        bail!("--fps 必须为正数,实际 {fps}");
+    if opts.fps <= 0.0 || !opts.fps.is_finite() {
+        bail!("--fps 必须为正数,实际 {}", opts.fps);
     }
-    if width == 0 {
+    if opts.width == 0 {
         bail!("--width 必须为正数");
     }
 
-    Ok(PreprocessArgs {
-        project: project.context("用法:vidbrief preprocess <project> [options]")?,
-        fps,
-        width,
-        transcribe,
-        shots,
-    })
+    let project =
+        project.context("用法:vidbrief preprocess <project> [options]")?;
+    Ok((project, opts))
 }
 
 fn cmd_preprocess(args: &[String]) -> Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    if wants_help(args) {
         print!("{PREPROCESS_USAGE}");
         return Ok(());
     }
-    let parsed = parse_preprocess(args)?;
-    let layout = resolve_project(&parsed.project)?;
-    let mut project = Project::load(&layout.project_json())?;
-    let meta = VideoMeta::load(&layout.video_meta())?;
-    let video = layout.rel(project.source.path.as_str());
-    if !video.is_file() {
-        bail!(
-            "项目里的源视频不见了:{}\n先跑 `vidbrief status {}` 看看",
-            video.display(),
-            parsed.project
-        );
-    }
+    let (name, opts) = parse_preprocess(args)?;
+    let mut opened = OpenProject::open(&name)?;
 
-    println!("项目     {}", project.id);
-    println!("源视频   {}  ({:.1}s)", project.source.path, meta.duration);
+    // 取写锁:另一个会话正开着这个项目时就**别硬写**(DESIGN §4.7)。
+    // 命令结束(或出错)时 guard 随作用域析构,锁自动释放。
+    let _lock = vidbrief_project::acquire(opened.layout(), "cli")?;
+
+    println!("项目     {}", opened.id());
+    println!(
+        "源视频   {}  ({:.1}s)",
+        opened.project().source.path,
+        opened.meta().duration
+    );
     println!();
 
-    // ── 视觉部分:差帧图 → 密集区 → 截图 ────────────────────────────
-    let opts = CurveOptions {
-        fps: parsed.fps,
-        width: parsed.width,
-        ..CurveOptions::for_video(&meta)
+    let mut last_print = Instant::now();
+    let mut on_progress = |stage: Stage| match stage {
+        Stage::Analyzed(a) => {
+            println!(
+                "差帧图   {} 个采样点({}fps),分数最高 {:.3}",
+                a.curve_points, a.fps, a.max_score
+            );
+            println!(
+                "密集区   {} 个  阈值 {:.3}(中位数 {:.3} × {} 与下限 {} 取大)",
+                a.regions, a.mass_threshold, a.mass_median, a.mass_k, a.mass_floor
+            );
+        }
+        Stage::Shot { done, total } => {
+            // 抽帧是有 IO 的,长视频上几十张要好几秒 —— 给点进度别让人以为卡住了
+            if done == total || last_print.elapsed().as_millis() > 300 {
+                eprint!("\r  抽帧     {done}/{total}");
+                last_print = Instant::now();
+            }
+        }
     };
-    let params = RegionParams::default();
 
-    let mut last_print = std::time::Instant::now();
-    let (curve, regions) = analyze(&video, &meta, opts, params)?;
-    curve.save(&layout.change_curve())?;
-    regions.save(&layout.dense_regions())?;
-    println!(
-        "差帧图   {} 个采样点({}fps),分数最高 {:.3}",
-        curve.changes.len(),
-        opts.fps,
-        curve.max_score()
-    );
-    println!(
-        "密集区   {} 个  阈值 {:.3}(中位数 {:.3} × {} 与下限 {} 取大)",
-        regions.regions.len(),
-        regions.stats.mass_threshold,
-        regions.stats.mass_median,
-        regions.params.mass_k,
-        regions.params.mass_floor
-    );
+    let report = vidbrief_ops::preprocess(&mut opened, &opts, &mut on_progress)?;
+    if opts.shots {
+        eprintln!();
+    }
 
-    let planned = plan_shots(&regions, &curve);
-    if parsed.shots {
-        let (shots, skipped) = extract_shots(
-            &video,
-            &layout,
-            meta.duration,
-            &planned,
-            ShotQuality::default(),
-            &mut |done, total| {
-                // 抽帧是有 IO 的,长视频上几十张要好几秒 —— 给点进度别让人以为卡住了
-                if done == total || last_print.elapsed().as_millis() > 300 {
-                    eprint!("\r  抽帧     {done}/{total}");
-                    last_print = std::time::Instant::now();
+    match &report.shots {
+        Some(count) => {
+            println!("截图     {count} 张 → {}", opened.layout().shots_dir().display());
+            if !report.shots_skipped.is_empty() {
+                println!("         其中 {} 张失败(已跳过):", report.shots_skipped.len());
+                for item in report.shots_skipped.iter().take(3) {
+                    println!("           t={:.1}s  {}", item.t, item.reason);
                 }
-            },
-        )?;
-        eprintln!();
-        shots.save(&layout.shots_json())?;
-        println!("截图     {} 张 → {}", shots.shots.len(), layout.shots_dir().display());
-        if !skipped.is_empty() {
-            println!("         其中 {} 张失败(已跳过):", skipped.len());
-            for (t, why) in skipped.iter().take(3) {
-                println!("           t={t:.1}s  {why}");
             }
         }
-    } else {
-        println!("截图     已跳过(--no-shots)");
+        None => println!("截图     已跳过(--no-shots)"),
     }
 
-    // ── 转录 ─────────────────────────────────────────────────────────
-    //
-    // 转录失败**不算这一步完成**。差帧图与截图确实已经落盘了(所以不该整体回滚),
-    // 但 `progress.preprocess.done` 是给 `status` 和 agent 看的,标错了就是骗人。
-    // 想只要视觉部分,请显式用 --no-transcribe —— "我知道我在跳过"是用户的选择,
-    // 不该由工具替他把失败说成跳过。
-    let mut transcribe_ok = true;
-    if parsed.transcribe {
-        match transcribe_project(&video, &layout, &meta) {
-            Ok(Some(t)) => println!(
-                "转录     {} 段,模型 {} ({})",
-                t.segments.len(),
-                t.model,
-                t.language
-            ),
-            // 没有音轨是**合法**的空结果,不算失败
-            Ok(None) => println!("转录     源视频没有音轨,跳过"),
-            Err(e) => {
-                eprintln!("转录     失败:{e:#}");
-                transcribe_ok = false;
-            }
+    match &report.transcript {
+        TranscriptOutcome::Done {
+            segments,
+            model,
+            language,
+            ..
+        } => println!("转录     {segments} 段,模型 {model} ({language})"),
+        // 没有音轨是**合法**的空结果,不算失败
+        TranscriptOutcome::NoAudio => println!("转录     源视频没有音轨,跳过"),
+        TranscriptOutcome::Skipped => println!("转录     已跳过(--no-transcribe)"),
+        TranscriptOutcome::Failed { error } => {
+            eprintln!("转录     失败:{error}");
+            // 差帧图与截图保留,但进度不标完成 —— 重跑一次就能补上
+            eprintln!();
+            eprintln!("差帧图与截图已保留;转录未完成,**未**标记步 1 为完成。");
+            eprintln!("修复后重跑:`vidbrief preprocess {name}`");
+            bail!("步 1 未完成:转录失败");
         }
-    } else {
-        println!("转录     已跳过(--no-transcribe)");
     }
 
-    if transcribe_ok {
-        project.progress.preprocess.mark_done();
-        project.save(&layout.project_json())?;
-    } else {
-        // 差帧图与截图保留,但进度不标完成 —— 重跑一次就能补上
-        eprintln!();
-        eprintln!("差帧图与截图已保留;转录未完成,**未**标记步 1 为完成。");
-        eprintln!("修复后重跑:`vidbrief preprocess {}`", parsed.project);
-        bail!("步 1 未完成:转录失败");
-    }
-
-    // ── 视图 ─────────────────────────────────────────────────────────
-    //
-    // DESIGN §5.3:步 1 完成即产出可视化。**渲染失败不算步 1 失败** ——
-    // 材料已经全部落盘,视图只是给人看的界面,没渲染出来可以再跑 `vidbrief ui`。
-    match vidbrief_viz::render_timeline(&layout) {
-        Ok(path) => println!("视图     {}", path.display()),
-        Err(e) => eprintln!("视图     渲染失败(材料不受影响):{e:#}"),
+    match (&report.timeline, &report.timeline_error) {
+        (Some(path), _) => println!("视图     {}", path.display()),
+        (None, Some(error)) => eprintln!("视图     渲染失败(材料不受影响):{error}"),
+        (None, None) => {}
     }
 
     println!();
-    println!(
-        "完成。下一步:`vidbrief ui {}` 打开时间线,或让 agent 看图校准",
-        parsed.project
-    );
+    println!("完成。下一步:`vidbrief ui {name}` 打开时间线,或让 agent 看图校准");
     Ok(())
 }
+
+// ── status ───────────────────────────────────────────────────────────
 
 struct StatusArgs {
     project: String,
@@ -649,42 +507,29 @@ fn parse_status(args: &[String]) -> Result<StatusArgs> {
             }
         }
     }
-    let project = project.context("用法:vidbrief status <project> [--verify](见 `vidbrief status -h`)")?;
+    let project =
+        project.context("用法:vidbrief status <project> [--verify](见 `vidbrief status -h`)")?;
     Ok(StatusArgs { project, verify })
 }
 
-/// 把命令行给的 `<project>` 解析成项目目录。
-///
-/// 两种写法都认:直接给目录(`projects/demo`、`E:\temp\vb_test`),或只给项目名(`demo` —— 到
-/// `projects/` 下找)。
-fn resolve_project(arg: &str) -> Result<Layout> {
-    let direct = Path::new(arg);
-    if direct.join(vidbrief_project::layout::PROJECT_FILE).is_file() {
-        return Ok(Layout::new(direct));
-    }
-    let under = Path::new(vidbrief_project::layout::PROJECTS_DIR).join(arg);
-    if under.join(vidbrief_project::layout::PROJECT_FILE).is_file() {
-        return Ok(Layout::new(under));
-    }
-    bail!(
-        "找不到项目:`{arg}` —— 它既不是含 {} 的目录,也不是 projects/ 下的项目名",
-        vidbrief_project::layout::PROJECT_FILE
-    )
-}
-
 fn cmd_status(args: &[String]) -> Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    if wants_help(args) {
         print!("{STATUS_USAGE}");
         return Ok(());
     }
     let parsed = parse_status(args)?;
-    let layout = resolve_project(&parsed.project)?;
-    let project = Project::load(&layout.project_json())?;
-    let meta = VideoMeta::load(&layout.video_meta())?;
+    let report = vidbrief_ops::inspect(
+        &parsed.project,
+        &vidbrief_ops::InspectOptions {
+            verify: parsed.verify,
+        },
+    )?;
 
+    let project = &report.project;
+    let meta = &report.meta;
     println!("项目     {}", project.id);
     println!("  名称   {}", project.name);
-    println!("  目录   {}", display_dir(layout.root()));
+    println!("  目录   {}", display_dir(&report.dir));
     println!("  建立   {}", project.created_at);
     println!("  格式   schema v{} / rev {}", project.schema_version, project.rev);
     if let Some(glossary) = &project.glossary {
@@ -694,13 +539,19 @@ fn cmd_status(args: &[String]) -> Result<()> {
     println!();
     println!("源视频   {}", project.source.path);
     println!("  原始   {}", project.source.original);
-    println!("  引入   {}", project.source.link.describe(meta.size_bytes));
+    println!(
+        "  引入   {}",
+        project.source.link.describe(meta.size_bytes)
+    );
     println!("  大小   {}", human_size(meta.size_bytes));
     let res = match (meta.width, meta.height) {
         (Some(w), Some(h)) => format!("{w}x{h}"),
         _ => "未知".to_string(),
     };
-    let fps = meta.fps.map(|f| format!("{f:.3}")).unwrap_or_else(|| "?".into());
+    let fps = meta
+        .fps
+        .map(|f| format!("{f:.3}"))
+        .unwrap_or_else(|| "?".into());
     println!(
         "  规格   {:.1}s  {res} @ {fps} fps  {}",
         meta.duration,
@@ -708,41 +559,43 @@ fn cmd_status(args: &[String]) -> Result<()> {
     );
     println!("  指纹   sha256:{}", meta.sha256);
 
-    // 健康检查只跑一次,打印与退出码共用同一个结论
-    // (verify 要读整个视频,重复跑是实打实的浪费)
-    let link_health = check_source_link(&project, &layout);
-    let content_health = if parsed.verify {
-        Some(verify_content(&project, &meta, &layout)?)
-    } else {
-        None
-    };
-
     println!();
     println!("健康");
-    print_health(&link_health);
-    if let Some(h) = &content_health {
-        print_health(h);
+    print_health(&report.link_health);
+    if let Some(health) = &report.content_health {
+        print_health(health);
     }
 
     println!();
     println!("进度");
     let p = &project.progress;
-    println!("  ① 前处理   {}", step_text(p.preprocess.done, p.preprocess.at.map(|t| t.to_string())));
+    println!(
+        "  ① 前处理   {}",
+        step_text(p.preprocess.done, p.preprocess.at.map(|t| t.to_string()))
+    );
     println!("  ② 校准     {} 轮", p.calibrate.rounds);
-    println!("  ③ 总结     {}", step_text(p.summarize.done, p.summarize.at.map(|t| t.to_string())));
-    println!("  ④ 报告     {}", step_text(p.report.done, p.report.at.map(|t| t.to_string())));
+    println!(
+        "  ③ 总结     {}",
+        step_text(p.summarize.done, p.summarize.at.map(|t| t.to_string()))
+    );
+    println!(
+        "  ④ 报告     {}",
+        step_text(p.report.done, p.report.at.map(|t| t.to_string()))
+    );
+
+    println!();
+    println!("材料");
+    print_materials(&report.materials);
 
     // 有硬伤时用非零退出码,方便脚本和 agent 判断
-    let unhealthy = link_health.is_problem()
-        || content_health.as_ref().is_some_and(Health::is_problem);
-    if unhealthy {
+    if report.unhealthy() {
         bail!("项目存在问题(见上面标 ✗ 的行)");
     }
     Ok(())
 }
 
-fn print_health(health: &Health) {
-    let mut lines = health.message().lines();
+fn print_health(health: &vidbrief_ops::HealthView) {
+    let mut lines = health.message.lines();
     if let Some(first) = lines.next() {
         println!("  {} {first}", health.marker());
     }
@@ -750,6 +603,37 @@ fn print_health(health: &Health) {
     for extra in lines {
         println!("    {extra}");
     }
+}
+
+/// 材料盘点。**给人看的是一眼能看出缺什么**,所以"没做"也要列出来。
+fn print_materials(m: &vidbrief_ops::Materials) {
+    let count = |v: Option<usize>| match v {
+        Some(n) => n.to_string(),
+        None => "—".to_string(),
+    };
+    println!("  差帧图   {} 个采样点", count(m.curve_points));
+    println!("  密集区   {} 个", count(m.regions));
+    match m.shots {
+        Some(s) => println!(
+            "  截图     {} 张(留用 {},未校准 {},待裁决 {})",
+            s.total, s.keep, s.unchecked, s.needing_review
+        ),
+        None => println!("  截图     —"),
+    }
+    println!("  转录     {} 段", count(m.transcript_segments));
+    if let Some(fixed) = m.corrected_segments {
+        println!("  纠错     {fixed} 段有标记");
+    }
+    if let Some(total) = m.supplement_total {
+        println!(
+            "  补图     {total} 条候选({} 条待判断)",
+            m.supplement_pending.unwrap_or(0)
+        );
+    }
+    println!(
+        "  视图     {}",
+        if m.timeline_html { "已渲染" } else { "—" }
+    );
 }
 
 fn step_text(done: bool, at: Option<String>) -> String {
@@ -768,9 +652,69 @@ fn display_dir(path: &Path) -> String {
     text
 }
 
+// ── ui ───────────────────────────────────────────────────────────────
+
+fn cmd_ui(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{UI_USAGE}");
+        return Ok(());
+    }
+    let mut open_browser = true;
+    let positional: Vec<String> = args
+        .iter()
+        .filter(|arg| {
+            if arg.as_str() == "--no-open" {
+                open_browser = false;
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    let name = one_positional(&positional, "ui", "项目")?;
+
+    let opened = OpenProject::open(&name)?;
+    let (path, url) = vidbrief_ops::serve_and_open(&opened, open_browser)?;
+
+    println!("视图     {}", path.display());
+    println!("服务     {url}");
+    if !open_browser {
+        println!("         (--no-open:请手动打开上面的地址)");
+    }
+    println!();
+    println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。");
+
+    // 服务是后台线程,主线程不能立刻退出 —— 否则服务跟着进程一起没了
+    println!();
+    println!("按 Ctrl+C 结束(这个进程要一直活着,服务才能响应浏览器)。");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+// ── mcp ──────────────────────────────────────────────────────────────
+
+fn cmd_mcp(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{MCP_USAGE}");
+        return Ok(());
+    }
+    for arg in args {
+        match arg.as_str() {
+            // 现在只有 stdio 一种;写出来是为了将来加 HTTP 时不用改调用方的脚本
+            "--stdio" => {}
+            other => bail!("mcp 不认识参数 `{other}`(见 `vidbrief mcp -h`)"),
+        }
+    }
+    // 从这里开始 stdout 归 JSON-RPC 协议所有
+    vidbrief_mcp::serve_stdio()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vidbrief_project::SourceLink;
 
     #[test]
     fn human_size_picks_a_readable_unit() {
@@ -793,5 +737,23 @@ mod tests {
 
         let sym = link_note(SourceLink::Symlink, 0);
         assert!(sym.contains("失效"), "软链接必须说清风险:{sym}");
+    }
+
+    #[test]
+    fn step_text_distinguishes_never_done_from_done_without_a_time() {
+        assert_eq!(step_text(false, None), "— 未做");
+        assert_eq!(step_text(true, None), "✓");
+        assert_eq!(step_text(true, Some("2026-09-24".into())), "✓ 2026-09-24");
+    }
+
+    #[test]
+    fn option_splitting_only_treats_leading_dashes_as_options() {
+        assert_eq!(split_option("--fps=2"), ("--fps", Some("2".into())));
+        assert_eq!(split_option("-f=2"), ("-f", Some("2".into())));
+        assert_eq!(split_option("--fps"), ("--fps", None));
+        // 单独的 `-` 是普通参数(有人真会传它当"标准输入")
+        assert_eq!(split_option("-"), ("-", None));
+        // 等号左边不是选项时,整串当位置参数
+        assert_eq!(split_option("a=b"), ("a=b", None));
     }
 }

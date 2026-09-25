@@ -6,6 +6,7 @@ members = [
     "crates/vidbrief-project",
     "crates/vidbrief-viz",
     "crates/vidbrief-report",
+    "crates/vidbrief-ops",
     "crates/vidbrief-mcp",
     "crates/vidbrief-cli",
 ]
@@ -13,7 +14,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 1.88 是 rmcp(官方 Rust MCP SDK)要求的下限;它也是本项目实际编得动的最低版本
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -32,4 +34,5 @@ vidbrief-asr = { path = "crates/vidbrief-asr" }
 vidbrief-project = { path = "crates/vidbrief-project" }
 vidbrief-viz = { path = "crates/vidbrief-viz" }
 vidbrief-report = { path = "crates/vidbrief-report" }
+vidbrief-ops = { path = "crates/vidbrief-ops" }
 vidbrief-mcp = { path = "crates/vidbrief-mcp" }
