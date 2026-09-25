@@ -64,6 +64,35 @@ pub enum ShotStatus {
     Drop,
 }
 
+/// 一条看图结论的**凭据** —— 它凭哪句话下的判断。
+///
+/// # 为什么要有它
+///
+/// 没有凭据的时候,一条结论就只是**一句话**:事后除了再问模型一遍,没有别的办法
+/// 核实它。而"再问一遍"又是同一张嘴 —— M4 第四轮实测到了后果:
+/// 11 张图里两张的 `match` 三轮不一致,而**两种 `false` 落盘之后长得一模一样** ——
+/// 一张是「转录打了错字」的真歧义,一张是**模型编了一张不存在的画面**再拿它去比,
+/// 比出来的假错位。从文件里分不出哪个是哪个。
+///
+/// 所以结论旁边必须放**能拿去对的东西**:一段**照抄**的原文。工具只做两件机械的
+/// 事 —— 那段文在转录里找得到吗?那张图的文件还在吗? —— 但它把"一句自述"
+/// 变成了"一句自述 + 一处能查的凭据"。
+///
+/// **它挡不住"编画面内容"**:画面上写了什么,工具没有眼睛,核不了(那要靠人,
+/// 或者靠照抄画面原文,见 `docs/DESIGN.md`)。它能挡住的是**编转录**和
+/// **引一张不存在的图** —— 而这两样恰恰是判词最常见的两根拐杖。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    /// 这句话在转录里的位置。
+    ///
+    /// **由工具按 `quote` 自己找出来**,不是模型报的 —— 让模型报段号,它就会报错段号,
+    /// 而那又是一处没法核对的自述。找得到就说明存在,找不到就是编的。
+    pub segment: u32,
+    /// **照抄**的原文(模型从 `get_transcript` 里原样搬过来的那一句)。
+    pub quote: String,
+}
+
 /// agent 的看图结论,由 `record_shot_check` 写入。未校准时整个字段为 `None`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +109,12 @@ pub struct ShotCheck {
     /// 发现的问题,每条一句;无问题为空数组。
     pub issues: Vec<String>,
     pub confidence: Confidence,
+    /// 这条结论凭的是哪句话。
+    ///
+    /// `None` = **没有凭据** —— 那是摘要/证据这套之前写的结论(或者模型没给)。
+    /// 门认得出这个区别,会说「这条没有凭据,补上」,而不是假装它对或错。
+    #[serde(default)]
+    pub evidence: Option<Evidence>,
     pub checked_at: DateTime<FixedOffset>,
 }
 
@@ -304,6 +339,7 @@ mod tests {
             issues: vec![],
             confidence: Confidence::Low,
             checked_at: crate::now(),
+            evidence: None,
         };
         let text = serde_json::to_string(&check).unwrap();
         assert!(text.contains("\"match\":true"), "{text}");
@@ -323,6 +359,7 @@ mod tests {
             issues: vec![],
             confidence: Confidence::High,
             checked_at: crate::now(),
+            evidence: None,
         };
         assert!(!base.needs_review());
         assert!(ShotCheck { confidence: Confidence::Low, ..base.clone() }.needs_review());
@@ -360,6 +397,7 @@ mod tests {
             issues: vec![],
             confidence: Confidence::Low,
             checked_at: crate::now(),
+            evidence: None,
         });
         assert_eq!(shots.unchecked().count(), 1);
         assert_eq!(shots.needing_review().count(), 1);

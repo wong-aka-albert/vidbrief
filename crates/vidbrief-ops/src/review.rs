@@ -100,6 +100,80 @@ impl PendingItems {
     }
 }
 
+/// 一条看图结论**对不上材料**的地方。
+///
+/// 门查的只有机械的两样 —— **图还在不在、文是不是真在转录里** ——
+/// 因为那是工具唯一能自己核的东西(画面上写了什么,它没有眼睛)。
+/// 但它把"一句自述"变成了"一句自述 + 一处能查的凭据":
+/// 从前你只能再问模型一遍,而那是同一张嘴。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadEvidence {
+    /// 哪张图。
+    pub shot: String,
+    /// 哪里对不上。
+    pub why: String,
+}
+
+/// 查这一条结论的凭据还在不在。
+///
+/// 三样,全是机械的:
+/// 1. **没有凭据** → 说"补上",不说它对或错(摘要这套之前写的结论就是这样);
+/// 2. **图没了** → 结论是关于一张不存在的图;
+/// 3. **文对不上** → 它引的那句话,转录里没有。
+///
+/// 第 3 条按**逐字包含**判,而且判的是**当初引的那一段**:文中途被人改过也算对不上 ——
+/// 结论是照着旧文下的,材料变了它就该重看一遍。
+fn bad_evidence(opened: &OpenProject, shots: &vidbrief_project::Shots, transcript: Option<&vidbrief_project::Transcript>) -> Vec<BadEvidence> {
+    let layout = opened.layout();
+    let mut bad = Vec::new();
+
+    for shot in &shots.shots {
+        if shot.status != ShotStatus::Keep {
+            continue;
+        }
+        let Some(check) = &shot.check else { continue };
+        let id = shot.id.to_string();
+
+        // 图还在不在 —— 结论是"关于这张图"的,图没了它就没有对象
+        if !layout.rel(shot.file.as_str()).is_file() {
+            bad.push(BadEvidence {
+                shot: id.clone(),
+                why: format!("图不在了({})", shot.file.as_str()),
+            });
+            continue;
+        }
+
+        let Some(evidence) = &check.evidence else {
+            bad.push(BadEvidence {
+                shot: id.clone(),
+                why: "没有凭据 —— 得给一句照抄的转录原文".to_string(),
+            });
+            continue;
+        };
+
+        let hit = transcript.and_then(|t| t.segments.iter().find(|s| s.id == evidence.segment));
+        match hit {
+            None => bad.push(BadEvidence {
+                shot: id.clone(),
+                why: format!("凭据指向的转录段 seg {} 不在了", evidence.segment),
+            }),
+            Some(segment) if !segment.effective_text().contains(evidence.quote.trim()) => {
+                bad.push(BadEvidence {
+                    shot: id.clone(),
+                    why: format!(
+                        "凭据说凭的是 seg {} 里的「{}」,可那一段现在不是这么写的",
+                        evidence.segment,
+                        evidence.quote.trim()
+                    ),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+
+    bad
+}
+
 /// 这一步的核验清单 —— **门的判据**。
 ///
 /// 每一项只有三种状态:未核验 / 已核验 / 核验过但要用户拍板。
@@ -280,6 +354,7 @@ fn shot_digest(s: &Shot) -> String {
         Confidence::Medium => "medium",
         Confidence::Low => "low",
     };
+    let evidence = check.evidence.as_ref();
     short(&[
         status,
         if check.r#match { "match" } else { "mismatch" },
@@ -287,6 +362,9 @@ fn shot_digest(s: &Shot) -> String {
         &check.type_read,
         &check.issues.join("\n"),
         confidence,
+        // 凭据也算材料:它变了,用户当初看到的那条结论就不是同一条了
+        evidence.map(|e| e.quote.as_str()).unwrap_or(""),
+        &evidence.map(|e| e.segment.to_string()).unwrap_or_default(),
     ])
 }
 
@@ -354,7 +432,29 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
         );
     }
 
-    // ② 剩下的是"模型定不了、等人拍板"的
+    // ② 有结论,但**凭据对不上材料** —— 那也是"活没干完",而且是模型自己修得了的
+    let shots = crate::materials::shots(opened).unwrap_or_default();
+    let transcript = crate::materials::effective_transcript(opened)
+        .ok()
+        .map(|(t, _, _)| t);
+    let bad = bad_evidence(opened, &shots, transcript.as_ref());
+    if !bad.is_empty() {
+        let lines: Vec<String> = bad
+            .iter()
+            .map(|b| format!("  - {}:{}", b.shot, b.why))
+            .collect();
+        bail!(
+            "有看图结论的**凭据对不上材料**,不能开始写总结。\n\
+             \n\
+             {}\n\
+             \n\
+             重看一眼那张图,然后给一句**照抄**的转录原文(`evidence_quote`)。\n\
+             画面上写了什么工具核不了 —— 它只能核'你引的那句话真的在材料里'。",
+            lines.join("\n")
+        );
+    }
+
+    // ③ 剩下的是"模型定不了、等人拍板"的
     if !now.needs_user.is_empty() {
         // 已经有用户拍板(或模型在授权下自己拍的板)覆盖着这一批 → 放行。
         // 判据是内容摘要对得上:那之后材料没再动过,这一批还是当初那一批。
@@ -393,7 +493,7 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
         );
     }
 
-    // ③ 全核验完、没人等着 —— 直接过
+    // ④ 全核验完、没人等着、凭据也都对得上 —— 直接过
     Ok(())
 }
 
@@ -536,6 +636,10 @@ mod tests {
             neighbor_text: None,
             issues: vec!["画面无标题文字,本节标题无法从画面上核实".into()],
             confidence,
+            evidence: Some(vidbrief_project::Evidence {
+                segment: 1,
+                quote: "各位好".into(),
+            }),
             checked_at: vidbrief_project::now(),
         });
         shots.save(&path).unwrap();
@@ -749,6 +853,10 @@ mod tests {
                 neighbor_text: None,
                 issues: Vec::new(),
                 confidence: low(),
+                evidence: Some(vidbrief_project::Evidence {
+                    segment: 1,
+                    quote: "各位好".into(),
+                }),
                 checked_at: vidbrief_project::now(),
             });
             shots.save(&path).unwrap();
@@ -760,6 +868,76 @@ mod tests {
         let err = gate_calibrate(&opened2).unwrap_err().to_string();
         assert!(err.contains("等人拍板"), "{err}");
         assert!(err.contains("s001"), "{err}");
+    }
+
+    /// **凭据对不上材料 → 拦,而且说清是哪一条、哪里对不上。**
+    ///
+    /// 这是「结论必须带能拿去对的东西」那条的落地。三种对不上:
+    /// 没凭据 / 段里那句话已经不是这么写的 / 引的段不在了。
+    #[test]
+    fn evidence_is_checked_against_the_material() {
+        let fake = two_shots("review-evidence");
+        let opened = fake.open();
+        check_shot(&fake, 1, high());
+        check_shot(&fake, 2, high());
+        review_segments(&opened, &[1, 2]);
+
+        gate_calibrate(&opened).expect("凭据对得上就该过");
+
+        let set_evidence = |ev: Option<vidbrief_project::Evidence>| {
+            let path = fake.layout().shots_json();
+            let mut shots = vidbrief_project::Shots::load(&path).unwrap();
+            shots
+                .get_mut(vidbrief_project::ShotId::new(1).unwrap())
+                .unwrap()
+                .check
+                .as_mut()
+                .unwrap()
+                .evidence = ev;
+            shots.save(&path).unwrap();
+        };
+
+        // ① 没凭据
+        set_evidence(None);
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("s001"), "{err}");
+        assert!(err.contains("没有凭据"), "{err}");
+
+        // ② 引的那句话,材料里没有 —— 也就是"编的"
+        set_evidence(Some(vidbrief_project::Evidence {
+            segment: 1,
+            quote: "画面右上角写着 Python 列表".into(),
+        }));
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("不是这么写的"), "要说清哪里对不上:{err}");
+
+        // ③ 材料后来被改过 —— 结论是照着旧文下的,该重看
+        set_evidence(Some(vidbrief_project::Evidence {
+            segment: 2,
+            quote: "接着讲".into(),
+        }));
+        crate::conclusions::apply_corrections(
+            &opened,
+            &[crate::conclusions::CorrectionInput {
+                segment_id: 2,
+                corrected_text: Some("接下来继续讲".into()),
+                kind: vidbrief_project::CorrectionType::Other,
+                note: None,
+                reason: "测试".into(),
+            }],
+            &[],
+        )
+        .unwrap();
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("s001"), "{err}");
+        assert!(err.contains("不是这么写的"), "{err}");
+
+        // 把凭据改对,又放行
+        set_evidence(Some(vidbrief_project::Evidence {
+            segment: 1,
+            quote: "各位好".into(),
+        }));
+        gate_calibrate(&opened).expect("凭据补对了就该过");
     }
 
     #[test]

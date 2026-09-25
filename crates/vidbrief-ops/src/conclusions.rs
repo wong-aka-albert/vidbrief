@@ -31,11 +31,22 @@ pub struct ShotCheckInput {
     pub confidence: Confidence,
     /// 该时刻前后 ±6s 的转录原文。`None` = 由工具自动填(agent 手上本来就有,省一次搬运)。
     pub neighbor_text: Option<String>,
+    /// **照抄**的那句转录原文 —— 这条结论凭的就是它。
+    ///
+    /// 工具拿它去转录里找:找得到 → 落在这一段上,连同段号存下来;找不到 → 拒收。
+    /// 详见 [`vidbrief_project::Evidence`]。
+    pub evidence_quote: Option<String>,
 }
 
 /// 把一张图的判断结论写回 `shots.json`。
 ///
 /// 写回的是**全量**替换:agent 复核过一遍再写一次,应以最后一次为准。
+///
+/// # 证据是**找出来的**,不是报上来的
+///
+/// `evidence_quote` 给的是**照抄的原文**,段号由这里去转录里搜 —— 搜不到就拒收。
+/// 让模型自己报段号的话,它就会报错段号,而那又是一处没法核对的自述:
+/// 我们要的不是"它说引了第几段",是"**它引的那句话真的在材料里**"。
 pub fn record_shot_check(
     opened: &OpenProject,
     id: vidbrief_project::ShotId,
@@ -48,17 +59,50 @@ pub fn record_shot_check(
         .with_context(|| format!("项目里没有截图 {id}"))?
         .clone();
 
+    let transcript = crate::materials::effective_transcript(opened)
+        .ok()
+        .map(|(t, _, _)| t);
+
     let neighbor_text = match &input.neighbor_text {
         Some(text) => Some(text.clone()),
-        None => crate::materials::effective_transcript(opened)
-            .ok()
-            .map(|(t, _, _)| {
-                t.render_range(
-                    (shot.t - crate::NEIGHBOR_WINDOW).max(0.0),
-                    shot.t + crate::NEIGHBOR_WINDOW,
-                )
+        None => transcript.as_ref().map(|t| {
+            t.render_range(
+                (shot.t - crate::NEIGHBOR_WINDOW).max(0.0),
+                shot.t + crate::NEIGHBOR_WINDOW,
+            )
+        })
+        .filter(|s| !s.is_empty()),
+    };
+
+    let evidence = match &input.evidence_quote {
+        None => None,
+        Some(quote) => {
+            let quote = quote.trim();
+            if quote.is_empty() {
+                bail!("`evidence_quote` 给了空的 —— 要么照抄一句转录原文,要么整个不给");
+            }
+            let transcript = transcript.as_ref().with_context(|| {
+                "要给证据,得先有转录 —— 这个项目还没有可读的转录".to_string()
+            })?;
+            // **逐字**在某一**段**里找。跨段不算:那样落下来的段号是拼的,
+            // 而"这句话在哪一段"正是要留给人事后回去核对的定位。
+            let hit = transcript
+                .segments
+                .iter()
+                .find(|s| s.effective_text().contains(quote));
+            let Some(segment) = hit else {
+                bail!(
+                    "这段文在转录里找不到:`{quote}`\n\
+                     \n\
+                     证据必须是**照抄**的一句原文(从 `get_transcript` 里原样搬过来,落在一段之内)。\
+                     找不到就说明它不是转录里的话 —— 那这条结论就没有凭据,不能这么写。"
+                );
+            };
+            Some(vidbrief_project::Evidence {
+                segment: segment.id,
+                quote: quote.to_string(),
             })
-            .filter(|s| !s.is_empty()),
+        }
     };
 
     let check = ShotCheck {
@@ -68,6 +112,7 @@ pub fn record_shot_check(
         neighbor_text,
         issues: input.issues.clone(),
         confidence: input.confidence,
+        evidence,
         checked_at: vidbrief_project::now(),
     };
 
@@ -705,6 +750,7 @@ mod tests {
                 issues: vec![],
                 confidence: Confidence::High,
                 neighbor_text: None,
+                evidence_quote: None,
             },
         )
         .unwrap();
@@ -862,7 +908,10 @@ mod tests {
 
     #[test]
     fn summary_and_report_mark_their_steps() {
-        let fake = Fake::new("concl-steps").with_curve(5).with_shot(1, 2.0);
+        let fake = Fake::new("concl-steps")
+            .with_transcript(&[(0.0, 2.0, "各位好")])
+            .with_curve(5)
+            .with_shot(1, 2.0);
         let mut opened = fake.open();
 
         // 步 2 的门:这一步的活没干完就不许写总结。
@@ -886,9 +935,12 @@ mod tests {
                 issues: Vec::new(),
                 confidence: vidbrief_project::Confidence::High,
                 neighbor_text: None,
+                evidence_quote: Some("各位好".into()),
             },
         )
         .unwrap();
+        // 转录那一段也报一声"审过了" —— 门分不出"看过没问题"和"压根没看"
+        apply_corrections(&opened, &[], &[1]).unwrap();
         let _ = &mut opened;
         write_summary(&mut opened, "# 总结\n").unwrap_or_else(|e| panic!("{e:#}"));
 

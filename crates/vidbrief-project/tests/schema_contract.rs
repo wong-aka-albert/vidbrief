@@ -404,6 +404,7 @@ fn writer_output_validates_against_the_schemas() {
             issues: vec![],
             confidence: Confidence::High,
             checked_at: now(),
+            evidence: None,
         }),
     });
     let reqs = SupplementRequests::new(3.0);

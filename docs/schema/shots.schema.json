@@ -4,7 +4,10 @@
   "description": "关键截图清单 + agent 的校准结论。步 1 由工具生成,步 2/3 由 agent 增删改(record_shot_check / extract_shot / update_shot)。设计见 docs/DESIGN.md §4.6、§6.1。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generated_at", "shots"],
+  "required": [
+    "generated_at",
+    "shots"
+  ],
   "properties": {
     "generated_at": {
       "$ref": "#/$defs/timestamp",
@@ -43,20 +46,44 @@
           },
           "origin": {
             "type": "string",
-            "enum": ["dense_region", "isolated_peak", "agent_request", "manual"],
+            "enum": [
+              "dense_region",
+              "isolated_peak",
+              "agent_request",
+              "manual"
+            ],
             "description": "这张图从哪来"
           },
           "region_id": {
-            "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }],
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "minimum": 1
+              }
+            ],
             "description": "origin 为 dense_region / isolated_peak 时指向 dense_regions.json,否则为 null"
           },
           "status": {
             "type": "string",
-            "enum": ["keep", "drop"],
+            "enum": [
+              "keep",
+              "drop"
+            ],
             "description": "是否保留。新生成的图默认 keep"
           },
           "reason": {
-            "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }],
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "minLength": 1
+              }
+            ],
             "description": "补图理由(origin 为 agent_request / manual 时应有值)"
           },
           "created_at": {
@@ -66,7 +93,9 @@
           "check": {
             "description": "agent 通过 record_shot_check 写入的看图结论;未校准时为 null",
             "oneOf": [
-              { "type": "null" },
+              {
+                "type": "null"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
@@ -77,6 +106,7 @@
                   "neighbor_text",
                   "issues",
                   "confidence",
+                  "evidence",
                   "checked_at"
                 ],
                 "properties": {
@@ -94,21 +124,64 @@
                     "description": "从画面读到的内容(对象/规格/状态/数值)。画面无法确认时如实写「画面无法确认」"
                   },
                   "neighbor_text": {
-                    "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }],
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    ],
                     "description": "该时刻前后 ±6s 的转录原文,作为判断依据留档"
                   },
                   "issues": {
                     "type": "array",
                     "description": "发现的问题,每条一句;无问题为空数组",
-                    "items": { "type": "string", "minLength": 1 }
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
                   },
                   "confidence": {
                     "type": "string",
-                    "enum": ["high", "medium", "low"],
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low"
+                    ],
                     "description": "agent 对自己结论的把握程度。不确定就用 low,不要猜"
                   },
                   "checked_at": {
                     "$ref": "#/$defs/timestamp"
+                  },
+                  "evidence": {
+                    "description": "这条结论凭的是哪句话。null = 没有凭据(证据这套之前写的结论)。工具只核两件机械的事:那段文在转录里找得到吗、那张图的文件还在吗",
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "segment",
+                          "quote"
+                        ],
+                        "properties": {
+                          "segment": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "由工具按 quote 自己找出来的段号,不是模型报的"
+                          },
+                          "quote": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "照抄的转录原文,落在一段之内"
+                          }
+                        }
+                      }
+                    ]
                   }
                 }
               }

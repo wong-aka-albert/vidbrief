@@ -57,7 +57,7 @@ pub use project::{
 };
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
-pub use shots::{Confidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
+pub use shots::{Confidence, Evidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
 pub use source::{
     Materialized, Placement, SourceLink, materialize, plan, same_file, sha256_of, simplify_path,
     video_rel_for, volume_of,

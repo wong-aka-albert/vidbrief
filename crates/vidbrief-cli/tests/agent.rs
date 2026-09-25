@@ -217,6 +217,7 @@ fn p1_calibrate_shots_runs_the_whole_way() {
                 "type_read": "手写夹具的画面",
                 "issues": [],
                 "confidence": "medium",
+                "evidence_quote": "各位好,我们今天这期是一个承前启后的内容",
             }),
         );
     }
@@ -450,7 +451,10 @@ fn p4_summarize_video_tools_all_answer() {
 
     // 把"活干完":给两张图都写回结论、并报告转录都审过了。
     // **这一步不需要任何人签字** —— 全核验完就该放行,这就是"全程托管"那一档。
-    for (shot_id, read) in [("s001", "画面是一张示意图"), ("s002", "画面是另一张示例图")] {
+    for (shot_id, read, quote) in [
+        ("s001", "画面是一张示意图", "各位好,我们今天这期是一个承前启后的内容"),
+        ("s002", "画面是另一张示例图", "大家看一下这样的图"),
+    ] {
         client.tool_text(
             "record_shot_check",
             json!({
@@ -461,6 +465,7 @@ fn p4_summarize_video_tools_all_answer() {
                 "type_read": read,
                 "issues": [],
                 "confidence": "high",
+                "evidence_quote": quote,
             }),
         );
     }
@@ -492,6 +497,7 @@ fn p4_summarize_video_tools_all_answer() {
             "type_read": "画面看不清",
             "issues": ["画面与口播对不上"],
             "confidence": "low",
+            "evidence_quote": "为什么我们经常说提前进入这一段",
         }),
     );
     let waiting = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v2\n"}));
@@ -523,6 +529,7 @@ fn p4_summarize_video_tools_all_answer() {
             "type_read": "无从确认",
             "issues": ["音画对不上"],
             "confidence": "low",
+            "evidence_quote": "大家看一下这样的图",
         }),
     );
     let again = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v3\n"}));

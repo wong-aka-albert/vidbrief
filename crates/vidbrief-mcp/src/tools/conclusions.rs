@@ -90,6 +90,15 @@ pub struct RecordShotCheckParams {
     /// 该时刻前后 ±6s 的转录原文。不给则由工具自动填。
     #[serde(default)]
     pub neighbor_text: Option<String>,
+    /// **照抄**的那句转录原文 —— 你这条结论凭的就是它。
+    ///
+    /// 从 `get_transcript` 里原样搬一句过来(落在一段之内,别跨段)。工具拿它去转录里搜:
+    /// 搜得到就把它连段号一起记下,搜不到就拒收。
+    ///
+    /// 为什么必须给:没有它,这条结论就只是一句话 —— 事后除了再问你一遍,没有别的办法
+    /// 核实。**照抄的画面文字同理**,只是画面上写了什么工具核不了(它没有眼睛)。
+    #[serde(default)]
+    pub evidence_quote: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -182,6 +191,7 @@ impl VidbriefServer {
             issues: p.issues,
             confidence: p.confidence.into(),
             neighbor_text: p.neighbor_text,
+            evidence_quote: p.evidence_quote,
         };
         let check = blocking(move || vidbrief_ops::record_shot_check(&opened, id, &input)).await?;
         Ok(attach_warning(json(&check)?, slot.warning()))

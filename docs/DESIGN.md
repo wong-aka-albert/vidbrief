@@ -363,6 +363,43 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 > v0.7 的 `llm_supplement` 在 M0 定稿时并入 `agent_request` —— 补图都是 agent 判的,
 > 分两个名字只会让人猜区别在哪。步 3 的二次补图靠存放目录(`shots_extra2/`)区分。
 
+#### `check.evidence` —— 结论必须带能拿去对的东西
+
+每一条看图结论都带一份**凭据**:一句**照抄**的转录原文,以及工具替它找出来的段号。
+
+```jsonc
+"check": {
+  "match": true,
+  "type_read": "深色编辑器截图:右上角函数名「Python 列表」、代码 xx9999",
+  "issues": ["口播的「结构图」在画面上无法确认"],
+  "confidence": "high",
+  "evidence": { "segment": 166, "quote": "这是国内 Python 教程的第一小节" },
+  "checked_at": "..."
+}
+```
+
+**为什么**:没有凭据的时候,一条结论就只是**一句话** —— 事后除了再问模型一遍,没有
+别的办法核实,而那是同一张嘴。M4 第四轮实测到了后果:11 张图里两张的 `match` 三轮
+不一致,而**两种 `false` 落盘之后长得一模一样** —— 一张是「转录打了错字」的真歧义,
+一张是**模型编了一张不存在的画面**再拿它去比,比出来的假错位。从文件里分不出哪个是哪个。
+
+**工具核哪几样**(全是机械的,它没有眼睛):
+
+| 查什么 | 怎么查 |
+|--------|--------|
+| 图还在不在 | 那张图的文件在磁盘上吗 |
+| 文对不对得上 | 照抄的那句,在它指的那一段的**当前文本**里找得到吗 |
+| 有没有凭据 | `null` = 摘要这套之前写的结论,门会说「补上」,不说它对或错 |
+
+**段号是工具按 `quote` 自己找出来的,不是模型报的** —— 让模型报段号,它就会报错段号,
+而那又是一处没法核对的自述。要找的不是"它说引了第几段",是"**它引的那句话真的在材料里**"。
+
+**它挡不住什么,要说清**:画面上写了什么,**工具核不了**。所以它挡得住"编转录"和
+"引一张不存在的图"——判词最常见的两根拐杖——但挡不住"编画面内容"。那要靠人,
+或者靠**照抄画面上的文字**(那是 OCR 能核的东西,但得先要求模型照抄)。
+
+**判词变了也算对不上**:引的那一段后来被人改过,结论就是照着旧文下的,门会拦住让它重看。
+
 ### 4.7 并发与多会话
 
 MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己的** `vidbrief mcp` 进程,进程间相互独立。因此:
@@ -928,7 +965,7 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 2. 亲自查看图像,并严格对照同期转录:转录明确说的信息(对象/规格/方向)必须服从,
    画面独有的信息(形态/标注线/数值)如实读出并标注"从画面推断"。
 3. 若转录与画面矛盾,写入 issues。
-4. 用 record_shot_check 逐张存回结论;不要臆测,不确定就标 low confidence / "画面无法确认"。
+4. 用 record_shot_check 逐张存回结论,**每条都带一句照抄的转录原文当凭据**(`evidence_quote`);不要臆测,不确定就标 low confidence / "画面无法确认"。
 5. 完成后调用 render_timeline 刷新视图。
 ```
 
@@ -1067,7 +1104,7 @@ vidbrief help                                       # 用法
 ### D. 结论回写(存 agent 的判断)
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
-| `record_shot_check` | 存 | `project_id, shot_id, {match, audio_visual_sync, type_read, issues, confidence}` | 更新 `shots.json` |
+| `record_shot_check` | 存 | `project_id, shot_id, {match, audio_visual_sync, type_read, issues, confidence, evidence_quote}` | 更新 `shots.json`。`evidence_quote` 是**照抄**的一句转录原文,工具搜到就记下段号,搜不到拒收(§4.6) |
 | `apply_corrections` | 存 | `project_id, [{segment_id, corrected_text, reason}], [reviewed]` | 更新 `transcript.fixed.json` + `transcript.diff.md`;`reviewed` 是**审过、没问题**的段 id —— 不报等于没审 |
 | `write_note` | 存 | `project_id, path, md, [mode], [count_round]` | 写 `02_calibrate/` 与 `03_summary/` 下的 `.md`(交叉印证、校准日志、笔记)。**有专属工具的文件写不了**:`summary.md` 归 `write_summary`、`transcript.diff.md` 归 `apply_corrections` |
 | `approve` | 存 | `project_id, [note]` | 用户说"这些我知道,就这样过"时记下来,并快照当时的计数与逐条内容摘要 —— 放行**"要用户拍板"那一批**(§6.1.1、§4.2.1)。**不是门的开关**:没核验的它照样拦 |

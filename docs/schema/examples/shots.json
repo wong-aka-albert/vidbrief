@@ -17,6 +17,10 @@
         "neighbor_text": "好我们切到主图了",
         "issues": [],
         "confidence": "high",
+        "evidence": {
+          "segment": 4,
+          "quote": "好我们切到主图了"
+        },
         "checked_at": "2026-09-24T21:12:30+08:00"
       }
     },
@@ -36,6 +40,10 @@
         "neighbor_text": "注意这里的数据变化过程正在走完",
         "issues": [],
         "confidence": "medium",
+        "evidence": {
+          "segment": 6,
+          "quote": "注意这里的数据变化过程正在走完"
+        },
         "checked_at": "2026-09-24T21:12:41+08:00"
       }
     },
@@ -68,6 +76,10 @@
           "语音说「正在走完」而该帧已是定型静态图,存在约 2.3 秒时间差"
         ],
         "confidence": "low",
+        "evidence": {
+          "segment": 7,
+          "quote": "画面停住了大家可以把结论抄下来"
+        },
         "checked_at": "2026-09-24T21:18:40+08:00"
       }
     }
