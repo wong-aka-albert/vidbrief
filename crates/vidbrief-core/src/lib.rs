@@ -9,6 +9,7 @@
 //! | [`feature`] | 帧特征与打分 | ❌ **纯函数** |
 //! | [`regions`] | 变化密集区检测 | ❌ **纯函数** |
 //! | [`shots`] | 规划要抽哪几帧 | ❌ **纯函数** |
+//! | [`supplement`] | 补图候选(步 2 子任务 ④) | ❌ **纯函数** |
 //! | [`curve`] | 流式抽帧 → 差帧图 | ✅ |
 //! | [`extract`] | 按时刻抽单帧 → JPEG | ✅ |
 //! | [`pipeline`] | 把上面几步串起来并落盘 | ✅ |
@@ -25,6 +26,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod regions;
 pub mod shots;
+pub mod supplement;
 
 pub use curve::{CurveOptions, build_curve};
 pub use extract::{ShotQuality, extract_frame};
@@ -32,3 +34,4 @@ pub use feature::{FrameFeature, score};
 pub use pipeline::{VisualReport, analyze, extract_shots, plan_shots, run_visual};
 pub use probe::{has_audio_stream, probe};
 pub use regions::detect;
+pub use supplement::find_candidates;

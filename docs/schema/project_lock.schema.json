@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vidbrief project.lock",
-  "description": "项目写锁。首个打开项目的会话取得写锁,其他会话只读。设计见 docs/DESIGN.md §4.7。",
+  "description": "项目写锁。首个打开项目的会话取得写锁,其他会话只读。设计见 docs/DESIGN.md §4.7。**谁持有锁由操作系统的文件锁决定,不由本文件存不存在决定** —— 这里的内容只是给人看的诊断信息。",
   "type": "object",
   "additionalProperties": false,
   "required": ["pid", "host", "session", "opened_at"],
@@ -9,7 +9,7 @@
     "pid": {
       "type": "integer",
       "minimum": 1,
-      "description": "持有写锁的 MCP 进程 pid;用于判断锁是否已成为死锁"
+      "description": "持有写锁的进程 pid。**只作诊断**:进程死没死由操作系统释放文件锁来体现,不靠探测它(pid 会被复用)"
     },
     "host": {
       "type": "string",

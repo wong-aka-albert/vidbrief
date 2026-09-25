@@ -225,9 +225,16 @@ rg '提交.*1a2b3c4' docs/devlog/ -g '[0-9]*.md' # 反查 # 反查:某 commit �
 
 ```
 1. 读 docs/devlog/PLAN.md            → 确认当前里程碑与待办
-2. 开工(遵守 §1 两条禁令、§3 规范)
-3. cargo build --workspace && cargo test --workspace   → 验证通过再声明完成
-4. 更新 PLAN.md                      → 勾掉待办、改状态
-5. 补 devlog 条目(决策/进度/问题/计划变更)
-6. git status 确认改动范围 → git commit,message 引用条目 ID
+2. 列 todo(多步任务)                 → 开工前把步骤写下来;**每完成一步立刻标 completed**
+3. 开工(遵守 §1 两条禁令、§3 规范)
+4. cargo build --workspace && cargo test --workspace   → 验证通过再声明完成
+5. 更新 PLAN.md                      → 勾掉待办、改状态
+6. 补 devlog 条目(决策/进度/问题/计划变更)
+7. git status 确认改动范围 → git commit,message 引用条目 ID
 ```
+
+> **进度清单有一条硬要求:它必须与实际相符。**
+> 忘了标 = 用户看到的是一份**假进度**,比不列清单更糟(会让人以为没做)。
+> 两条纪律:① 每完成一步**立刻**标,别攒到最后;② 收工前扫一眼清单,
+> 还有 `pending`/`in_progress` 就说明要么没做完、要么没标 —— 两种都得处理。
+> 宁可开工时不列,也不要把清单撂在那儿不管。

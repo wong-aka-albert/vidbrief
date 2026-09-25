@@ -48,7 +48,7 @@ pub use health::{Health, check_source_link, verify_content};
 pub use ids::{ProjectId, ShotId};
 pub use json::{read, to_pretty_string, write_atomic, write_atomic_str};
 pub use layout::Layout;
-pub use lock::ProjectLock;
+pub use lock::{LockGuard, ProjectLock, acquire, peek};
 pub use meta::VideoMeta;
 pub use project::{
     CalibrateProgress, Progress, Project, SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
