@@ -182,7 +182,10 @@ fn init_explains_an_unfinished_directory_instead_of_just_refusing() {
     let err = stderr(&out);
     assert!(err.contains("还没建完的目录"), "要说清那是什么:{err}");
     assert!(err.contains("正在"), "要提到「别人可能正在建」:{err}");
-    assert!(err.contains("删掉"), "要给出「确认没用就删」:{err}");
+    assert!(err.contains("另起一个"), "要给出「换个名字再建」:{err}");
+    // **报错里不能劝人删**:读这句话的常常是模型,你写"删",它就会删
+    assert!(!err.contains("删"), "别在报错里提删除:{err}");
+    assert!(err.contains("不要动"), "要明确挡住「顺手清理」这个念头:{err}");
     assert!(
         tmp.join("projects/test-sample/leftover.txt").is_file(),
         "报错时一个字都不该动它"
