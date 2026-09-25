@@ -140,8 +140,12 @@ impl Fake {
         self
     }
 
-    fn add_shot(&self, id: u32, t: f64, origin: ShotOrigin) {
-        let sid = ShotId::new(id).expect("合法 shot id");
+    /// 加一张截图(连带造出那个 jpg 占位文件)。
+    ///
+    /// **`pub` 是给别的 crate 的测试用的** —— 它们要造"确认之后材料又变了"这类场景
+    /// (见 `vidbrief-ops/src/review.rs` 的 invalidate 用例)。`with_shot` 是消费 self 的
+    /// 构造链,造不了"先确认、后改材料"。
+    pub fn add_shot(&self, id: u32, t: f64, origin: ShotOrigin) {        let sid = ShotId::new(id).expect("合法 shot id");
         let file = Shot::default_rel_path(origin, sid, t).expect("合法截图路径");
         std::fs::write(self.layout.rel(file.as_str()), b"\xff\xd8\xff\xd9").expect("占位 jpg");
 

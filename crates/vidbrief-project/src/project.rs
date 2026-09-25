@@ -1,9 +1,15 @@
-//! `project.json` —— 项目元数据与各步进度标记。
+//! `project.json` —— 项目元数据、各步进度标记、用户确认。
 //!
 //! 格式见 `docs/schema/project.schema.json` 与 `docs/DESIGN.md` §4.2。
 //!
-//! **进度不是审核门**:本文件只记录"做过什么",用来给 `vidbrief status` 和 `list_projects` 展示。
-//! "这一步通过了没有"是用户与 agent 的对话行为,不由文件状态决定。
+//! **两件事要分清**:
+//! - `progress` 记"做过什么",给 `vidbrief status` 和 `list_projects` 展示,**不是门**;
+//! - `review` 记"用户看过并点头了",**是门** —— 校准没被确认过、或者确认之后东西又变了,
+//!   就不许写总结(见 `vidbrief-ops` 的 `review` 模块)。
+//!
+//! M0 时这里写的是"进度不是审核门,'通过了没有'纯靠对话"。M4 联调推翻了它:
+//! 两轮跑下来,**"靠对话"等于没有门** —— 一个一张图都没校准的项目照样能写总结、
+//! 把步 3 标成完成。详见 devlog [260925-21]。
 
 use std::fmt;
 
@@ -106,6 +112,47 @@ pub struct Progress {
     pub report: StepProgress,
 }
 
+/// 确认当时数下来的四项。**一变就作废**。
+///
+/// 四项全是服务端自己数得出来的东西 —— 不依赖 agent 自报,也不依赖"谁签的"
+/// (那拿不到:MCP 握手里只有客户端名,没有模型名)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewCounts {
+    /// 还没校准的截图张数。
+    pub unchecked: usize,
+    /// 需要人裁决的截图张数(把握低 / 报了问题 / 图文不符)。
+    pub needing_review: usize,
+    /// 还没处理过的补图候选条数。
+    pub supplement_pending: usize,
+    /// 标了"存疑但没改"、等人裁决的转录段数。
+    pub uncertain: usize,
+}
+
+/// 一次确认。
+///
+/// **没有"谁签的"这个字段** —— 拿不到。服务端能观察到的只有:什么时候、当时什么状态。
+/// 名字也不用 `approved_by` 之类:一个填不出来的字段,迟早被填成假的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {
+    pub approved_at: DateTime<FixedOffset>,
+    /// 确认当时的材料状态。之后任何一项变了,这次确认就作废。
+    pub counts: ReviewCounts,
+    /// **带着未处理项通过**时的说明(正常通过是 `None`)。
+    /// 事后要能回答"当初为什么放行"。
+    pub note: Option<String>,
+}
+
+/// 各步的确认。`None` = 还没被用户确认过。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    /// 步 2(校准)。**这是道门**:没确认过、或者确认之后东西又变了,
+    /// 就不许进步 3。
+    pub calibrate: Option<Approval>,
+}
+
 /// `project.json`。
 ///
 /// 字段顺序即为写盘顺序,不要随意调整(测试里与示例文件逐字节比对)。
@@ -125,6 +172,14 @@ pub struct Project {
     /// 供 agent 在转录纠错时对照(优先级最低,见 §6.2 ②)。
     pub glossary: Option<Vec<String>>,
     pub progress: Progress,
+    /// 用户对各步的确认 —— **审核门**。
+    ///
+    /// `progress` 记"做过什么",这里记"用户看过并点头了"。两者是两回事:
+    /// 一个项目可以四步都 `done`,却一次都没被人确认过。
+    ///
+    /// 缺省(老项目文件里没有这一段)视作"谁都没确认过"。
+    #[serde(default)]
+    pub review: Review,
 }
 
 impl Project {
@@ -149,6 +204,7 @@ impl Project {
             },
             glossary: None,
             progress: Progress::default(),
+            review: Review::default(),
         }
     }
 

@@ -13,5 +13,15 @@ vidbrief-core.workspace = true
 vidbrief-project.workspace = true
 vidbrief-viz.workspace = true
 
+[features]
+# 把测试夹具(见 `src/testkit.rs`)借给别的 crate 用。
+#
+# 为什么要有这个开关:端到端测试(如 `vidbrief-cli/tests/agent.rs`)需要
+# **材料齐全的假项目**,而造它要懂项目目录的全部形状 —— 那属于这一层。
+# 与其让每个测试各写一份、各错各的,不如显式借出去。
+#
+# 不默认打开:它不是库的一部分,"造一个假项目"对使用者没有意义。
+testing = []
+
 [dev-dependencies]
 serde_json.workspace = true

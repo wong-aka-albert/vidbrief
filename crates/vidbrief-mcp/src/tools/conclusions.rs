@@ -144,6 +144,16 @@ pub struct WriteDocParams {
     pub md: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ApproveParams {
+    #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
+    pub project_id: String,
+    /// **带着未处理项通过**时的说明 —— 最好是用户的原话。
+    /// 正常通过(该处理的都处理完了)就别给。
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[tool_router(router = conclusion_tools, vis = "pub")]
 impl VidbriefServer {
     #[tool(
@@ -234,7 +244,11 @@ impl VidbriefServer {
 
     #[tool(
         description = "写 `03_summary/summary.md`,并标记步 3 完成。\
-                       **写完要停下来把内容呈现给用户**,等他说改哪儿。",
+                       **写完要停下来把内容呈现给用户**,等他说改哪儿。\
+                       \n\n\
+                       **这道门前置着步 2 的确认**:校准没被用户确认过、或者确认之后\
+                       材料又变过,这里会被挡住 —— 那时别绕,把状态给用户看,他点头后\
+                       调 `approve`。",
         annotations(title = "写总结", read_only_hint = false, idempotent_hint = true)
     )]
     async fn write_summary(
@@ -248,6 +262,47 @@ impl VidbriefServer {
             text(format!(
                 "已写入 {}\n下一步是报告:写 report.md 用 write_report_md。",
                 path.display()
+            )),
+            slot.warning(),
+        ))
+    }
+
+    #[tool(
+        description = "记下「**用户确认了校准这一步**」—— 这是步 2 通往步 3 的门。\
+                       \n\n\
+                       什么时候调:把结果给用户看过(render_timeline 的链接)、他点头之后。\
+                       **不要替用户点头** —— 门挡的是「没人注意就漏过去了」,不是防你。\
+                       \n\n\
+                       调用时服务端会把当时的材料状态记下来;之后你**再改任何东西**,\
+                       这次确认就作废,得让他重新看一眼再确认。\
+                       \n\n\
+                       还有没处理完的项而用户就想往下走:可以,把他那句理由放进 `note`。",
+        annotations(title = "记用户确认", read_only_hint = false, idempotent_hint = true)
+    )]
+    async fn approve(
+        &self,
+        Parameters(p): Parameters<ApproveParams>,
+    ) -> Result<CallToolResult, CallToolResult> {
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
+        let note = p.note;
+        let approval = blocking(move || vidbrief_ops::approve(&mut opened, note)).await?;
+        let c = approval.counts;
+        Ok(attach_warning(
+            text(format!(
+                "已记下用户确认({})。\n\
+                 确认时:未校准 {} 张 / 待裁决 {} 张 / 未处理补图候选 {} 条 / 存疑转录 {} 段{}\n\
+                 \n\
+                 门开了,可以写总结。**注意:从现在起你再改任何材料,这次确认就作废。**",
+                approval.approved_at.format("%Y-%m-%d %H:%M:%S"),
+                c.unchecked,
+                c.needing_review,
+                c.supplement_pending,
+                c.uncertain,
+                approval
+                    .note
+                    .as_deref()
+                    .map(|n| format!("\n理由:{n}"))
+                    .unwrap_or_default()
             )),
             slot.warning(),
         ))

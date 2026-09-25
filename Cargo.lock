@@ -1208,14 +1208,13 @@ name = "vidbrief-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "jsonschema",
  "serde_json",
- "vidbrief-asr",
  "vidbrief-core",
  "vidbrief-mcp",
  "vidbrief-ops",
  "vidbrief-project",
- "vidbrief-viz",
 ]
 
 [[package]]

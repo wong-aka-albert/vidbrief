@@ -22,7 +22,9 @@ pub mod server;
 
 pub use data::{TimelineData, relative_url};
 pub use html::{render_timeline, render_timeline_html};
-pub use server::{ensure_running, mount, url_for};
+pub use server::{
+    Action, ActionHandler, ensure_running, has_action_handler, mount, set_action_handler, url_for,
+};
 
 /// 一次到位的"渲染 + 挂载 + 打开浏览器"。
 ///

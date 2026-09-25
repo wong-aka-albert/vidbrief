@@ -182,7 +182,10 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 }
 ```
 
-> **不设强制审核门**。编排在 agent 侧,"放行"是对话行为;这里只记录进度供参考。
+> **有审核门,但门记在 `review` 里,不在这里。** `progress` 只记"做过什么";
+> "用户看过并点头了"是另一件事(见 §4.2.1)。两者分开,是因为一个项目可以
+> 四步都 `done` 却一次都没被人确认过 —— M4 联调实测就是这样:
+> **一张图都没校准的项目照样能写总结、把步 3 标成完成。**
 >
 > **时长不在这里**:`duration` 归 `source/video.meta.json` 独家所有。
 > 一个数字两个落点迟早会不一致,宁可让 `list_projects` 多读一个文件。
@@ -503,14 +506,45 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 
 ### 6.1 循环的三个动作
 
+**校准 = 把材料改对。** 不是"在旁边记笔记" —— 判断要落成材料的改动,
+否则用户拿到的是一份待办清单,不是结果。所以核心是这三件事:
+
+| 改什么 | 工具 |
+|--------|------|
+| **把错的改对** | `apply_corrections`(转录纠错 → `transcript.fixed.json`) |
+| **把缺的加上** | `extract_shot` / `request_shot`(补图) |
+| **把多余的删掉** | `update_shot(drop)`(废图:全黑、重复、糊到看不出) |
+
+围绕着它们的是三类辅助动作:
+
 | 动作 | 工具 | 谁在做 |
 |------|------|--------|
 | **取材料** | `get_shot`(返回图像)、`get_transcript`、`list_shots` | 工具(供) |
 | **看图判断** | —(agent 内部多模态推理) | **agent** |
-| **存结论** | `record_shot_check`、`apply_corrections` | 工具(存) |
-| **确定性动作** | `find_supplement_candidates`、`extract_shot`、`update_shot` | 工具(算) |
+| **记下判断** | `record_shot_check` | 工具(存) |
+| **列候选** | `find_supplement_candidates` | 工具(算) |
 
-**工具不判断对错,只搬运与保存。**
+**工具不判断对错,只搬运与保存。** 判断是 agent 的,改动是 agent 让工具做的。
+
+#### 6.1.1 出口有一道门(`review.calibrate`)
+
+改完之后,**要等用户点头才能进总结**。这一点头记在 `project.json` 的 `review` 里
+(见 §4.2),由 `approve` 写下 —— agent 代答,或者用户直接在时间线页面上点按钮。
+
+门的三条规矩:
+
+1. **没确认过 → 不放行。** `write_summary` 直接报错,并说清"现在还有什么没处理"。
+2. **确认之后又改过 → 作废。** 服务端在 `approve` 那一刻把四项数记下来
+   (未校准 / 待裁决 / 未处理补图候选 / 存疑转录);放行时重新数一遍,对不上就拦,
+   并**说清是哪一项从多少变成了多少**。
+3. **带着未处理项也能过,但要留话。** `approve` 可以带一句 `note`(用户的原话最好),
+   原样存进 `project.json` —— 事后要能回答"当初为什么放行"。
+
+> **为什么 M0 说"不设审核门",M4 又加上了**:当初的理由是"编排在 agent 侧,放行是对话行为"。
+> 联调跑了两轮之后发现,靠对话把关等于没有把关 ——
+> **一个一张图都没校准的项目可以直接写总结、把步 3 标成完成**,而没有任何人会发现。
+> 门的价值不是防 agent 作弊(它没有动机),是**防"没人注意就漏过去了"**:
+> 它把一个隐性遗漏变成一个必须显式做的动作。详见 devlog [260925-21]。
 
 ### 6.2 四个子任务(agent 视角)
 
@@ -539,19 +573,30 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 ### 6.3 迭代形态(对话怎么进行)
 
 ```
-用户: 看一下截图和音频对不对得上
-agent: → list_shots + get_shot(逐张) + get_transcript
-         【agent 自己看图对照】→ record_shot_check(每张) → render_timeline()
-         "11 张匹配;第 6 张(t=602)画面像结构,但同期语音说的是结构图,存疑"
+用户: 把这个视频做成图文总结
+agent: → create_project → preprocess          （纯算法,一次做完,几分钟）
+         → list_shots → get_shot(逐张)【自己看图对照】
+         → 把材料改对:apply_corrections / extract_shot / update_shot
+         → record_shot_check(每张) 记下判断
+         → render_timeline() 把链接给用户
+         "11 张看完,改了 4 处转录;链接在这儿,你看一眼"
 用户: 第6张重新截 602 附近;另外"派森"应该是"Python"
 agent: → extract_shot(602) → get_shot(新)【再看】→ 呈现
-       → get_transcript → 【自查】→ apply_corrections([...]) → 呈现 diff
+       → apply_corrections([...]) → 呈现 diff
+       → 重渲染
 用户: 都对,继续
-agent: → find_supplement_candidates() → 判断后 extract_shot 补 3 张
+agent: → approve()        ← **这一步不过,下面写不了**
+         → write_summary()  （步 3 开始）
 ```
 
-- 每轮改动写 `calibration_log.md`(哪轮、改了哪张图/哪段字、为什么)。
-- 每轮后重渲染 `02_calibrate/timeline.html`,让人看到最新状态。
+三件事值得注意:
+
+- **停下来不是请用户批准动作,是把改完的结果拿给他看。** 该改的已经改完了,
+  他看的是成品;要改哪儿他再说 —— 那是下一轮。
+- **`approve` 是针对某个具体版本的。** 之后再动任何材料,这次确认就作废
+  (见 §6.1.1),得重新看一眼再确认。多轮迭代因此天然对齐。
+- 每轮改动写 `calibration_log.md`(哪轮、改了哪张图/哪段字、为什么),
+  每轮后重渲染时间线。
 
 ---
 
@@ -885,7 +930,7 @@ vidbrief help                                       # 用法
 |------|------|------|------|
 | `list_shots` | 供 | `project_id` | 截图清单(origin/t/是否已校准) |
 | `get_shot` | 供 | `project_id, shot_id` | **图像内容** + 元数据 + 同期转录 |
-| `get_transcript` | 供 | `project_id, [range]` | 转录分段(含 corrected_text) |
+| `get_transcript` | 供 | `project_id, [range]` | 转录分段(**`text` 就是当前有效文本**;另带 corrected/uncertain 标记) |
 | `search_transcript` | 供 | `project_id, query` | 命中分段 |
 | `get_change_curve` | 供 | `project_id, [range]` | 变化率曲线 |
 | `list_regions` | 供 | `project_id` | 密集区清单 |
@@ -896,7 +941,8 @@ vidbrief help                                       # 用法
 | `record_shot_check` | 存 | `project_id, shot_id, {match, audio_visual_sync, type_read, issues, confidence}` | 更新 `shots.json` |
 | `apply_corrections` | 存 | `project_id, [{segment_id, corrected_text, reason}]` | 更新 `transcript.fixed.json` + `transcript.diff.md` |
 | `write_note` | 存 | `project_id, path, md` | 落盘 |
-| `write_summary` | 存 | `project_id, md` | 落盘 `summary.md` |
+| `approve` | 存 | `project_id, [note]` | 记下"用户确认了校准这一步",并快照当时的四项计数 —— **步 2 通往步 3 的门**(§6.1.1) |
+| `write_summary` | 存 | `project_id, md` | 落盘 `summary.md`;**先过 `review.calibrate` 那道门** |
 | `write_report_md` | 存 | `project_id, md` | 落盘 `report.md` |
 
 ### E. 算法动作
@@ -951,7 +997,7 @@ agent: → 重写 MD → build_report(html) 重渲染
 | **M1 vidbrief-core + 步1** ✅ | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
 | **M2 时间线视图** ✅ | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
 | **M3 MCP 骨架** ✅ | `vidbrief-mcp` stdio 服务 + A–F 组工具(除两个渲染器)+ 写锁 + P1/P3/P4 | M1,M2 |
-| **M4 步2 循环** | `render_calibration_table` 对照表视图 + 提示模板 P2 + 在真实 agent 上联调 | M3 |
+| **M4 步2 循环** 🔄 | `render_calibration_table` 对照表视图 + 提示模板 P2 + 联调(自家客户端那一遍已走通) | M3 |
 | **M5 步3 总结** | 自主探索联调 + 提示模板 P4 的实战打磨 | M4 |
 | **M6 步4 报告** | `vidbrief-report` + `build_report` + 提示模板 P5 | M5 |
 | **M7 加固** | 增量重跑、失败重试、批量、性能、进度通知、外挂接口 | 全部 |

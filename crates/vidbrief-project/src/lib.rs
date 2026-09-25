@@ -51,7 +51,8 @@ pub use layout::Layout;
 pub use lock::{LockGuard, acquire};
 pub use meta::VideoMeta;
 pub use project::{
-    CalibrateProgress, Progress, Project, SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
+    Approval, CalibrateProgress, Progress, Project, Review, ReviewCounts, SCHEMA_VERSION,
+    SchemaVersion, SourceRef, StepProgress,
 };
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;

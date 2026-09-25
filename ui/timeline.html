@@ -185,6 +185,23 @@
   #shotsPanel .row .txt { flex: 1; min-width: 0; }
   #shotsPanel .row .h { font-variant-numeric: tabular-nums; color: var(--accent); }
   #shotsPanel .row .m { color: var(--dim); font-size: 11px; word-break: break-word; }
+
+  /* 审核门的按钮。
+     它只在一处出现:agent 会话里起的那个服务背后有人能执行动作;
+     `vidbrief ui` 起的页面背后没有,点了会收到一句说明。 */
+  .approve { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+             margin: 2px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .approve button { font: inherit; font-size: 12px; padding: 5px 14px; cursor: pointer;
+                    color: var(--fg); background: var(--panel); border: 1px solid var(--accent);
+                    border-radius: 4px; }
+  .approve button:hover:not(:disabled) { background: var(--accent); color: #fff; }
+  .approve button:disabled { opacity: .5; cursor: default; }
+  .approve .hint { color: var(--dim); font-size: 11px; }
+  .approve .hint.warn { color: #d29922; }
+  .approve .say { flex-basis: 100%; font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+                  word-break: break-word; display: none; }
+  .approve .say.ok { display: block; color: var(--keep); }
+  .approve .say.bad { display: block; color: #d29922; }
   /* 注意:**不要**在这里再给 #subList 加 max-height。它现在靠 .fill 的 flex:1
      吃满卡片;固定高度会让它在卡片里留出空白(这正是当初那块空白的成因)。 */
   #subList .row.cur { background: var(--seg); }
@@ -253,6 +270,11 @@
       <div class="card"><h2>当前字幕</h2><div class="body" id="now">—</div></div>
       <div class="card">
         <h2>截图(<span id="shotCount">0</span>)</h2>
+        <div class="approve">
+          <button id="approveBtn" type="button">这一步我看过了，通过</button>
+          <span id="approveHint" class="hint"></span>
+          <div id="approveSay" class="say"></div>
+        </div>
         <div class="fill" id="shotsPanel"></div>
       </div>
     </div>
@@ -666,11 +688,56 @@ window.addEventListener("keydown", (ev) => {
   if (ev.key === "t" || ev.key === "T") { themeBtn.click(); ev.preventDefault(); }
 });
 
+/* ── 审核门:页面上那个「通过」按钮 ──────────────────────────
+   它把动作发回服务,由**服务背后的宿主**去执行(见 vidbrief-viz 的 ActionHandler)。
+   页面自己不写任何东西 —— 写项目的只有一处。 */
+const approveBtn = $("#approveBtn"), approveHint = $("#approveHint"), approveSay = $("#approveSay");
+
+function projectIdFromUrl() {
+  // 页面地址形如 /<项目 id>/01_preprocess/timeline.html
+  return location.pathname.split("/").filter(Boolean)[0] || "";
+}
+
+function sayApprove(text, ok) {
+  approveSay.textContent = text;
+  approveSay.className = "say " + (ok ? "ok" : "bad");
+}
+
+function refreshApproveHint() {
+  const unchecked = D.shots.filter((s) => !s.check).length;
+  if (unchecked) {
+    approveHint.textContent = "还有 " + unchecked + " 张没校准";
+    approveHint.className = "hint warn";
+  } else {
+    approveHint.textContent = D.shots.length + " 张都已校准";
+    approveHint.className = "hint";
+  }
+}
+
+approveBtn.addEventListener("click", async () => {
+  const id = projectIdFromUrl();
+  if (!id) { sayApprove("页面地址里读不出项目 id,按钮用不了", false); return; }
+  approveBtn.disabled = true;
+  sayApprove("正在记…", true);
+  try {
+    const res = await fetch("/" + encodeURIComponent(id) + "/@action/approve", { method: "POST" });
+    const body = await res.json().catch(() => null);
+    if (!body) { sayApprove("服务回了个看不懂的东西(HTTP " + res.status + ")", false); return; }
+    sayApprove(body.message, body.ok);
+    if (body.ok) approveBtn.textContent = "已通过(再点一次可覆盖)";
+  } catch (e) {
+    sayApprove("请求没发出去:" + e, false);
+  } finally {
+    approveBtn.disabled = false;
+  }
+});
+
 /* ── 启动 ────────────────────────────────────────────────── */
 window.addEventListener("resize", () => { drawHist(); drawRuler(); });
 applyTheme(window.__vidbriefTheme);   // 到这里 off / drawHist 都已经就绪
 setPausedUi(v.paused);
 drawRuler(); drawShots(); drawSubs(); syncTo(0);
+refreshApproveHint();
 </script>
 </body>
 </html>

@@ -32,11 +32,15 @@ pub mod inspect;
 pub mod materials;
 pub mod preprocess;
 pub mod project;
+pub mod review;
 pub mod shots;
 pub mod view;
 
-#[cfg(test)]
-mod testkit;
+/// 测试夹具(造一个材料齐全的假项目)。见 `Cargo.toml` 的 `testing` 特性。
+///
+/// `cfg(test)` 这一支是给本 crate 自己的单测用的 —— 自己开不了自己的 feature。
+#[cfg(any(test, feature = "testing"))]
+pub mod testkit;
 
 pub use conclusions::{
     CorrectionInput, CorrectionOutcome, ShotCheckInput, WriteMode, apply_corrections,
@@ -47,8 +51,8 @@ pub use inspect::{
     inspect_opened,
 };
 pub use materials::{
-    ShotDetail, change_curve, list_regions, shot_detail, shot_counts, shots, transcript,
-    transcript_search,
+    SegmentView, ShotDetail, TranscriptView, change_curve, list_regions, shot_detail, shot_counts,
+    shots, transcript, transcript_search,
 };
 pub use preprocess::{
     AnalysisSummary, PreprocessOptions, PreprocessReport, Stage, TranscriptOutcome, preprocess,
@@ -56,11 +60,18 @@ pub use preprocess::{
 pub use project::{
     CreateOptions, Created, Notice, OpenProject, ProjectSummary, create, list_projects, resolve,
 };
+pub use review::{approve, counts as review_counts, gate_calibrate};
 pub use shots::{
     DEFAULT_SUPPLEMENT_WINDOW, ShotAction, extract_shot, find_supplement_candidates,
     supplement_window, update_shot,
 };
 pub use view::{render_timeline, serve_and_open};
+
+/// 页面动作的转发 —— **`vidbrief-mcp` 不必直接依赖 `vidbrief-viz`**。
+///
+/// 依赖图是 `{cli, mcp} → ops → viz`(DESIGN §10.3)。查看服务的类型属于 viz,
+/// 但"给查看服务装一个执行者"是宿主的事;从 ops 转一手,那条边就不用加。
+pub use vidbrief_viz::{Action, ActionHandler, set_action_handler};
 
 /// 默认转录片段里"同期"取多长(秒)。±这个值,见 `docs/DESIGN.md` §6.2 ①。
 pub const NEIGHBOR_WINDOW: f64 = 6.0;

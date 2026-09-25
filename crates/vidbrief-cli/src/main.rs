@@ -22,11 +22,31 @@ Commands:
   init <video> [options]    建项目(目录骨架 + 探测元数据 + 搬入源视频)
   preprocess <project>      步 1:差帧图 / 密集区 / 截图 / 转录
   status <project>          查看项目状态与健康检查
+  approve <project>         记下「校准这一步用户看过了」—— 打开通往步 3 的门
   ui <project>              渲染时间线视图 + 起本地服务 + 打开浏览器
   mcp [--stdio]             启动 MCP 服务(stdio 传输,供 agent 接入)
   help                      显示本条用法
 
 Run `vidbrief <command> -h` for the options of a command.
+";
+
+const APPROVE_USAGE: &str = "\
+vidbrief approve —— 记下「这一步用户看过了」
+
+Usage: vidbrief approve <project> [options]
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -n, --note <TEXT>        带着未处理项通过时的说明(用户的原话最好)。
+                           该处理的都处理完了就别给;给了会原样存进 project.json,事后能查
+
+说明:
+  校准(步 2)通往总结(步 3)有一道门:没被确认过、或者确认之后材料又变过,
+  写总结会被挡住。这个命令就是开门那一下。
+  服务端会记下**确认当时的材料状态**;之后你再改任何东西,这次确认就作废,
+  得重新看一遍再确认。
 ";
 
 const INIT_USAGE: &str = "\
@@ -148,6 +168,7 @@ fn main() -> ExitCode {
         "init" => cmd_init(rest),
         "status" => cmd_status(rest),
         "preprocess" => cmd_preprocess(rest),
+        "approve" => cmd_approve(rest),
         "ui" => cmd_ui(rest),
         "mcp" => cmd_mcp(rest),
         "help" | "--help" | "-h" => {
@@ -395,8 +416,63 @@ fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
     Ok((project, opts))
 }
 
-fn cmd_preprocess(args: &[String]) -> Result<()> {
+/// `vidbrief approve` —— 记下"这一步用户看过了",打开步 2 通往步 3 的门。
+///
+/// 这个命令是**人**跑的,所以它本身就是"人签的字" —— 不需要谁来转达。
+fn cmd_approve(args: &[String]) -> Result<()> {
     if wants_help(args) {
+        print!("{APPROVE_USAGE}");
+        return Ok(());
+    }
+
+    let mut note: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-n" | "--note" => {
+                let value = args.get(i + 1).context("--note 缺参数值")?;
+                note = Some(value.clone());
+                i += 2;
+            }
+            other => {
+                positional.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let name = one_positional(&positional, "approve", "项目")?;
+    let mut opened = OpenProject::open(&name)?;
+
+    // 要写 project.json,照例取锁(与 preprocess 同一套)
+    let lock = vidbrief_project::acquire(opened.layout())?;
+    if let Some(reason) = lock.degraded() {
+        eprintln!("警告:{reason}");
+    }
+
+    let approval = vidbrief_ops::approve(&mut opened, note)?;
+    let c = approval.counts;
+
+    println!("项目     {}", opened.id());
+    println!("确认于   {}", approval.approved_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "确认时   未校准 {} 张 / 待裁决 {} 张 / 未处理补图候选 {} 条 / 存疑转录 {} 段",
+        c.unchecked, c.needing_review, c.supplement_pending, c.uncertain
+    );
+    if let Some(n) = &approval.note {
+        println!("理由     {n}");
+    }
+    println!();
+
+    // 把"还欠着什么"摆在眼前 —— 门开是开了,但用户该知道自己是带着什么过的
+    if c.unchecked > 0 || c.needing_review > 0 || c.supplement_pending > 0 || c.uncertain > 0 {
+        println!("注意:上面这些还没处理完,你确认的是「就这样往下走」—— 理由已经记进 project.json。");
+    }
+    println!("门开了,可以写总结了。**之后任何一次改动都会让这次确认作废。**");
+    Ok(())
+}
+
+fn cmd_preprocess(args: &[String]) -> Result<()> {    if wants_help(args) {
         print!("{PREPROCESS_USAGE}");
         return Ok(());
     }

@@ -39,9 +39,10 @@ pub struct ShotRef {
 pub struct TranscriptQuery {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
-    /// 只要与 `[start, end]` 重叠的段。
+    /// 起点(秒)。与 `end` 一起给;两个都不给 = 全量。
     #[serde(default)]
     pub start: Option<f64>,
+    /// 终点(秒)。和 `start` 必须成对 —— 只给一头会被打回来问清楚。
     #[serde(default)]
     pub end: Option<f64>,
 }
@@ -91,7 +92,10 @@ impl VidbriefServer {
         let (shots, counts) = blocking(move || {
             let shots = vidbrief_ops::shots(&opened)?;
             let counts = vidbrief_ops::shot_counts(&shots);
-            Ok((shots, counts))
+            // 只交数组,不交外层信封:`generated_at` 对判断没有用,
+            // 而 `{"shots": {"shots": [...]}}` 这种套娃**真会让人取错**
+            // (M4 联调时,写这段客户端的第一版就栽在 KeyError 上)。
+            Ok((shots.shots, counts))
         })
         .await?;
         json(&serde_json::json!({
@@ -118,12 +122,16 @@ impl VidbriefServer {
 
         // 元数据在前、图像在后:先告诉模型"这是什么、什么时候、同期说了什么",
         // 再让它看图 —— 顺序反了的话模型容易只描述画面而忽略对照。
+        //
+        // 这里**不给绝对路径**:get_shot 的路径是 `E:\temp\x\01_preprocess/shots/s001.jpg`
+        // 那种混合分隔符(Windows 上 `PathBuf` 拼出来的),既难看又是 agent 用不上的东西
+        // (它读不了文件,要图就用这个工具、要引用就用 `shot.id`)。
+        // 项目内一律 `RelPath`,这条规矩在 `AGENTS.md` 里。
         let meta = serde_json::json!({
             "shot": detail.shot,
             "window_start": detail.window_start,
             "window_end": detail.window_end,
             "transcript": detail.transcript,
-            "image_path": detail.image_path.display().to_string(),
             "mime": detail.mime,
             "bytes": detail.image.len(),
         });

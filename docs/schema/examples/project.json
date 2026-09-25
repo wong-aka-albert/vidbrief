@@ -27,5 +27,17 @@
       "done": false,
       "at": null
     }
+  },
+  "review": {
+    "calibrate": {
+      "approved_at": "2026-09-24T21:22:30+08:00",
+      "counts": {
+        "unchecked": 0,
+        "needing_review": 3,
+        "supplement_pending": 0,
+        "uncertain": 2
+      },
+      "note": "用户说:那 3 张我知道,先往下走"
+    }
   }
 }

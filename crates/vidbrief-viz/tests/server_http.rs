@@ -218,8 +218,7 @@ fn path_traversal_is_blocked_at_both_gates() {
 }
 
 #[test]
-fn unknown_paths_are_404_and_directories_are_not_listed() {
-    let dir = stage("404");
+fn unknown_paths_are_404_and_directories_are_not_listed() {    let dir = stage("404");
     let id = format!("nf-{}", std::process::id());
     vidbrief_viz::mount(&id, &dir).unwrap();
     let port = vidbrief_viz::ensure_running().unwrap();
@@ -254,6 +253,51 @@ fn url_for_builds_a_loopback_url() {
 
     // 非法相对路径要被拒
     assert!(vidbrief_viz::url_for(&id, "../x").is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **页面按钮走的那条路**:动作交回宿主执行,viz 自己不碰项目文件。
+///
+/// 这里验的是**路由与回话**:动作名能不能认出来、非动作的 POST 会不会被挡、
+/// 宿主的回话有没有原样送到页面。
+#[test]
+fn page_actions_are_handed_to_the_host() {
+    use std::sync::Arc;
+
+    // 进程内只认第一次注册;`set_action_handler` 重复调用会被忽略,
+    // 所以这里注册的标记在别的用例里也照样生效(它们不依赖"没有宿主")。
+    //
+    // "没有宿主"那一支在**另一个测试文件**里验 —— 集成测试各自一个进程,
+    // 那是唯一能拿到"从没注册过"的干净进程的办法。
+    vidbrief_viz::set_action_handler(Arc::new(|id: &str, action| {
+        Ok(format!("宿主收到:项目 {id},动作 {action:?}"))
+    }));
+
+    let dir = stage("action");
+    let id = format!("act-{}", std::process::id());
+    vidbrief_viz::mount(&id, &dir).unwrap();
+    let port = vidbrief_viz::ensure_running().unwrap();
+
+    // ① 认识的动作 → 200 + 宿主那句话
+    let ok = http(port, "POST", &format!("/{id}/@action/approve"), None);
+    assert_eq!(ok.status, 200, "{}", String::from_utf8_lossy(&ok.body));
+    let body = String::from_utf8_lossy(&ok.body);
+    assert!(body.contains("\"ok\":true"), "回话该带 ok 字段:{body}");
+    assert!(
+        body.contains("宿主收到") && body.contains(&id),
+        "宿主的回话要原样送到页面(它才是页面显示的那句话):{body}"
+    );
+
+    // ② 不认识的动作 → 404,而且要说清支持哪些
+    let unknown = http(port, "POST", &format!("/{id}/@action/delete_everything"), None);
+    assert_eq!(unknown.status, 404);
+    let body = String::from_utf8_lossy(&unknown.body);
+    assert!(body.contains("approve"), "该列出支持的动作:{body}");
+
+    // ③ POST 到文件路径 → 405(**不是** 404:资源在,只是不收 POST)
+    let to_file = http(port, "POST", &format!("/{id}/project.json"), None);
+    assert_eq!(to_file.status, 405);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

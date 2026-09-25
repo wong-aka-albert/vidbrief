@@ -11,12 +11,15 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
-vidbrief-asr.workspace = true
-vidbrief-core.workspace = true
 vidbrief-mcp.workspace = true
 vidbrief-ops.workspace = true
 vidbrief-project.workspace = true
-vidbrief-viz.workspace = true
 
 [dev-dependencies]
+base64 = "0.23"
 jsonschema = { version = "0.57", default-features = false }
+# `testing` 打开 `vidbrief-ops::testkit`:端到端测试要一个**材料齐全的假项目**,
+# 而"项目目录长什么样"只有那一层知道(见那边的 Cargo.toml)。
+vidbrief-ops = { workspace = true, features = ["testing"] }
+# 只在测试里用:直接探一次视频元数据,核对 CLI 走 `ops` 得到的结果(deps 里不需要)
+vidbrief-core.workspace = true

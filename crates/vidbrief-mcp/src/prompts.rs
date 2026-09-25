@@ -53,9 +53,15 @@ impl VidbriefServer {
              2. 亲自查看图像,并严格对照同期转录:转录明确说的信息(对象/规格/方向)必须服从;\n\
                 画面独有的信息(形态/标注线/数值)如实读出,并注明这是从画面推断的。\n\
              3. 若转录与画面矛盾,写进 `issues`。\n\
-             4. 用 `record_shot_check` 逐张存回结论。**不要臆测** —— 不确定就 `confidence: low`,或\n\
-                在 `type_read` 里如实写「画面无法确认」。\n\
-             5. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
+             4. 有些图**压根不值得校准**:画面全黑或纯色(讲完话切黑、片尾淡出常出这种)、\n\
+                与另一张是同一张幻灯片、或者糊到什么都看不出来。这类用 `update_shot` 的\n\
+                `drop` 弃掉(它只标记不删文件),在汇报里说明为什么 —— **不要硬写结论**。\n\
+                实测:16 分钟的视频里,末尾那次切黑就让算法白截了一张。\n\
+             5. **发现转录写错了就改掉**(`apply_corrections`),不要只写进 `issues`。\n\
+                校准是把材料改对,不是列一张待办清单 —— 用户要看的是改完的结果。\n\
+             6. 用 `record_shot_check` 逐张存回结论。**不要臆测** —— 不确定就 `confidence: low`,或\n\
+                在 `type_read` 里如实写「画面无法确认」。读不出来的地方**不要拿转录去补**。\n\
+             7. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
              \n\
              最后向用户汇报:多少张匹配、多少张存疑、哪几张需要他裁决。**不要替他下结论。**"
         ))
@@ -127,7 +133,14 @@ mod tests {
         let cases: [(&str, &[&str]); 3] = [
             (
                 "calibrate_shots",
-                &["list_shots", "get_shot", "record_shot_check", "render_timeline"],
+                &[
+                    "list_shots",
+                    "get_shot",
+                    "record_shot_check",
+                    "update_shot",
+                    "apply_corrections",
+                    "render_timeline",
+                ],
             ),
             (
                 "find_missing_shots",

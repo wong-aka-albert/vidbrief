@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vidbrief project.json",
-  "description": "项目元数据与各步进度标记。设计见 docs/DESIGN.md §4.2,约定见 docs/schema/README.md。",
+  "description": "项目元数据、各步进度标记、用户确认。设计见 docs/DESIGN.md §4.2,约定见 docs/schema/README.md。",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -40,7 +40,11 @@
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "original", "link"],
+      "required": [
+        "path",
+        "original",
+        "link"
+      ],
       "properties": {
         "path": {
           "$ref": "#/$defs/relpath",
@@ -53,7 +57,11 @@
         },
         "link": {
           "type": "string",
-          "enum": ["hardlink", "symlink", "copy"],
+          "enum": [
+            "hardlink",
+            "symlink",
+            "copy"
+          ],
           "description": "源视频进入项目的方式。只有 copy 的项目是自包含的;硬链接/软链接的项目依赖原文件还在"
         }
       }
@@ -61,35 +69,77 @@
     "glossary": {
       "description": "术语表;默认 null = 关闭。非 null 时每项是一个正确写法",
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       ]
     },
     "progress": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["preprocess", "calibrate", "summarize", "report"],
+      "required": [
+        "preprocess",
+        "calibrate",
+        "summarize",
+        "report"
+      ],
       "properties": {
-        "preprocess": { "$ref": "#/$defs/step_progress" },
+        "preprocess": {
+          "$ref": "#/$defs/step_progress"
+        },
         "calibrate": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["rounds", "last_at"],
+          "required": [
+            "rounds",
+            "last_at"
+          ],
           "properties": {
             "rounds": {
               "type": "integer",
               "minimum": 0,
               "description": "校准迭代轮数。校准不设通过/未通过,只记轮数"
             },
-            "last_at": { "$ref": "#/$defs/nullable_timestamp" }
+            "last_at": {
+              "$ref": "#/$defs/nullable_timestamp"
+            }
           }
         },
-        "summarize": { "$ref": "#/$defs/step_progress" },
-        "report": { "$ref": "#/$defs/step_progress" }
+        "summarize": {
+          "$ref": "#/$defs/step_progress"
+        },
+        "report": {
+          "$ref": "#/$defs/step_progress"
+        }
+      }
+    },
+    "review": {
+      "description": "用户对各步的确认 —— 审核门。缺省视作谁都没确认过",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calibrate"
+      ],
+      "properties": {
+        "calibrate": {
+          "description": "步 2(校准)的确认。null = 还没被确认过;非 null 时,数一变就作废",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/approval"
+            }
+          ]
+        }
       }
     }
   },
@@ -101,7 +151,14 @@
       "description": "RFC 3339 带 UTC 偏移,如 2026-09-24T21:00:00+08:00"
     },
     "nullable_timestamp": {
-      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/timestamp" }]
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/timestamp"
+        }
+      ]
     },
     "relpath": {
       "type": "string",
@@ -112,10 +169,79 @@
     "step_progress": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["done", "at"],
+      "required": [
+        "done",
+        "at"
+      ],
       "properties": {
-        "done": { "type": "boolean" },
-        "at": { "$ref": "#/$defs/nullable_timestamp" }
+        "done": {
+          "type": "boolean"
+        },
+        "at": {
+          "$ref": "#/$defs/nullable_timestamp"
+        }
+      }
+    },
+    "review_counts": {
+      "description": "确认当时数下来的四项。全是服务端自己数得出来的,不含自报值",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unchecked",
+        "needing_review",
+        "supplement_pending",
+        "uncertain"
+      ],
+      "properties": {
+        "unchecked": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "还没校准的截图张数"
+        },
+        "needing_review": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "需要人裁决的截图张数"
+        },
+        "supplement_pending": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "还没处理过的补图候选条数"
+        },
+        "uncertain": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "标了存疑但没改、等人裁决的转录段数"
+        }
+      }
+    },
+    "approval": {
+      "description": "一次确认。没有 approved_by —— 拿不到,填不出来的字段迟早被填成假的",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approved_at",
+        "counts",
+        "note"
+      ],
+      "properties": {
+        "approved_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "counts": {
+          "$ref": "#/$defs/review_counts"
+        },
+        "note": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "带着未处理项通过时的说明;正常通过是 null"
+        }
       }
     }
   }

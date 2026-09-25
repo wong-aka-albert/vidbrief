@@ -407,7 +407,12 @@ pub fn write_note(
 }
 
 /// 写 `03_summary/summary.md` 并标记步 3 完成。
+///
+/// **先过步 2 的门**(`review::gate_calibrate`)。这是 M4 联调之后加的:
+/// 在那之前,一个一张图都没校准的项目可以直接写总结、把步 3 标成完成 ——
+/// "靠对话把关"等于没有把关。
 pub fn write_summary(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
+    crate::review::gate_calibrate(opened)?;
     let path = opened.layout().summary_md();
     vidbrief_project::write_atomic_str(&path, md).context("写入 summary.md 失败")?;
     opened.project_mut().progress.summarize.mark_done();
@@ -707,6 +712,15 @@ mod tests {
         let fake = Fake::new("concl-steps");
         let mut opened = fake.open();
 
+        // 步 2 的门:没确认过就不许写总结(M4 联调之后加的)
+        let blocked = write_summary(&mut opened, "# 总结\n").unwrap_err().to_string();
+        assert!(blocked.contains("还没经过用户确认"), "{blocked}");
+        assert!(
+            !fake.layout().summary_md().is_file(),
+            "被挡住的时候**不该留下半成品**"
+        );
+
+        crate::review::approve(&mut opened, None).unwrap();
         write_summary(&mut opened, "# 总结\n").unwrap();
         write_report_md(&mut opened, "# 报告\n").unwrap();
 

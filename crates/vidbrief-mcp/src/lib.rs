@@ -27,6 +27,7 @@
 //! API 不稳则直接实现 tools 的 JSON-RPC" —— 3.1.2 的 `#[tool_router]` / `#[tool_handler]`
 //! 宏已经够用,不必手写 JSON-RPC。
 
+pub mod action_handler;
 pub mod json;
 pub mod prompts;
 pub mod resources;
@@ -34,6 +35,7 @@ pub mod server;
 pub mod state;
 pub mod tools;
 
+pub use action_handler::install_action_handler;
 pub use server::VidbriefServer;
 
 use anyhow::Context as _;
@@ -55,6 +57,10 @@ pub fn serve_stdio() -> anyhow::Result<()> {
         use rmcp::ServiceExt as _;
 
         let server = VidbriefServer::new();
+        // 页面上的按钮要能落到这个进程里执行 —— **用同一份 State**(同一把写锁、
+        // 同一张"见过的项目"表),并用同一个运行时排队,免得和工具调用各写各的
+        // `project.json`。见 `action_handler` 的模块说明。
+        install_action_handler(server.state_arc(), tokio::runtime::Handle::current());
         let running = server
             .serve(rmcp::transport::stdio())
             .await

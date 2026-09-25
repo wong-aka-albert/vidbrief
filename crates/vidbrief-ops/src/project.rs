@@ -25,7 +25,8 @@ pub fn resolve(arg: &str) -> Result<Layout> {
         return Ok(Layout::new(under));
     }
     bail!(
-        "找不到项目:`{arg}` —— 它既不是含 {} 的目录,也不是 projects/ 下的项目名",
+        "找不到项目:`{arg}` —— 它既不是含 {} 的目录,也不是 projects/ 下的项目名。\n\
+         先 `list_projects` 看看有哪些项目,或者让用户给一下项目目录的路径。",
         vidbrief_project::layout::PROJECT_FILE
     )
 }

@@ -43,6 +43,55 @@ struct Running {
 
 static SERVER: OnceLock<Running> = OnceLock::new();
 
+/// 页面上能按的按钮。
+///
+/// **加一个动作 = 加一个变体**,而不是让前端传任意字符串进来 ——
+/// 这是个会写用户项目的入口,不许有"随便调"的余地。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// 「这一步我看过了,通过」—— 记下用户对校准的确认(见 `vidbrief-ops::review`)。
+    Approve,
+}
+
+impl Action {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "approve" => Some(Self::Approve),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+        }
+    }
+}
+
+/// 宿主注册进来的执行者:`(项目 id, 动作) -> 给页面看的话`。
+///
+/// # 为什么 viz 不自己写
+///
+/// **写项目的只能有一处。** 这个服务有时候跑在 MCP 会话进程里(那时锁在该进程手上、
+/// 状态也在),有时候跑在 `vidbrief ui` 进程里(那时压根没有会话)。让它自己写文件,
+/// 就有了第二条写入路径 —— 锁、状态、报错文案全得再来一套。
+///
+/// 所以这里只负责**收**和**回话**:把动作交回宿主,宿主爱怎么执行怎么执行。
+pub type ActionHandler =
+    dyn Fn(&str, Action) -> std::result::Result<String, String> + Send + Sync;
+
+static HANDLER: OnceLock<std::sync::Arc<ActionHandler>> = OnceLock::new();
+
+/// 注册执行者。**进程内只认第一次** —— 重复注册会被忽略(同一个进程没必要换执行者)。
+pub fn set_action_handler(handler: std::sync::Arc<ActionHandler>) {
+    let _ = HANDLER.set(handler);
+}
+
+/// 有没有执行者。`vidbrief ui` 起的进程没有,所以页面上的按钮要据此说明自己为什么不能用。
+pub fn has_action_handler() -> bool {
+    HANDLER.get().is_some()
+}
+
 /// 确保本地查看服务在跑,返回端口号。**进程内单例。**
 ///
 /// `root` 是首个挂载的目录(用于日志);真正的路径映射靠 [`mount`]。
@@ -108,8 +157,9 @@ fn serve_forever(server: Server) {
 }
 
 fn handle(_server: &Server, request: Request) -> Result<()> {
-    if request.method() != &Method::Get && request.method() != &Method::Head {
-        return respond_text(request, 405, "只支持 GET");
+    let is_post = request.method() == &Method::Post;
+    if !is_post && request.method() != &Method::Get && request.method() != &Method::Head {
+        return respond_text(request, 405, "只支持 GET / HEAD / POST");
     }
 
     let raw_url = request.url().to_string();
@@ -121,6 +171,12 @@ fn handle(_server: &Server, request: Request) -> Result<()> {
     let Some((id, rest)) = trimmed.split_once('/') else {
         return respond_text(request, 404, "路径应当形如 /<项目 id>/<文件>");
     };
+
+    // POST 只有一条路:页面上的按钮
+    if is_post {
+        return handle_action(request, id, rest);
+    }
+
     let rest = if rest.is_empty() { "project.json" } else { rest };
 
     let root = {
@@ -214,6 +270,59 @@ fn respond_text(request: Request, code: u16, text: &str) -> Result<()> {
             Response::from_string(text)
                 .with_status_code(StatusCode(code))
                 .with_header(header("Content-Type", "text/plain; charset=utf-8")),
+        )
+        .map_err(Into::into)
+}
+
+/// `POST /<项目 id>/@action/<名字>` —— 页面上的按钮走这条。
+///
+/// **它自己不碰项目文件**:把动作交给宿主注册的 [`ActionHandler`]。
+fn handle_action(mut request: Request, id: &str, rest: &str) -> Result<()> {
+    let Some(name) = rest.strip_prefix("@action/") else {
+        return respond_text(
+            request,
+            405,
+            "POST 只用于页面动作(/<项目 id>/@action/<名字>);读文件请用 GET",
+        );
+    };
+    let Some(action) = Action::parse(name) else {
+        let known: Vec<&str> = [Action::Approve].iter().map(|a| a.name()).collect();
+        return respond_json(
+            request,
+            404,
+            &format!("不认识的页面动作 `{name}`;支持的是:{}", known.join("、")),
+            false,
+        );
+    };
+
+    // 请求体读掉(这个动作不需要参数)。不读干净会让连接状态错乱。
+    let mut body = String::new();
+    let _ = request.as_reader().read_to_string(&mut body);
+
+    let Some(handler) = HANDLER.get() else {
+        return respond_json(
+            request,
+            503,
+            "这个页面背后没有能执行动作的宿主(多半是 `vidbrief ui` 起的,它只读)。\
+             请从 agent 会话里打开的那份页面点,或者用命令行:`vidbrief approve <项目>`",
+            false,
+        );
+    };
+
+    match handler(id, action) {
+        Ok(message) => respond_json(request, 200, &message, true),
+        Err(e) => respond_json(request, 409, &e, false),
+    }
+}
+
+/// 给页面的回话。**成功失败都带 `ok`**,前端只看这一个字段。
+fn respond_json(request: Request, code: u16, message: &str, ok: bool) -> Result<()> {
+    let payload = serde_json::json!({ "ok": ok, "message": message }).to_string();
+    request
+        .respond(
+            Response::from_string(payload)
+                .with_status_code(StatusCode(code))
+                .with_header(header("Content-Type", "application/json; charset=utf-8")),
         )
         .map_err(Into::into)
 }
@@ -414,5 +523,16 @@ mod tests {
         // 不真的起服务也能测到校验那一层 —— 它排在 ensure_running 之后,
         // 所以这里只测 RelPath 本身(服务的路径校验在 traversal 那条测试里)
         assert!(RelPath::new("../x").is_err());
+    }
+
+    /// 页面动作的名字是**线格式**:前端 URL 里写的、这里解析的,必须是同一串字。
+    ///
+    /// 漂了的话按钮会永远 404,而 404 的理由看着像"路径写错了" —— 很难查。
+    #[test]
+    fn action_names_round_trip_on_the_wire() {
+        for action in [Action::Approve] {
+            assert_eq!(Action::parse(action.name()), Some(action));
+        }
+        assert_eq!(Action::parse("delete_everything"), None, "不认识的必须被拒");
     }
 }

@@ -41,8 +41,13 @@ impl VidbriefServer {
         }
     }
 
-    pub fn state(&self) -> &State {
-        &self.state
+    /// 本进程状态的句柄。
+    ///
+    /// 给**进程内的其它线程**用 —— 具体说,是本地查看服务收到页面按钮时,
+    /// 要在同一个 `State` 下执行动作(用同一把写锁、同一张"见过的项目"表)。
+    /// 换成另一个 `State` 就等于另开一套锁,那是自找麻烦。
+    pub fn state_arc(&self) -> Arc<State> {
+        self.state.clone()
     }
 
     /// 给测试用:本服务注册的全部工具名。
@@ -73,16 +78,23 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
 
 四步(每一步做完都要停下来给用户看,不要一路跑到底):
   ① create_project → preprocess          建项目、跑前处理(纯算法,一次做完)
-  ② 校准:list_shots → get_shot 逐张看图 → record_shot_check 存回;转录纠错用 apply_corrections
+  ② 校准:list_shots → get_shot 逐张看图,然后**把材料改对** ——
+     错的改对(apply_corrections)、缺的补上(extract_shot)、多余的删掉(update_shot);
+     判断用 record_shot_check 记下来,最后 render_timeline 给用户看。
+     **用户点头之后调 approve** —— 不 approve 就写不了总结(那是道门)。
   ③ 总结:search_transcript / get_shot 自主探索 → write_summary
   ④ 报告:write_report_md
+
+**校准是把材料改对,不是在旁边记笔记。** 只写「这里图文不符」而不去改,等于没校准 ——
+用户要看的是改完的结果,不是待办清单。
 
 三条硬规矩:
   1. **看了图再下结论。** get_shot 会把图像交给你;不要只看转录就推断画面上有什么。
   2. **转录可能听错。** 实测「Python」被听成「派森」、「元组」被听成「元祖」。
      纠错的第一依据是**画面上的文字**,其次是上下文,术语表最后。
   3. **诚实地写\"看不出来\"。** get_shot 返回的图像若是糊的/切走的/与转录不符,
-     如实写进 issues 并给 low confidence —— 用户会在审查节点裁决。";
+     如实写进 issues 并给 low confidence —— 用户会在审查节点裁决。
+     **读不出来的地方不要拿转录去补** —— 编得像真的,比说「不知道」危险得多。";
 
 // 两个宏必须叠在**同一个** impl 块上:一个 trait 只能实现一次。
 // `get_info` 我们自己写了,所以宏不会覆盖它 —— 能力声明以我们写的为准(工具+提示+资源三种)。

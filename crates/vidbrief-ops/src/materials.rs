@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use vidbrief_project::{ChangeCurve, DenseRegions, RelPath, Segment, Shot, ShotId, Shots, Transcript};
+use vidbrief_project::{
+    ChangeCurve, Correction, DenseRegions, RelPath, Segment, Shot, ShotId, Shots, Transcript,
+};
 
 use crate::inspect::ShotCounts;
 use crate::project::OpenProject;
@@ -49,10 +51,14 @@ pub struct ShotDetail {
 /// 取一张截图 + 它前后 `window` 秒的转录。
 pub fn shot_detail(opened: &OpenProject, id: ShotId, window: f64) -> Result<ShotDetail> {
     let shots = shots(opened)?;
-    let shot = shots
-        .get(id)
-        .with_context(|| format!("项目里没有截图 {id}"))?
-        .clone();
+    let Some(shot) = shots.get(id).cloned() else {
+        // 找不到就**把可用的 id 报出来**。
+        //
+        // 这不是"报错要好看":调用方(尤其 agent)手上那个 id 可能来自转录、
+        // 来自用户口述、来自上一轮会话的记忆 —— 它没有别的办法知道哪儿写错了。
+        // 报一句"没有这张图"它就得再问一轮;报出可用的 id,它当场就能改。
+        anyhow::bail!("{}", missing_shot_hint(&shots, id));
+    };
 
     let image_path = opened.layout().rel(shot.file.as_str());
     let image = std::fs::read(&image_path)
@@ -77,6 +83,36 @@ pub fn shot_detail(opened: &OpenProject, id: ShotId, window: f64) -> Result<Shot
         window_start: start,
         window_end: end,
     })
+}
+
+/// 找不到截图时该说的话:**说清有哪些**,而不是只说没有。
+///
+/// 一次最多列 [`MAX_LISTED_IDS`] 个 —— 一张一张数给调用方看没有意义,
+/// 它要的是"我手上这个数为什么不对"。
+fn missing_shot_hint(shots: &Shots, want: ShotId) -> String {
+    const MAX_LISTED_IDS: usize = 12;
+
+    if shots.shots.is_empty() {
+        return format!(
+            "项目里没有截图 {want} —— 这个项目**一张截图都没有**,步 1(`preprocess`)可能还没跑完。"
+        );
+    }
+    let ids: Vec<String> = shots
+        .shots
+        .iter()
+        .take(MAX_LISTED_IDS)
+        .map(|s| s.id.to_string())
+        .collect();
+    let tail = if shots.shots.len() > MAX_LISTED_IDS {
+        format!("(共 {} 张)", shots.shots.len())
+    } else {
+        String::new()
+    };
+    // 用逗号拼,不用手动切片 —— 中文按字节切会 panic(见 AGENTS.md)
+    format!(
+        "项目里没有截图 {want}。可用的 id:{}{tail}",
+        ids.join("、")
+    )
 }
 
 // ── 转录 ─────────────────────────────────────────────────────────────
@@ -106,6 +142,49 @@ pub fn effective_transcript(opened: &OpenProject) -> Result<(Transcript, PathBuf
     Ok((t, raw, false))
 }
 
+/// 一段转录的**取用视图**。
+///
+/// `text` 是**当前有效的文本**(有纠错就是改后的那版)。
+///
+/// 为什么不直接把契约层的 `Segment` 扔出去:它同时带着 `text`(原始)与
+/// `corrected_text`(改后),读哪一个由调用方自己拿主意 —— 而契约层明写着
+/// 「所有下游都应通过 `effective_text` 取文本,**否则纠错就白做了**」。
+/// 把这条规矩留给每个调用方遵守,等于没有规矩:M4 联调时,`get_transcript`
+/// 返回的 `text` 里仍是「张小明」,而同一份材料在 `get_shot` 的同期转录里
+/// 已经是改后的 —— **同一个工具集,两种说法**。
+///
+/// 原始文本不会因此丢掉:它一直在 `01_preprocess/transcript.json` 里(永不就地改写),
+/// `transcript.diff.md` 也逐条记着改了什么。
+#[derive(Debug, Clone, Serialize)]
+pub struct SegmentView {
+    /// 等于 SRT 里的序号,从 1 起。
+    pub id: u32,
+    pub start: f64,
+    pub end: f64,
+    /// 当前有效的文本。
+    pub text: String,
+    /// 这一段**被真的改过**吗(区别于"存疑但没改")。
+    pub corrected: bool,
+    /// 存疑但没改 —— 留着让用户裁决。
+    pub uncertain: bool,
+    /// 改动的性质与说明;没动过就是 `null`。
+    pub correction: Option<Correction>,
+}
+
+impl SegmentView {
+    fn of(seg: &Segment) -> Self {
+        Self {
+            id: seg.id,
+            start: seg.start,
+            end: seg.end,
+            text: seg.effective_text().to_string(),
+            corrected: seg.is_corrected(),
+            uncertain: seg.is_uncertain(),
+            correction: seg.correction.clone(),
+        }
+    }
+}
+
 /// 转录的取用视图。带上"这份是什么"的元信息,免得 agent 以为自己读的是原文。
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptView {
@@ -119,7 +198,7 @@ pub struct TranscriptView {
     /// 全量段数(即使本次只返回了一部分)。
     pub total_segments: usize,
     /// 本次返回的段。
-    pub segments: Vec<Segment>,
+    pub segments: Vec<SegmentView>,
 }
 
 /// 取转录。给了 `range` 就只取与 `[start, end]` 重叠的段。
@@ -130,12 +209,12 @@ pub fn transcript(opened: &OpenProject, range: Option<(f64, f64)>) -> Result<Tra
     let segments = match range {
         Some((start, end)) if end >= start => full
             .segments_in(start, end)
-            .cloned()
+            .map(SegmentView::of)
             .collect::<Vec<_>>(),
         Some((start, end)) => {
             anyhow::bail!("区间不合法:start={start} > end={end}");
         }
-        None => full.segments.clone(),
+        None => full.segments.iter().map(SegmentView::of).collect(),
     };
 
     Ok(TranscriptView {
@@ -161,12 +240,12 @@ pub fn transcript_search(opened: &OpenProject, query: &str, limit: usize) -> Res
         anyhow::bail!("查询词不能为空");
     }
 
-    let hits: Vec<Segment> = full
+    let hits: Vec<SegmentView> = full
         .segments
         .iter()
         .filter(|s| s.effective_text().to_lowercase().contains(&needle))
         .take(limit)
-        .cloned()
+        .map(SegmentView::of)
         .collect();
 
     Ok(TranscriptView {
@@ -291,7 +370,8 @@ mod tests {
 
         let before = transcript(&opened, None).unwrap();
         assert!(!before.corrected);
-        assert_eq!(before.segments[0].effective_text(), "派森列表");
+        assert_eq!(before.segments[0].text, "派森列表");
+        assert!(!before.segments[0].corrected);
 
         // 写一份纠错稿进去,再读就该拿到纠错后的文本
         let mut fixed = Transcript::load(&opened.layout().transcript()).unwrap();
@@ -300,6 +380,11 @@ mod tests {
 
         let after = transcript(&opened, None).unwrap();
         assert!(after.corrected);
-        assert_eq!(after.segments[0].effective_text(), "Python 列表");
+        // **不用调 `effective_text`** —— 视图里 `text` 就是当前有效的那一份。
+        //
+        // 这条断言以前写的是 `segments[0].effective_text()`:它绿着,却挡不住
+        // "调用方忘了调"这个真问题(M4 联调就是这么栽的)。现在规矩在类型里。
+        assert_eq!(after.segments[0].text, "Python 列表");
+        assert!(after.segments[0].corrected, "该标出这一段被动过");
     }
 }
