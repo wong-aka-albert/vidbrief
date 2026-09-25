@@ -20,15 +20,20 @@ use vidbrief_ops::OpenProject;
 use vidbrief_project::layout::identity;
 use vidbrief_project::lock::{LockGuard, acquire};
 
-/// 本进程的会话标识。写进 `project.lock`,用来回答"是哪个会话占着"。
+/// 本进程的会话标识。
+///
+/// **不再写进 `project.lock`**(那是个空哨兵,见 `vidbrief_project::lock` 的模块文档),
+/// 只用来在日志与诊断里区分进程 —— stdio 下 1 会话 = 1 进程,pid 就够了。
 pub fn session_name() -> String {
     format!("mcp#{}", std::process::id())
 }
 
 pub struct State {
-    session: String,
     /// 已持有的写锁:项目根 → guard。**只有 `Some` 一种状态** ——
     /// 没有"只读登记"这回事,拿不到锁就是失败。
+    ///
+    /// 这张表不能省:OS 锁**同进程跨 handle 也生效**,所以同一个项目在同一个进程里
+    /// 第二次取锁同样会被自己挡住 —— 必须先在这里查一次(键是 [`identity`])。
     locks: Mutex<HashMap<PathBuf, Arc<LockGuard>>>,
     /// 每项目一把的串行锁(进程内)。
     busy: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
@@ -45,16 +50,11 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         Self {
-            session: session_name(),
             locks: Mutex::new(HashMap::new()),
             busy: Mutex::new(HashMap::new()),
             seen: Mutex::new(BTreeMap::new()),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
-    }
-
-    pub fn session(&self) -> &str {
-        &self.session
     }
 
     pub fn cwd(&self) -> &Path {
@@ -99,7 +99,7 @@ impl State {
         }
         // 注意:这里**不能**持着 locks 的锁去 acquire —— 那是文件 IO,
         // 而其它线程可能正等着登记表。窄化临界区,代价只是极端情况下多开一次文件。
-        let guard = acquire(opened.layout(), &self.session)?;
+        let guard = acquire(opened.layout())?;
         let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         // 竞态兜底:两个工具调用同时进来时,后来者复用先进去的那个 guard
         locks.entry(dir).or_insert_with(|| Arc::new(guard));
@@ -138,7 +138,7 @@ impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 不打印锁的内部状态:它是给别人看的诊断信息,不是这里要展示的东西
         f.debug_struct("State")
-            .field("session", &self.session)
+            .field("session", &session_name())
             .field("cwd", &self.cwd)
             .finish_non_exhaustive()
     }

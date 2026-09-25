@@ -103,7 +103,6 @@
 | 文件 | 位置 | Schema | 示例 |
 |------|------|--------|------|
 | 项目元数据与进度 | `project.json` | [project.schema.json](project.schema.json) | [examples/project.json](examples/project.json) |
-| 项目写锁 | `project.lock` | [project_lock.schema.json](project_lock.schema.json) | [examples/project.lock](examples/project.lock) |
 | 源视频技术元数据 | `source/video.meta.json` | [video_meta.schema.json](video_meta.schema.json) | [examples/video.meta.json](examples/video.meta.json) |
 | 差帧图 | `01_preprocess/change_curve.json` | [change_curve.schema.json](change_curve.schema.json) | [examples/change_curve.json](examples/change_curve.json) |
 | 变化密集区 | `01_preprocess/dense_regions.json` | [dense_regions.schema.json](dense_regions.schema.json) | [examples/dense_regions.json](examples/dense_regions.json) |
@@ -174,7 +173,12 @@
 
 - `project.json.rev` 是**乐观并发**的修订号:任何写操作须带上读到的 `rev`,不匹配则返回 `stale`,由 agent 重读后再改。工具自身每次成功写入 `project.json` 时 `rev += 1`。
 - 所有写盘走"**临时文件 + 原子 rename**"(见 `vidbrief_project::json::write_atomic`),避免读到半截 JSON。
-- `project.lock` 的**读写逻辑**在 M3(MCP 多会话真正出现时)实现;M0 只定格式与类型。
+- `project.lock` **不归本目录管**:它是个 **0 字节的哨兵**,不是材料文件 ——
+  里面没有任何内容,所以既没有 schema 也没有示例。判据是"锁拿不拿得到",
+  **不是"文件存不存在"**(空闲的项目里它也在)。
+  > M0 曾经给它定过格式(pid / host / session / opened_at),M3 实现时发现那是错的:
+  > 把持有者信息写进锁文件,会在 Windows 上被强制锁挡住 —— 恰恰在最需要那句话的时候读不到
+  > (详见 `docs/devlog/2026-09.md` 的 260925-05 与 260925-10)。
 
 ---
 

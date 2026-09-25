@@ -91,8 +91,10 @@ M2(时间线视图 + 本地查看服务)、**M3(MCP stdio 服务 + 20 个工具 
   调试输出掉进 stdout,客户端就会收到一段不是 JSON-RPC 的字节流,整个会话当场坏掉。
   **库层(`vidbrief-ops` 往下)一律不打印**;诊断走 stderr。
   这条由 `crates/vidbrief-cli/tests/mcp.rs` 逐行解析 stdout 守着 —— 不靠人记。
-- **`project.lock` 的内容不能用 `write_atomic` 写。** 原子写靠 rename,而 rename 会让目录项
-  指向另一个文件标识,锁就留在没人再打开的旧文件上了,互斥当场失效。持锁期间一律原地写。
+- **`project.lock` 是 0 字节的哨兵,谁都不许往里写。** 一旦有内容,Windows 上的强制文件锁
+  就会让那句话**恰恰在最需要它的时候读不到**,于是又得引入平台 FFI 或旁路文件 ——
+  那笔账算不过去(`docs/DESIGN.md` §4.7;`vidbrief_project::lock` 的模块文档里有全过程)。
+  有测试专门拦这个冲动。
 
 ---
 

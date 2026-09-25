@@ -13,14 +13,13 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use vidbrief_project::{
-    ChangeCurve, DenseRegions, Project, ProjectLock, Shot, ShotOrigin, Shots, SupplementRequests,
+    ChangeCurve, DenseRegions, Project, Shot, ShotOrigin, Shots, SupplementRequests,
     Transcript, VideoMeta,
 };
 
 /// 示例文件 → 校验它的 schema。
 const CASES: &[(&str, &str)] = &[
     ("project.json", "project.schema.json"),
-    ("project.lock", "project_lock.schema.json"),
     ("video.meta.json", "video_meta.schema.json"),
     ("change_curve.json", "change_curve.schema.json"),
     ("dense_regions.json", "dense_regions.schema.json"),
@@ -121,7 +120,6 @@ where
 #[test]
 fn every_example_matches_its_schema_and_type() {
     anchor::<Project>("project.json", "project.schema.json");
-    anchor::<ProjectLock>("project.lock", "project_lock.schema.json");
     anchor::<VideoMeta>("video.meta.json", "video_meta.schema.json");
     anchor::<ChangeCurve>("change_curve.json", "change_curve.schema.json");
     anchor::<DenseRegions>("dense_regions.json", "dense_regions.schema.json");
@@ -430,7 +428,6 @@ fn writer_output_validates_against_the_schemas() {
     project.progress.preprocess.mark_done();
     project.progress.calibrate.bump();
     project.glossary = Some(vec!["样本".into()]);
-    let lock = ProjectLock::new("mcp-test");
 
     // 顺便验证时间戳确实没有小数秒 —— 这一条是这次运行真实踩出来的
     let meta_json = serde_json::to_value(&meta).unwrap();
@@ -458,7 +455,6 @@ fn writer_output_validates_against_the_schemas() {
     }
 
     validate!(project, "project.schema.json");
-    validate!(lock, "project_lock.schema.json");
     validate!(meta, "video_meta.schema.json");
     validate!(curve, "change_curve.schema.json");
     validate!(regions, "dense_regions.schema.json");

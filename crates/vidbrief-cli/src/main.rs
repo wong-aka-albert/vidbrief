@@ -405,7 +405,7 @@ fn cmd_preprocess(args: &[String]) -> Result<()> {
 
     // 取写锁:另一个会话正开着这个项目时就**别硬写**(DESIGN §4.7)。
     // 命令结束(或出错)时 guard 随作用域析构,锁自动释放。
-    let _lock = vidbrief_project::acquire(opened.layout(), "cli")?;
+    let _lock = vidbrief_project::acquire(opened.layout())?;
 
     println!("项目     {}", opened.id());
     println!(

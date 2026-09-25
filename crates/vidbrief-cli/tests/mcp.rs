@@ -571,15 +571,14 @@ fn a_second_session_cannot_write_while_the_first_holds_the_lock() {
     assert!(text.contains("另一个会话"), "要说清是被谁挡下的:{text}");
     assert!(text.contains("只读"), "还要说清哪些还能用:{text}");
 
-    // **这是跨进程**读到的:两个 McpClient 是两个进程,第一个进程的 OR 锁对第二个进程生效,
-    // 而第二个进程仍然读得到"是谁占着"。这条断言就是那个平台差异处理的验收 ——
-    // 锁整份文件的话,这里只会是一句"占用者信息读不出来"。
+    // 这是**真跨进程**的互斥:两个 McpClient 是两个进程。
+    //
+    // 报错里**不会**出现"是哪个会话" —— `project.lock` 是空哨兵,没有任何内容可读。
+    // 这不是退化,是取舍:把持有者信息写进锁文件,就会在 Windows 上被强制锁挡住
+    // (恰恰在最需要它的时候读不到),绕开它得引平台 FFI 或旁路文件,
+    // 换来的只是一句不改变任何人动作的话。详见 `vidbrief_project::lock` 的模块文档。
     assert!(
-        text.contains("mcp#"),
-        "跨进程没能报出占用者是谁(锁的范围是不是又盖住文件内容了?):{text}"
-    );
-    assert!(
-        !text.contains("读不出来"),
-        "占用者信息应当读得到:{text}"
+        !text.contains("mcp#") && !text.contains("pid"),
+        "锁文件是空哨兵,报错里不该冒出持有者信息:{text}"
     );
 }

@@ -62,10 +62,5 @@ pub use shots::{
 };
 pub use view::{render_timeline, serve_and_open};
 
-/// 本层默认会话名。写进 `project.lock`,用来回答"是哪个会话占着这个项目"。
-///
-/// 入口层应当传一个更具体的名字(如 `cli` / `mcp#<pid>`);这只是兜底。
-pub const DEFAULT_SESSION: &str = "vidbrief";
-
 /// 默认转录片段里"同期"取多长(秒)。±这个值,见 `docs/DESIGN.md` §6.2 ①。
 pub const NEIGHBOR_WINDOW: f64 = 6.0;
