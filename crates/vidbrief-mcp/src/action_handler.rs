@@ -45,12 +45,14 @@ pub fn install_action_handler(state: Arc<State>, rt: tokio::runtime::Handle) {
 ///
 /// 报错一律翻译成**给人看的一句话**:读到它的是浏览器里的用户,不是开发者。
 fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Result<String, String> {
-    let mut opened = OpenProject::open(project_id).map_err(|e| explain(&e))?;
-
-    // 和工具调用走同一把锁:本进程已经持有就是幂等的(见 `State::ensure_write_lock`);
-    // 真拿不到说明这个项目正被**别的会话**编辑,那时页面上该说清楚。
-    state.ensure_write_lock(&opened).map_err(|e| explain(&e))?;
-    state.note(opened.dir(), opened.id());
+    // 入口序列和 MCP 工具**共用同一套**(`State::enter_write` + 排队 + 那句警告),
+    // 动作本身走 ops 的那一个入口(`with_write`)。三段拼起来就是完整的写事务。
+    let opened = OpenProject::open(project_id).map_err(|e| explain(&e))?;
+    state.enter_write(&opened).map_err(|e| explain(&e))?;
+    let dir = opened.dir().to_path_buf();
+    // 锁已经在本进程手上 —— 把它当凭证交给 ops,让那边**不要再取一次**
+    // (同进程再取会被自己挡住,报错还长得像"被别的会话占着")。
+    let guard = state.guard_of(&dir);
 
     // **必须和工具调用排同一队。** 两条路都会整份读改写 `project.json`
     // (`approve` 写 `review`,`record_shot_check` 写 `progress`),
@@ -59,12 +61,17 @@ fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Resu
     // 这里 `block_on` 是安全的:本线程是查看服务的普通线程,不是 tokio worker,
     // 不会踩"运行时里再 block_on"那个 panic。阻塞它也不影响别人 ——
     // 它本来就只服务浏览器。
-    let _slot = rt.block_on(state.serialize(opened.dir()));
+    let _slot = rt.block_on(state.serialize(&dir));
 
     // 写锁是降级放行(文件系统不支持锁)时,这句话同样要说给用户 —— 和工具那条路一致
-    let warning = state.take_lock_warning(opened.dir());
+    let warning = state.take_lock_warning(&dir);
 
-    let approval = vidbrief_ops::approve(&mut opened, None).map_err(|e| explain(&e))?;
+    // `with_write` 会自己把项目**再开一次**(多一次 JSON 读,一次点击无所谓),
+    // 换来的是"写项目的路径只有一条"这件事不用每个入口各记一遍。
+    let approval = vidbrief_ops::with_write(project_id, guard.as_deref(), |opened, _| {
+        vidbrief_ops::approve(opened, None)
+    })
+    .map_err(|e| explain(&e))?;
     let c = approval.counts;
     let pending = c.unchecked + c.needing_review + c.supplement_pending + c.uncertain;
 

@@ -85,7 +85,7 @@ impl VidbriefServer {
         let id = project_id.to_string();
         let opened = blocking(move || {
             let opened = OpenProject::open(&id)?;
-            state.ensure_write_lock(&opened).map_err(|e| {
+            state.enter_write(&opened).map_err(|e| {
                 anyhow::anyhow!(
                     "{e:#}\n\
                      \n\
@@ -94,7 +94,6 @@ impl VidbriefServer {
                      要改材料和结论,请让对方先收工,或让用户关掉那个会话。"
                 )
             })?;
-            state.note(opened.dir(), opened.id());
             Ok(opened)
         })
         .await?;

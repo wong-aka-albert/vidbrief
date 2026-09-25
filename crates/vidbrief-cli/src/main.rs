@@ -442,18 +442,19 @@ fn cmd_approve(args: &[String]) -> Result<()> {
         }
     }
     let name = one_positional(&positional, "approve", "项目")?;
-    let mut opened = OpenProject::open(&name)?;
 
-    // 要写 project.json,照例取锁(与 preprocess 同一套)
-    let lock = vidbrief_project::acquire(opened.layout())?;
-    if let Some(reason) = lock.degraded() {
-        eprintln!("警告:{reason}");
-    }
-
-    let approval = vidbrief_ops::approve(&mut opened, note)?;
+    // 开 → 取锁 → 做,这条序列走 ops 那一个入口(见 `vidbrief_ops::with_write`)。
+    // 写锁降级放行的说明会交给闭包 —— 必须在动手**之前**说出去。
+    let (id, approval) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let approval = vidbrief_ops::approve(opened, note)?;
+        Ok((opened.id().to_string(), approval))
+    })?;
     let c = approval.counts;
 
-    println!("项目     {}", opened.id());
+    println!("项目     {id}");
     println!("确认于   {}", approval.approved_at.format("%Y-%m-%d %H:%M:%S"));
     println!(
         "确认时   未校准 {} 张 / 待裁决 {} 张 / 未处理补图候选 {} 条 / 存疑转录 {} 段",
@@ -472,20 +473,31 @@ fn cmd_approve(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_preprocess(args: &[String]) -> Result<()> {    if wants_help(args) {
+fn cmd_preprocess(args: &[String]) -> Result<()> {
+    if wants_help(args) {
         print!("{PREPROCESS_USAGE}");
         return Ok(());
     }
     let (name, opts) = parse_preprocess(args)?;
-    let mut opened = OpenProject::open(&name)?;
 
-    // 取写锁:另一个会话正开着这个项目时就**别硬写**(DESIGN §4.7)。
-    // 命令结束(或出错)时 guard 随作用域析构,锁自动释放。
-    //
+    // 开 → 取锁 → 干活:这条序列走 ops 那**一个**入口(`vidbrief_ops::with_write`)。
+    // 写锁降级放行的说明交给下面那个函数 —— 它得在开工**之前**说出去,
+    // 而不是等几分钟跑完再说。
+    vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        run_preprocess(opened, &name, &opts, lock_note)
+    })
+}
+
+/// 真正的活。从 [`vidbrief_ops::with_write`] 的闭包里调 —— **锁已经拿在手上**。
+fn run_preprocess(
+    opened: &mut OpenProject,
+    name: &str,
+    opts: &PreprocessOptions,
+    lock_note: Option<&str>,
+) -> Result<()> {
     // 文件系统不支持锁时它**不失败**,而是带着一句说明放行 —— 那句话必须说出来,
     // 否则用户就在不知情的情况下失去了"两个人同时改会互相覆盖"的保护。
-    let lock = vidbrief_project::acquire(opened.layout())?;
-    if let Some(reason) = lock.degraded() {
+    if let Some(reason) = lock_note {
         eprintln!("警告:{reason}");
     }
 
@@ -518,7 +530,7 @@ fn cmd_preprocess(args: &[String]) -> Result<()> {    if wants_help(args) {
         }
     };
 
-    let report = vidbrief_ops::preprocess(&mut opened, &opts, &mut on_progress)?;
+    let report = vidbrief_ops::preprocess(opened, opts, &mut on_progress)?;
     if opts.shots {
         eprintln!();
     }

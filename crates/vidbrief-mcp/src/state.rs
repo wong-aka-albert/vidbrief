@@ -109,6 +109,29 @@ impl State {
         Ok(())
     }
 
+    /// 会话级写操作的**入场**:确保持锁 + 记账。
+    ///
+    /// **两个入口都走它**:MCP 工具(见 `tools::open_write`)和页面按钮
+    /// (见 `action_handler`)。理由和 `ops::with_write` 一样 ——
+    /// 这条序列被漏掉过一次(按钮那条既没排队也没带警告,devlog [260925-21]),
+    /// 而编译器不会提醒。
+    ///
+    /// 排队(`serialize`)不在这里:它是 async 的,由调用方自己 await 或 block_on。
+    pub fn enter_write(&self, opened: &OpenProject) -> Result<()> {
+        self.ensure_write_lock(opened)?;
+        self.note(opened.dir(), opened.id());
+        Ok(())
+    }
+
+    /// 本进程持有的那把锁。
+    ///
+    /// 给 `vidbrief_ops::with_write` 当**凭证**用 —— 会话级持锁的入口不能在那里
+    /// 重复取锁(同进程再取会被自己挡住)。
+    pub fn guard_of(&self, dir: &Path) -> Option<Arc<LockGuard>> {
+        let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.get(&identity(dir)).cloned()
+    }
+
     /// 本进程是否持有该项目的写锁。
     pub fn holds_lock(&self, dir: &Path) -> bool {
         let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());

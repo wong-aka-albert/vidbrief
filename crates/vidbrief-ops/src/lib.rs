@@ -35,6 +35,7 @@ pub mod project;
 pub mod review;
 pub mod shots;
 pub mod view;
+pub mod write;
 
 /// 测试夹具(造一个材料齐全的假项目)。见 `Cargo.toml` 的 `testing` 特性。
 ///
@@ -66,6 +67,7 @@ pub use shots::{
     supplement_window, update_shot,
 };
 pub use view::{render_timeline, serve_and_open};
+pub use write::with_write;
 
 /// 页面动作的转发 —— **`vidbrief-mcp` 不必直接依赖 `vidbrief-viz`**。
 ///
