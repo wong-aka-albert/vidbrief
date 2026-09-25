@@ -13,6 +13,7 @@ use vidbrief_project::ShotOrigin;
 use crate::json::{blocking, failed, json};
 use crate::server::VidbriefServer;
 use crate::tools::materials::parse_shot_id;
+use crate::tools::attach_warning;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SupplementParams {
@@ -61,10 +62,10 @@ impl VidbriefServer {
         Parameters(p): Parameters<SupplementParams>,
     ) -> Result<CallToolResult, CallToolResult> {
         let window = p.window.unwrap_or_else(vidbrief_ops::supplement_window);
-        let (opened, _slot) = self.open_write(&p.project_id).await?;
+        let (opened, slot) = self.open_write(&p.project_id).await?;
         let requests =
             blocking(move || vidbrief_ops::find_supplement_candidates(&opened, window)).await?;
-        json(&requests)
+        Ok(attach_warning(json(&requests)?, slot.warning()))
     }
 
     #[tool(
@@ -120,9 +121,9 @@ impl VidbriefServer {
                 )));
             }
         };
-        let (opened, _slot) = self.open_write(&p.project_id).await?;
+        let (opened, slot) = self.open_write(&p.project_id).await?;
         let shot = blocking(move || vidbrief_ops::update_shot(&opened, id, action)).await?;
-        json(&shot)
+        Ok(attach_warning(json(&shot)?, slot.warning()))
     }
 }
 
@@ -131,11 +132,11 @@ impl VidbriefServer {
         &self,
         p: ExtractShotParams,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (opened, _slot) = self.open_write(&p.project_id).await?;
+        let (opened, slot) = self.open_write(&p.project_id).await?;
         let shot = blocking(move || {
             vidbrief_ops::extract_shot(&opened, p.t, &p.reason, ShotOrigin::AgentRequest)
         })
         .await?;
-        json(&shot)
+        Ok(attach_warning(json(&shot)?, slot.warning()))
     }
 }

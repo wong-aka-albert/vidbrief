@@ -14,6 +14,7 @@ use vidbrief_project::{Confidence, CorrectionType, RelPath};
 use crate::json::{blocking, failed, json, text};
 use crate::server::VidbriefServer;
 use crate::tools::materials::parse_shot_id;
+use crate::tools::attach_warning;
 
 // ── 两个枚举的镜像 ───────────────────────────────────────────────────
 //
@@ -155,7 +156,7 @@ impl VidbriefServer {
         Parameters(p): Parameters<RecordShotCheckParams>,
     ) -> Result<CallToolResult, CallToolResult> {
         let id = parse_shot_id(&p.shot_id)?;
-        let (opened, _slot) = self.open_write(&p.project_id).await?;
+        let (opened, slot) = self.open_write(&p.project_id).await?;
         let input = vidbrief_ops::ShotCheckInput {
             r#match: p.r#match,
             audio_visual_sync: p.audio_visual_sync,
@@ -165,7 +166,7 @@ impl VidbriefServer {
             neighbor_text: p.neighbor_text,
         };
         let check = blocking(move || vidbrief_ops::record_shot_check(&opened, id, &input)).await?;
-        json(&check)
+        Ok(attach_warning(json(&check)?, slot.warning()))
     }
 
     #[tool(
@@ -180,7 +181,7 @@ impl VidbriefServer {
         &self,
         Parameters(p): Parameters<ApplyCorrectionsParams>,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (opened, _slot) = self.open_write(&p.project_id).await?;
+        let (opened, slot) = self.open_write(&p.project_id).await?;
         let items: Vec<vidbrief_ops::CorrectionInput> = p
             .corrections
             .into_iter()
@@ -193,7 +194,7 @@ impl VidbriefServer {
             })
             .collect();
         let outcome = blocking(move || vidbrief_ops::apply_corrections(&opened, &items)).await?;
-        json(&outcome)
+        Ok(attach_warning(json(&outcome)?, slot.warning()))
     }
 
     #[tool(
@@ -219,13 +220,16 @@ impl VidbriefServer {
         };
         let count_round = p.count_round.unwrap_or(false);
 
-        let (mut opened, _slot) = self.open_write(&p.project_id).await?;
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let md = p.md;
         let path = blocking(move || {
             vidbrief_ops::write_note(&mut opened, &rel, &md, mode, count_round)
         })
         .await?;
-        Ok(text(format!("已写入 {}", path.display())))
+        Ok(attach_warning(
+            text(format!("已写入 {}", path.display())),
+            slot.warning(),
+        ))
     }
 
     #[tool(
@@ -237,13 +241,16 @@ impl VidbriefServer {
         &self,
         Parameters(p): Parameters<WriteDocParams>,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (mut opened, _slot) = self.open_write(&p.project_id).await?;
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let md = p.md;
         let path = blocking(move || vidbrief_ops::write_summary(&mut opened, &md)).await?;
-        Ok(text(format!(
-            "已写入 {}\n下一步是报告:写 report.md 用 write_report_md。",
-            path.display()
-        )))
+        Ok(attach_warning(
+            text(format!(
+                "已写入 {}\n下一步是报告:写 report.md 用 write_report_md。",
+                path.display()
+            )),
+            slot.warning(),
+        ))
     }
 
     #[tool(
@@ -256,10 +263,13 @@ impl VidbriefServer {
         &self,
         Parameters(p): Parameters<WriteDocParams>,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (mut opened, _slot) = self.open_write(&p.project_id).await?;
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let md = p.md;
         let path = blocking(move || vidbrief_ops::write_report_md(&mut opened, &md)).await?;
-        Ok(text(format!("已写入 {}", path.display())))
+        Ok(attach_warning(
+            text(format!("已写入 {}", path.display())),
+            slot.warning(),
+        ))
     }
 }
 

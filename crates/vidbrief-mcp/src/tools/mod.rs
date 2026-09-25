@@ -11,7 +11,7 @@ pub mod project;
 pub mod shots;
 pub mod view;
 
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::OwnedMutexGuard;
 use vidbrief_ops::OpenProject;
 
@@ -22,7 +22,42 @@ use crate::server::VidbriefServer;
 ///
 /// **必须持有到操作结束** —— 它保证同一项目上的两个写工具不会交叉执行
 /// (都是"读 JSON → 改 → 原子写",交叉就是后写的赢,前一个的结论凭空消失)。
-pub(crate) type WriteSlot = OwnedMutexGuard<()>;
+pub(crate) struct WriteSlot {
+    /// 名额本身。`_guard` 这个名字是提醒:**别 drop 早了**,持有到函数结束。
+    _guard: OwnedMutexGuard<()>,
+    /// 写锁没锁上时的说明,**只在同一项目第一次写操作时给一次**。
+    warning: Option<String>,
+}
+
+impl WriteSlot {
+    /// 该不该在结果里带一句警告。带过的调用方必须把它贴进结果(见 [`attach_warning`])。
+    pub(crate) fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+}
+
+/// 把警告贴在工具结果的最前面。
+///
+/// 贴在**第一个文本块的开头**,而不是另起一块:agent 逐块读,另起一块容易被当成
+/// "附带信息"跳过 —— 而这句话的全部意义就是被读到。
+pub(crate) fn attach_warning(
+    mut result: CallToolResult,
+    warning: Option<&str>,
+) -> CallToolResult {
+    let Some(warning) = warning else {
+        return result;
+    };
+    match result.content.first_mut() {
+        Some(ContentBlock::Text(text)) => {
+            text.text = format!("⚠️ {warning}\n\n{}", text.text);
+        }
+        // 结果里没有文本块(理论上不会发生)时,自己开一块也比把话丢了强
+        _ => result
+            .content
+            .insert(0, ContentBlock::text(format!("⚠️ {warning}"))),
+    }
+    result
+}
 
 impl VidbriefServer {
     /// 只读打开一个项目(材料查询、视图渲染)。
@@ -64,14 +99,59 @@ impl VidbriefServer {
         })
         .await?;
 
+        // 写锁要是没锁上(文件系统不支持),得让用户知道 —— 但只在他这次会话
+        // 第一次动这个项目时说一遍,别每个工具调用都刷一遍
+        let warning = self.state.take_lock_warning(opened.dir());
+
         let slot = self.state.serialize(opened.dir()).await;
-        Ok((opened, slot))
+        Ok((
+            opened,
+            WriteSlot {
+                _guard: slot,
+                warning,
+            },
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::attach_warning;
     use crate::server::VidbriefServer;
+    use rmcp::model::ContentBlock;
+
+    /// 警告要贴在**正文最前面**,而且**不能动正文**。
+    ///
+    /// "贴进第一块"而不是"另起一块"是有意的:agent 逐块读,另起一块容易被当成
+    /// 附带信息跳过 —— 而这句话的全部意义就是被读到。
+    #[test]
+    fn a_warning_goes_in_front_of_the_payload() {
+        let result = attach_warning(
+            crate::json::text("{\"a\":1}"),
+            Some("这个文件系统不支持文件锁,已跳过互斥"),
+        );
+        assert_eq!(result.content.len(), 1, "贴在正文开头,不是另起一块");
+        let ContentBlock::Text(text) = &result.content[0] else {
+            panic!("应该是文本块");
+        };
+        assert!(text.text.starts_with("⚠️ 这个文件系统"), "{}", text.text);
+        assert!(
+            text.text.ends_with("{\"a\":1}"),
+            "正文一个字都不能动(agent 要解析它):{}",
+            text.text
+        );
+        assert_ne!(result.is_error, Some(true), "这是提醒,不是失败");
+    }
+
+    #[test]
+    fn no_warning_leaves_the_result_alone() {
+        let result = attach_warning(crate::json::text("原样"), None);
+        let ContentBlock::Text(text) = &result.content[0] else {
+            panic!("应该是文本块");
+        };
+        assert_eq!(text.text, "原样");
+        assert_eq!(result.content.len(), 1);
+    }
 
     /// 每个工具名都必须落在 MCP 认的形状里:`[a-zA-Z0-9_-]{1,64}`。
     #[test]

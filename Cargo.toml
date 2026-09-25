@@ -14,8 +14,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# 1.88 是 rmcp(官方 Rust MCP SDK)要求的下限;它也是本项目实际编得动的最低版本
-rust-version = "1.88"
+# 1.89 才是真的下限:`rmcp` 要 1.88,而我们用的 `std::fs::File::try_lock`
+# (`file_lock` feature)是 **1.89.0** 稳定的 —— 写 1.88 等于骗人:
+# 用 1.88 的人 `cargo build` 会撞在"这个 API 不存在"上,而 `rust-version` 本该提前拦住他
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1"

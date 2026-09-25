@@ -14,5 +14,10 @@ sha2.workspace = true
 # 而 std 的对应 API(volume_serial_number / file_index)到 1.96 仍是 unstable
 same-file = "1"
 
+# 判"这个错误是不是在说文件系统不支持锁":错误码的数字按平台变
+# (ENOLCK 在 Linux 是 37、在 macOS 是 77),只能认 libc 的常量而不是硬编码
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 jsonschema = { version = "0.57", default-features = false }

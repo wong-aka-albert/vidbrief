@@ -405,7 +405,13 @@ fn cmd_preprocess(args: &[String]) -> Result<()> {
 
     // 取写锁:另一个会话正开着这个项目时就**别硬写**(DESIGN §4.7)。
     // 命令结束(或出错)时 guard 随作用域析构,锁自动释放。
-    let _lock = vidbrief_project::acquire(opened.layout())?;
+    //
+    // 文件系统不支持锁时它**不失败**,而是带着一句说明放行 —— 那句话必须说出来,
+    // 否则用户就在不知情的情况下失去了"两个人同时改会互相覆盖"的保护。
+    let lock = vidbrief_project::acquire(opened.layout())?;
+    if let Some(reason) = lock.degraded() {
+        eprintln!("警告:{reason}");
+    }
 
     println!("项目     {}", opened.id());
     println!(

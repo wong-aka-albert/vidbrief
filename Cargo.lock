@@ -1265,6 +1265,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "jsonschema",
+ "libc",
  "same-file",
  "serde",
  "serde_json",

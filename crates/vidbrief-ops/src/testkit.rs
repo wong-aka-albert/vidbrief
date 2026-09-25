@@ -8,7 +8,6 @@
 //! 只是内容是人手填的:源视频是个几字节的占位文件,`video.meta.json` 直接写。
 //! 凡是要"看画面"的地方(抽帧、转录)才必须用真素材,那些测试在别的 crate。
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vidbrief_project::{
@@ -141,12 +140,6 @@ impl Fake {
         self
     }
 
-    /// 加一张补图(`origin = agent_request`)。
-    pub fn with_extra_shot(self, id: u32, t: f64) -> Self {
-        self.add_shot(id, t, ShotOrigin::AgentRequest);
-        self
-    }
-
     fn add_shot(&self, id: u32, t: f64, origin: ShotOrigin) {
         let sid = ShotId::new(id).expect("合法 shot id");
         let file = Shot::default_rel_path(origin, sid, t).expect("合法截图路径");
@@ -166,10 +159,6 @@ impl Fake {
         });
         shots.sort_by_time();
         shots.save(&self.layout.shots_json()).expect("写 shots.json");
-    }
-
-    pub fn dir(&self) -> PathBuf {
-        self.layout.root().to_path_buf()
     }
 }
 

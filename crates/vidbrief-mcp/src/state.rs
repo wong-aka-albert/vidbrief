@@ -11,7 +11,7 @@
 //! 3. **见过的项目**:`resources/list` 需要一份可枚举的清单,而项目可以建在任何路径
 //!    (给了 `-p` 就不在 `projects/` 下),没有别的办法知道。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +37,8 @@ pub struct State {
     locks: Mutex<HashMap<PathBuf, Arc<LockGuard>>>,
     /// 每项目一把的串行锁(进程内)。
     busy: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// 已经提醒过"写锁是降级放行"的项目。见 [`State::take_lock_warning`]。
+    warned: Mutex<BTreeSet<PathBuf>>,
     /// 本会话碰过的项目:项目根 → 项目 id。
     ///
     /// 存 id 是为了让资源 URI 能用 `vidbrief://project/<id>/...` 这种**稳定**写法 ——
@@ -52,6 +54,7 @@ impl State {
         Self {
             locks: Mutex::new(HashMap::new()),
             busy: Mutex::new(HashMap::new()),
+            warned: Mutex::new(BTreeSet::new()),
             seen: Mutex::new(BTreeMap::new()),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
@@ -110,6 +113,21 @@ impl State {
     pub fn holds_lock(&self, dir: &Path) -> bool {
         let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         locks.contains_key(&identity(dir))
+    }
+
+    /// 若该项目的写锁是**降级放行**的(文件系统不支持锁),取走那句说明。
+    ///
+    /// **只给一次**:同一项目在同一个进程里第二次来问就是 `None`。
+    /// 理由 —— 每个工具调用都刷一遍"你可能在覆盖别人的数据",用户会当耳边风;
+    /// 而这句话恰恰是要被当真的。
+    pub fn take_lock_warning(&self, dir: &Path) -> Option<String> {
+        let key = identity(dir);
+        let reason = {
+            let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+            locks.get(&key)?.degraded().map(str::to_string)
+        };
+        let mut warned = self.warned.lock().unwrap_or_else(|e| e.into_inner());
+        warned.insert(key).then_some(reason).flatten()
     }
 
     /// 拿到"这个项目的写操作"名额。

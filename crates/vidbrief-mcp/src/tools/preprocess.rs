@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::json::{blocking, json};
+use crate::tools::attach_warning;
 use crate::server::VidbriefServer;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -46,7 +47,7 @@ impl VidbriefServer {
         &self,
         Parameters(p): Parameters<PreprocessParams>,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (mut opened, _slot) = self.open_write(&p.project_id).await?;
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
 
         let mut options = vidbrief_ops::PreprocessOptions::default();
         if let Some(fps) = p.fps {
@@ -75,6 +76,6 @@ impl VidbriefServer {
         if !report.done {
             result.is_error = Some(true);
         }
-        Ok(result)
+        Ok(attach_warning(result, slot.warning()))
     }
 }
