@@ -53,7 +53,8 @@ impl ProjectId {
     /// **纯中文名会净化成空,此时返回 `None`**(绝不硬造一个没意义的 id)——
     /// 调用方应提示用户用 `--name` 显式指定。
     ///
-    /// 注意:本函数只做净化,不查重。目录已存在时用 [`ProjectId::dedupe`] 加后缀。
+    /// 注意:本函数只做净化,**不查重、也不管重名** —— 位置撞车由建项目那边报错处理,
+    /// 工具不替调用方改名。
     pub fn from_video_stem(stem: &str) -> Option<String> {
         let mut out = String::new();
         let mut pending_dash = false;
@@ -79,19 +80,6 @@ impl ProjectId {
         (!out.is_empty()).then_some(out)
     }
 
-    /// 在已占用的 id 集合上找第一个可用名:`x`、`x-2`、`x-3`……
-    pub fn dedupe(base: &str, taken: impl Fn(&str) -> bool) -> String {
-        if !taken(base) {
-            return base.to_string();
-        }
-        for n in 2u32..10_000 {
-            let candidate = format!("{base}-{n}");
-            if !taken(&candidate) {
-                return candidate;
-            }
-        }
-        format!("{base}-{}", std::process::id())
-    }
 }
 
 impl fmt::Display for ProjectId {
@@ -231,13 +219,6 @@ mod tests {
                 assert!(ProjectId::new(id.clone()).is_ok(), "净化结果不合法:`{id}`(来自 `{stem}`)");
             }
         }
-    }
-
-    #[test]
-    fn project_id_dedupe() {
-        assert_eq!(ProjectId::dedupe("demo", |_| false), "demo");
-        assert_eq!(ProjectId::dedupe("demo", |s| s == "demo"), "demo-2");
-        assert_eq!(ProjectId::dedupe("demo", |s| s == "demo" || s == "demo-2"), "demo-3");
     }
 
     #[test]

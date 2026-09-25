@@ -20,7 +20,7 @@
 //! 硬链接唯一要注意的是:项目与原路径**共用同一份数据**,所以**就地修改**原文件会让项目
 //! 跟着变。这不是自包含性问题,是内容漂移问题 —— 由 `video.meta.json.sha256` 发现。
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -200,11 +200,6 @@ pub fn materialize(src: &Path, dst: &Path) -> Result<Materialized> {
     if !src.is_file() {
         bail!("源视频不存在:{}", src.display());
     }
-    // 用 symlink_metadata 而不是 exists():后者对**悬空的符号链接**返回 false,
-    // 会让我们往一个已经存在的目录项上写
-    if std::fs::symlink_metadata(dst).is_ok() {
-        bail!("目标已存在,拒绝覆盖:{}", dst.display());
-    }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建目录失败:{}", parent.display()))?;
@@ -212,12 +207,27 @@ pub fn materialize(src: &Path, dst: &Path) -> Result<Materialized> {
 
     let mut fallbacks = Vec::new();
 
+    // **每一种引入方式各自保证"绝不覆盖"** —— 不靠动手之前先检查一遍。
+    //
+    // 这里原来有一句 `if symlink_metadata(dst).is_ok() { bail!("目标已存在") }` 当守卫。
+    // 守卫要挡的东西是真实的(不能往已存在的目录项上写;而 `exists()` 对悬空软链接返回
+    // false,所以必须用 `symlink_metadata`),但**检查和动手之间有一段窗口**:
+    // 两个会话同时建项目时,两边都能看到"不存在",然后一边在 `hard_link`、一边在
+    // `fs::copy` 往同一个目标写 —— 实测撞出过 `os error 32(另一个程序正在使用此文件)`
+    // 和「ffprobe 探测失败:文件不存在」。
+    //
+    // 改成"让每一次尝试自己拒绝":`hard_link` / `symlink_file` 天生如此
+    // (目标在就是 `AlreadyExists`),复制那一步换成 `create_new`(= `O_CREAT|O_EXCL`)。
+    // 保护一点没丢(悬空软链接照样被 `AlreadyExists` 挡住,见下面那条测试),窗口没了。
     match std::fs::hard_link(src, dst) {
         Ok(()) => {
             return Ok(Materialized {
                 link: SourceLink::Hardlink,
                 fallbacks,
             });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("目标已存在,拒绝覆盖:{}", dst.display());
         }
         Err(e) => {
             // 跨卷是最常见的原因,而且是**必然**失败(不是"权限"或"文件系统不支持"),
@@ -239,15 +249,53 @@ pub fn materialize(src: &Path, dst: &Path) -> Result<Materialized> {
                 fallbacks,
             });
         }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("目标已存在,拒绝覆盖:{}", dst.display());
+        }
         Err(e) => fallbacks.push(format!("软链接: {e}")),
     }
 
-    std::fs::copy(src, dst)
-        .with_context(|| format!("复制源视频失败:{} → {}", src.display(), dst.display()))?;
+    copy_exclusive(src, dst).with_context(|| {
+        format!("复制源视频失败:{} → {}", src.display(), dst.display())
+    })?;
     Ok(Materialized {
         link: SourceLink::Copy,
         fallbacks,
     })
+}
+
+/// 复制,**并独占创建目标**(`O_CREAT|O_EXCL`):目标已存在就报错,绝不覆盖。
+///
+/// 不用 [`std::fs::copy`] 正是因为它会**静默覆盖** —— 那也正是"先检查再动手"那个窗口
+/// 的破坏力来源:两边都过了检查,后到的那次复制把先到的那份**盖掉**。
+///
+/// 中途失败会把半截文件删掉:不删的话,下一次会撞上"目标已存在",而那个文件是坏的 ——
+/// 一个看不出问题的残骸。
+fn copy_exclusive(src: &Path, dst: &Path) -> Result<()> {
+    let mut input = File::open(src).with_context(|| format!("打开源文件失败:{}", src.display()))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("目标已存在,拒绝覆盖:{}", dst.display())
+            } else {
+                anyhow::Error::new(e).context(format!("创建目标文件失败:{}", dst.display()))
+            }
+        })?;
+
+    if let Err(e) = std::io::copy(&mut input, &mut output) {
+        drop(output);
+        let _ = std::fs::remove_file(dst); // 别留半截
+        return Err(anyhow::Error::new(e));
+    }
+
+    // 权限尽力而为:Windows 上本来就没有 POSIX 权限位,失败不该让整个引入失败
+    if let Ok(meta) = std::fs::metadata(src) {
+        let _ = output.set_permissions(meta.permissions());
+    }
+    Ok(())
 }
 
 /// 分块计算 SHA-256(十六进制小写)。用固定缓冲流式读,避免把整个视频读进内存。

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::relpath::RelPath;
 
 /// 所有项目放在这个目录下(相对当前工作目录)。
 pub const PROJECTS_DIR: &str = "projects";
@@ -19,9 +18,6 @@ pub const LOCK_FILE: &str = "project.lock";
 
 // ── source/ ─────────────────────────────────────────────────────────
 pub const SOURCE_DIR: &str = "source";
-/// 源视频的**默认**位置。实际路径以 `project.json.source.path` 为准
-/// (扩展名沿用原文件,见 [`crate::source::video_rel_for`])。
-pub const VIDEO_REL: &str = "source/video.mp4";
 pub const VIDEO_META_FILE: &str = "source/video.meta.json";
 
 // ── 01_preprocess/ ──────────────────────────────────────────────────
@@ -111,9 +107,6 @@ impl Layout {
     // ── source/ ─────────────────────────────────────────────────────
     pub fn source_dir(&self) -> PathBuf {
         self.root.join(SOURCE_DIR)
-    }
-    pub fn video(&self) -> PathBuf {
-        self.rel(VIDEO_REL)
     }
     pub fn video_meta(&self) -> PathBuf {
         self.rel(VIDEO_META_FILE)
@@ -227,11 +220,6 @@ impl Layout {
     }
 }
 
-/// 把 `projects/<id>` 记成项目内相对路径常量用不到时,可直接取 [`VIDEO_REL`] 之类。
-pub fn video_rel() -> RelPath {
-    RelPath::new(VIDEO_REL).expect("VIDEO_REL 是硬编码的合法常量")
-}
-
 /// 一个项目的**身份**:同一个项目无论用哪种写法指过来,都该得到同一个值。
 ///
 /// 拿它当进程内 map 的键。为什么不能用调用方给的路径原样:
@@ -264,6 +252,7 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relpath::RelPath;
 
     #[test]
     fn layout_paths_are_under_root() {
@@ -286,7 +275,6 @@ mod tests {
             assert!(RelPath::new(*d).is_ok(), "目录常量不是合法相对路径:{d}");
         }
         for f in [
-            VIDEO_REL,
             VIDEO_META_FILE,
             CHANGE_CURVE_FILE,
             DENSE_REGIONS_FILE,

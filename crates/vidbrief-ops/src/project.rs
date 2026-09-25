@@ -186,36 +186,58 @@ pub fn create(opts: &CreateOptions, on_notice: &mut dyn FnMut(Notice)) -> Result
         .unwrap_or_default()
         .to_string();
 
+    // **占位就在 `choose_placement` 里做掉了** —— 它返回时目录已经归我们。
+    // 分成两步("先挑一个空位" + "再占住它")必然有窗口,而那个窗口正是要消灭的东西。
     let (id, layout) = choose_placement(opts, &stem)?;
 
-    if layout.root().exists() {
-        bail!("项目目录已存在,拒绝覆盖:{}", layout.root().display());
-    }
+    // 目录已经归我们了,再补齐子目录(幂等)
     layout.create_dirs()?;
 
-    let rel = video_rel_for(&video);
+    // 从这里往后都是"往这个目录里填东西"。**中途失败要把占位还回去** ——
+    // 否则用户重试 `init` 时会撞上自己上一次留下的半成品("目录已存在,拒绝覆盖"),
+    // 而且看不出那是个残骸。目录是我们原子占下来的,删它不会误伤别人。
+    let outcome = fill_project(&layout, &video, &stem, opts, id, on_notice);
+    if outcome.is_err() {
+        let _ = std::fs::remove_dir_all(layout.root());
+    }
+    outcome
+}
+
+/// 往已经占下来的目录里填:搬源视频 → 探测 → 写 `project.json`。
+///
+/// 单独一个函数,是为了让 [`create`] 能在它失败时把目录整个退掉 ——
+/// Rust 没有 try/finally,把"要善后的那段"圈成一个函数是最直白的写法。
+fn fill_project(
+    layout: &Layout,
+    video: &std::path::Path,
+    stem: &str,
+    opts: &CreateOptions,
+    id: ProjectId,
+    on_notice: &mut dyn FnMut(Notice),
+) -> Result<Created> {
+    let rel = video_rel_for(video);
     let dst = layout.rel(rel.as_str());
 
     // 动手**之前**先预判(见 `Notice` 的说明)
-    if let Ok(placement) = plan(&video, &dst) {
+    if let Ok(placement) = plan(video, &dst) {
         if placement.will_copy_across_volumes() {
             on_notice(Notice::CrossVolumeCopy {
                 size_bytes: placement.size_bytes,
-                hint: same_volume_hint(&video, id.as_ref()),
+                hint: same_volume_hint(video, id.as_ref()),
             });
         }
     }
 
-    let placed = materialize(&video, &dst)?;
+    let placed = materialize(video, &dst)?;
 
     // 探测的是**项目里**那一份 —— 软链接的情况下它会跟随到原文件,这正是我们想测的
     let meta = vidbrief_core::probe(&dst, rel.clone())?;
     meta.save(&layout.video_meta())?;
 
-    let title = opts.title.clone().unwrap_or_else(|| stem.clone());
+    let title = opts.title.clone().unwrap_or_else(|| stem.to_string());
     // `canonicalize` 在 Windows 上带 `\\?\` 前缀;写进 project.json 之前去掉,
     // 否则这个字段对人就没法看了
-    let original = simplify_path(&video);
+    let original = simplify_path(video);
     let mut project = Project::new(
         id.clone(),
         title,
@@ -227,7 +249,7 @@ pub fn create(opts: &CreateOptions, on_notice: &mut dyn FnMut(Notice)) -> Result
 
     Ok(Created {
         id,
-        layout,
+        layout: layout.clone(),
         project,
         meta,
         original,
@@ -255,17 +277,82 @@ fn choose_placement(opts: &CreateOptions, stem: &str) -> Result<(ProjectId, Layo
         }
     };
 
-    match &opts.project_dir {
-        // 显式给了 -p 就用它本身,不再套一层;已存在则报错而不加后缀 ——
-        // 路径是用户显式给的,工具不该替他改名
-        Some(dir) => Ok((ProjectId::new(base)?, Layout::new(dir))),
-        None => {
-            let root = Path::new(vidbrief_project::layout::PROJECTS_DIR);
-            let id = ProjectId::dedupe(&base, |candidate| root.join(candidate).exists());
-            let id = ProjectId::new(id)?;
-            let layout = Layout::for_project(root, id.as_ref());
-            Ok((id, layout))
+    let id = ProjectId::new(base)?;
+    // 显式给了 `-p` 就用它本身,不再套一层;没给就落在默认位置 `projects/<id>`。
+    // **两种情况的冲突处理完全一样:报错,把选择权交回去。**
+    let layout = match &opts.project_dir {
+        Some(dir) => Layout::new(dir),
+        None => Layout::for_project(Path::new(vidbrief_project::layout::PROJECTS_DIR), id.as_ref()),
+    };
+    claim_dir(&layout)?;
+    Ok((id, layout))
+}
+
+/// **原子地占住这个目录**,占不上就报错 —— 名字撞了绝不自己换一个。
+///
+/// 这里是全仓唯一一个"没有锁可用、也不需要锁"的互斥点:项目目录还不存在,
+/// 没有 `project.lock` 可以锁。而 `create_dir` 本身就带互斥语义 ——
+/// POSIX 与 Windows 都保证"已存在就失败"。有原子原语,就别自己做检查。
+///
+/// 父目录(默认位置下的 `projects/`)先用 `create_dir_all` 铺好:那是多个项目共用的容器,
+/// 谁铺都一样,**不需要互斥**;要独占的只有 `projects/<id>` 这一层。
+///
+/// # 为什么不自动加后缀
+///
+/// 这里曾经会在默认位置冲突时自己挑一个 `x-2` / `x-3`。去掉了,理由有三条:
+///
+/// 1. **那是命名,命名是人的决定。** `x-2` 是用户会看到、会用它调工具、会写进报告的标识 ——
+///    工具悄悄替他定了一个,而这个决定本该由他(或 agent)来做。
+/// 2. **它对"用户显式起了名"的情况尤其错。** `-n demo` 明确说了叫 demo,结果旁边冒出个
+///    `demo-2` —— 而显式给 `-p` 撞了车我们却是报错的。同一条规则不能一半这样一半那样。
+/// 3. **撞名往往不是在说"换一个",而是在说"别建"。** 多半是:这个视频已经建过了、
+///    上次建到一半失败了、或者根本是点错了。这几种的正确回应都是**看一眼再决定**,
+///    不是再造一个出来。
+///
+/// 所以报错要把**去路**说清楚,让 agent/用户一次就能选对(见下面的分支)。
+fn claim_dir(layout: &Layout) -> Result<()> {
+    if let Some(parent) = layout.root().parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建父目录失败:{}", parent.display()))?;
         }
+    }
+
+    match std::fs::create_dir(layout.root()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let root = layout.root();
+            // 已存在的那个位置**是不是一个能用的项目**?这决定了两条完全不同的去路 ——
+            // 「换个名字」和「先去看看那是什么」,含糊成一句话会让人选错。
+            if layout.exists() {
+                // 用**项目自己的 id**(不是目录名)告诉人怎么打开它 ——
+                // 两者可以不一样:`-p /某个怪目录 -n demo` 的 id 是 demo。
+                // 拿目录名当 id 在那种情况下会指错。
+                let how = vidbrief_project::Project::load(&layout.project_json())
+                    .map(|p| p.id.to_string())
+                    .unwrap_or_else(|_| {
+                        root.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    });
+                bail!(
+                    "这个位置已经有一个项目了:{}\n\
+                     用 `{how}` 就能打开它,**不需要重新建**。\n\
+                     确实想另外建一个,就换个 id(`-n` / `name`)或换个位置(`-p` / `project_dir`)。",
+                    root.display()
+                )
+            } else {
+                bail!(
+                    "这个位置被一个**还没建完的目录**占着:{}\n\
+                     里面没有 {} —— 有两种可能,从外面看不出是哪一种:\n\
+                     · 另一个会话**正在**建这个项目 → 等一会儿再试;\n\
+                     · 上一次建到一半**失败了**,这是残骸 → 去看一眼,确认没用就删掉它。",
+                    root.display(),
+                    vidbrief_project::layout::PROJECT_FILE
+                )
+            }
+        }
+        Err(e) => Err(e).with_context(|| format!("创建项目目录失败:{}", layout.root().display())),
     }
 }
 

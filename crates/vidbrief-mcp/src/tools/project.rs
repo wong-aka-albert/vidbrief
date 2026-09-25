@@ -25,7 +25,10 @@ pub struct CreateProjectParams {
     /// 人类可读名(可含中文)。默认取视频文件名。
     #[serde(default)]
     pub title: Option<String>,
-    /// 项目目录本身。**默认建在 `projects/<id>`**,`<id>` 被占用会自动加后缀。
+    /// 项目目录本身。**默认建在 `projects/<id>`**。
+    ///
+    /// 位置已经存在时报错(不覆盖、也不自动换个名字)—— 报错里会告诉你
+    /// 是"已有项目,直接用它就行",还是"是个不完整的残骸,看一眼再删"。
     #[serde(default)]
     pub project_dir: Option<String>,
 }
