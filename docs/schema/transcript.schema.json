@@ -34,7 +34,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "start", "end", "text", "corrected_text", "correction"],
+        "required": ["id", "start", "end", "text", "corrected_text", "correction", "checked_at"],
         "properties": {
           "id": {
             "type": "integer",
@@ -85,6 +85,13 @@
                 }
               }
             ]
+          },
+          "checked_at": {
+            "oneOf": [
+              { "type": "null" },
+              { "$ref": "#/$defs/timestamp" }
+            ],
+            "description": "模型**核验过这一段**的时刻。null = 还没核验。这是「跳过某一段」唯一看得出来得的地方 —— 整份记一个标记,跳了 300 段也看不出。三种核验结论的读法见 docs/DESIGN.md §4.5"
           }
         }
       }

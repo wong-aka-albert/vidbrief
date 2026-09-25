@@ -27,6 +27,7 @@
 //! 待实现(非 M0 范围):写锁的获取/释放逻辑见 `docs/DESIGN.md` §4.7,M3 随 MCP 多会话一起做。
 
 pub mod curve;
+pub mod digest;
 pub mod health;
 pub mod ids;
 pub mod json;
@@ -51,8 +52,8 @@ pub use layout::Layout;
 pub use lock::{LockGuard, acquire};
 pub use meta::VideoMeta;
 pub use project::{
-    Approval, CalibrateProgress, Progress, Project, Review, ReviewCounts, SCHEMA_VERSION,
-    SchemaVersion, SourceRef, StepProgress,
+    Approval, CalibrateProgress, MaterialDigests, Progress, Project, Review, ReviewCounts,
+    SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
 };
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
@@ -62,7 +63,7 @@ pub use source::{
     video_rel_for, volume_of,
 };
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
-pub use transcript::{Correction, CorrectionType, Segment, Transcript};
+pub use transcript::{Correction, CorrectionType, Segment, SegmentReview, Transcript};
 
 /// 当前时刻,带本地 UTC 偏移(如 `2026-09-24T21:00:00+08:00`)。
 ///

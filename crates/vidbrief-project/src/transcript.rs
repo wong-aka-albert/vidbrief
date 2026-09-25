@@ -54,6 +54,43 @@ pub struct Segment {
     /// agent 修正后的整句文本;未修改或不改时保持 `None`。
     pub corrected_text: Option<String>,
     pub correction: Option<Correction>,
+    /// 模型**核验过这一段**的时刻。`None` = 还没核验。
+    ///
+    /// # 为什么要逐段记
+    ///
+    /// 审核门要拦的是"**跳过某一段**"。整份转录记一个"审完了"的标记,
+    /// 跳了 300 段也看不出来 —— 那门就等于没设。所以标记落在段上。
+    ///
+    /// # 它和 `correction` 分工
+    ///
+    /// `correction` 记的是"**确实有话说**"(改了哪儿 / 哪儿没把握);
+    /// 这一个记的是"**我看过这一段了**"。审过、没问题的那一段,前者是 `None`
+    /// —— 而这正是它以前和"从没审过"分不开的原因。
+    ///
+    /// 三种核验结论由 [`Segment::review`] 一处读出,别让调用方各自拼。
+    ///
+    /// 用时间戳不用布尔:顺带答了"这个结论是哪一轮审的"。
+    /// `#[serde(default)]` —— 老文件里没有这一段,读作"还没核验",不是错误。
+    #[serde(default)]
+    pub checked_at: Option<DateTime<FixedOffset>>,
+}
+
+/// 一段转录**当前处在哪种核验状态**。
+///
+/// 审核门数的就是这三个。它们覆盖了"模型对这一段做过什么"的全部可能 ——
+/// 没有第四种,所以门不会卡死:模型永远有下一步动作可做
+/// (接着审 / 去问用户 / 自己拍板)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentReview {
+    /// 还没核验。**门的第一个拦截条件** —— 让模型接着审,不打扰人。
+    Unchecked,
+    /// 核验过,没话说(识别没问题),或者已经改定了。
+    Checked,
+    /// 核验过,但定不了 —— 请用户裁决。**门的第二个拦截条件**。
+    ///
+    /// 判据就是 `correction.type == uncertain`:那个类型的文档原话是
+    /// "agent 认为这里可能有问题却不敢断言"—— **这句话本身就是模型在说"我定不了"**。
+    NeedsUser,
 }
 
 impl Segment {
@@ -76,6 +113,22 @@ impl Segment {
             self.correction.as_ref().map(|c| c.kind),
             Some(CorrectionType::Uncertain)
         )
+    }
+
+    /// 这一段**当前处在哪种核验状态**。审核门数的就是它。
+    ///
+    /// 判据收在这一处,不让每个调用方自己拼 —— 拼法一旦散开,
+    /// 迟早出现"门说审完了、视图说没审"这种自相矛盾。
+    pub fn review(&self) -> SegmentReview {
+        if self.is_uncertain() {
+            // 存疑优先:一段可以既有 corrected_text 又标存疑吗?按契约不该,
+            // 真出现了也以"要用户裁决"为准 —— 那一边更需要人。
+            return SegmentReview::NeedsUser;
+        }
+        match self.checked_at {
+            Some(_) => SegmentReview::Checked,
+            None => SegmentReview::Unchecked,
+        }
     }
 
     /// 时长(秒)。
@@ -164,6 +217,7 @@ mod tests {
             text: text.to_string(),
             corrected_text: None,
             correction: None,
+            checked_at: None,
         };
         Transcript {
             source: RelPath::new("source/video.mp4").unwrap(),

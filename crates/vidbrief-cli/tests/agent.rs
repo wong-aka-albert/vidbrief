@@ -406,51 +406,136 @@ fn p4_summarize_video_tools_all_answer() {
         }),
     );
 
-    // **步 2 的门先挡住** —— P4 说"写完停下来给用户看",而门保证"看之前别写"。
-    // 这里没有 approve,所以第一次必须失败,而且要说清差什么、下一步调什么。
+    // **门按核验状态拦,不看签字。**
+    //
+    // 前面 `request_shot` 补了一张图、它还没被看过,所以此刻门拦的是"活没干完" ——
+    // 报错要说清**还差哪一条**,而且**不该把人扯进来**(那是模型自己的活)。
     let blocked = client.call_tool(
         "write_summary",
         json!({"project_id": proj, "md": "# 总结\n"}),
     );
-    assert!(tool_failed(&blocked), "没经用户确认就写总结,该被挡住:{blocked}");
+    assert!(tool_failed(&blocked), "还有没核验的就写总结,该被挡住:{blocked}");
     let blocked_text = first_text(&blocked);
-    assert!(blocked_text.contains("还没经过用户确认"), "{blocked_text}");
-    assert!(blocked_text.contains("approve"), "该告诉它下一步调什么:{blocked_text}");
+    assert!(blocked_text.contains("还没核验完"), "{blocked_text}");
     assert!(
-        blocked_text.contains("未校准"),
-        "还要把当前状态摆出来(用户看的就是这个):{blocked_text}"
+        blocked_text.contains("截图"),
+        "该把还没核验的项摆出来(模型照着它接着干):{blocked_text}"
+    );
+    assert!(
+        !blocked_text.contains("approve"),
+        "这一档是'活没干完',不该把人扯进来:{blocked_text}"
     );
 
-    // 用户看过了,点头
-    let approved = client.tool_text("approve", json!({"project_id": proj}));
-    assert!(approved.contains("已记下用户确认"), "{approved}");
-    assert!(approved.contains("门开了"), "该说清现在能干什么:{approved}");
+    // **门没有侧门。** `write_note` 能写 `03_summary/` 下的 `.md`,而 `summary.md`
+    // 正好在里面 —— 不堵住这条,上面的门就是个摆设:agent 只要"想把总结改一下",
+    // 顺手就走过去了,甚至不知道自己在绕门。
+    //
+    // 这不是假想:M4 第三轮真 agent 联调里就是这么发生的 —— 用户点头、门开了之后,
+    // agent 又改了 6 段转录,然后用 `write_note` 把总结整个重写了一遍,
+    // 从头到尾没再碰过 `write_summary`,也没再问用户。
+    let side_door = client.call_tool(
+        "write_note",
+        json!({
+            "project_id": proj,
+            "path": "03_summary/summary.md",
+            "md": "# 绕过门的总结\n",
+        }),
+    );
+    assert!(tool_failed(&side_door), "门还留着一扇侧门:{side_door}");
+    let door_text = first_text(&side_door);
+    assert!(
+        door_text.contains("write_summary"),
+        "该告诉它走哪个工具,而不是只说不让写:{door_text}"
+    );
 
-    // 门开了才写得进去
+    // 把"活干完":给两张图都写回结论、并报告转录都审过了。
+    // **这一步不需要任何人签字** —— 全核验完就该放行,这就是"全程托管"那一档。
+    for (shot_id, read) in [("s001", "画面是一张示意图"), ("s002", "画面是另一张示例图")] {
+        client.tool_text(
+            "record_shot_check",
+            json!({
+                "project_id": proj,
+                "shot_id": shot_id,
+                "match": true,
+                "audio_visual_sync": true,
+                "type_read": read,
+                "issues": [],
+                "confidence": "high",
+            }),
+        );
+    }
+    let seg_ids: Vec<u32> = (1..=FAKE_SEGMENTS.len() as u32).collect();
+    client.tool_text(
+        "apply_corrections",
+        json!({"project_id": proj, "corrections": [], "reviewed": seg_ids}),
+    );
+
     client.tool_text(
         "write_summary",
         json!({"project_id": proj, "md": "# 总结\n\n这一段是结果积累充分后的第一段运行。[s001 @0:06]\n"}),
     );
+    let after_auto = as_json(&client.tool_text("get_project", json!({"project_id": proj})));
+    assert_eq!(
+        after_auto["project"]["review"]["calibrate"],
+        serde_json::Value::Null,
+        "全自动那一档不该留下任何签字:{after_auto}"
+    );
 
-    // **确认之后又改材料 → 门重新关上** —— 这是这道门全部的意义
+    // **有要用户拍板的项 → 门又拦上,这回拦的是"等人"。**
     client.tool_text(
-        "request_shot",
-        json!({"project_id": proj, "t": 30.0, "reason": "用户说这里也想看一眼"}),
+        "record_shot_check",
+        json!({
+            "project_id": proj,
+            "shot_id": "s001",
+            "match": false,
+            "audio_visual_sync": true,
+            "type_read": "画面看不清",
+            "issues": ["画面与口播对不上"],
+            "confidence": "low",
+        }),
     );
-    let again = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v2\n"}));
-    assert!(tool_failed(&again), "确认之后又改过材料,该重新挡:{again}");
-    let again_text = first_text(&again);
-    assert!(again_text.contains("又变过了"), "{again_text}");
-    assert!(
-        again_text.contains("未校准从 2 变成了 3"),
-        "要说清是哪一项变了:{again_text}"
+    let waiting = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v2\n"}));
+    assert!(tool_failed(&waiting), "有待拍板的项,该拦:{waiting}");
+    let waiting_text = first_text(&waiting);
+    assert!(waiting_text.contains("等人拍板"), "{waiting_text}");
+    assert!(waiting_text.contains("s001"), "要说清等的是哪一条:{waiting_text}");
+
+    // 用户说"这些我知道,就这样过" —— 那句话记下来,门才放过这一批
+    let approved = client.tool_text(
+        "approve",
+        json!({"project_id": proj, "note": "用户说这张我知道,就这样过"}),
+    );
+    assert!(approved.contains("已记下用户拍板"), "{approved}");
+    assert!(approved.contains("门开了"), "该说清现在能干什么:{approved}");
+    client.tool_text(
+        "write_summary",
+        json!({"project_id": proj, "md": "# 总结 v2\n\n补图并拍板之后的版本。\n"}),
     );
 
-    // 再看一眼、再确认一次,又能写了
+    // **拍板之后材料又动过 → 那次拍板不再覆盖新冒出来的项**
+    client.tool_text(
+        "record_shot_check",
+        json!({
+            "project_id": proj,
+            "shot_id": "s002",
+            "match": false,
+            "audio_visual_sync": false,
+            "type_read": "无从确认",
+            "issues": ["音画对不上"],
+            "confidence": "low",
+        }),
+    );
+    let again = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v3\n"}));
+    assert!(tool_failed(&again), "拍板之后又冒出新的待拍板项,该重新拦:{again}");
+    let again_text = first_text(&again);
+    assert!(again_text.contains("等人拍板"), "{again_text}");
+    assert!(again_text.contains("s002"), "该说清新等的是哪一条:{again_text}");
+
+    // 再拍一次板,又能写了
     client.tool_text("approve", json!({"project_id": proj, "note": "用户说就这样"}));
     client.tool_text(
         "write_summary",
-        json!({"project_id": proj, "md": "# 总结 v2\n\n改完补图之后的版本。\n"}),
+        json!({"project_id": proj, "md": "# 总结 v3\n\n最终版。\n"}),
     );
 
     // 步 3 该被标上了 —— 用户靠这个知道走到哪了

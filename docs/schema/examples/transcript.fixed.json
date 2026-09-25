@@ -11,7 +11,8 @@
       "end": 2.5,
       "text": "各位好",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 2,
@@ -19,7 +20,8 @@
       "end": 6.0,
       "text": "今天用一个很短的小样例过一遍流程",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 3,
@@ -27,7 +29,8 @@
       "end": 8.9,
       "text": "现在是讲解人画面这一段基本没变化",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 4,
@@ -35,7 +38,8 @@
       "end": 11.5,
       "text": "好我们切到主图了",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 5,
@@ -47,7 +51,8 @@
         "type": "terminology",
         "note": "派森 → Python",
         "reason": "截图 s001(t=9.0)画面文字为「Python 列表」"
-      }
+      },
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 6,
@@ -59,7 +64,8 @@
         "type": "uncertain",
         "note": "「数据变化」疑似「一小时数据变化」漏字",
         "reason": "同期画面标注 1 小时,但语音未复述数量级,不敢断言"
-      }
+      },
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 7,
@@ -67,7 +73,8 @@
       "end": 21.0,
       "text": "画面停住了大家可以把结论抄下来",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {
       "id": 8,
@@ -75,7 +82,8 @@
       "end": 24.0,
       "text": "最后大家看屏幕上的总结页",
       "corrected_text": null,
-      "correction": null
+      "correction": null,
+      "checked_at": "2026-09-24T21:20:00+08:00"
     }
   ]
 }

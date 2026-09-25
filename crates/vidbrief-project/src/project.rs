@@ -11,6 +11,7 @@
 //! 两轮跑下来,**"靠对话"等于没有门** —— 一个一张图都没校准的项目照样能写总结、
 //! 把步 3 标成完成。详见 devlog [260925-21]。
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::{Result, bail};
@@ -129,6 +130,47 @@ pub struct ReviewCounts {
     pub uncertain: usize,
 }
 
+/// 确认当时的**材料内容**,逐条一个短摘要(见 [`crate::digest`])。
+///
+/// # 为什么要有它 —— 四个计数不够
+///
+/// [`ReviewCounts`] 只表达得了"**数量**变了",而校准里最常发生的那类改动是**改字**:
+/// 把转录里听错的词改对。改字不动任何一项计数。
+///
+/// M4 第三轮真 agent 联调实测到了这个洞:用户签字时转录改了 4 段,之后 agent 又改到
+/// 10 段,四项计数**一模一样**,门照开、总结照写 —— 用户签的那版和写总结用的那版
+/// 根本不是同一份材料。计数是"拿量长度的尺子量温度"。
+///
+/// 所以这里存内容本身。任何一条对不上,这次确认就作废。
+///
+/// 计数不扔:摘要判"算不算数",计数负责把话**说给人听** ——
+/// 「待裁决 7 张」人读得懂,`a1b2c3d4` 读不懂。
+///
+/// # 只收"被动过的",不收全部
+///
+/// 转录 322 段全存进来,`project.json` 会从 1KB 涨到 10KB,而那是个要给人看的文件。
+/// 没收的那些段不会变 —— **原始转录永不就地改写**(`transcript.rs` 钉着这条),
+/// 没被动过的段没有会变的字段。真被就地改了,那是"绕过工具把材料改坏",
+/// 该由 `vidbrief status` 的内容体检去发现,不是这道门的活。
+///
+/// (`BTreeMap` 而不是 `HashMap`:键有序,序列化才是稳定的 ——
+/// `project.json` 的示例文件是**逐字节**比对的。)
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialDigests {
+    /// 转录里**被动过的段**:改过的(读起来跟原文不一样),或标了存疑的。
+    /// 键是段 id。
+    ///
+    /// 改完又改回原文的段**不在里面** —— 对读的人来说它跟没改过一样,
+    /// 门不该为它拦一次。
+    pub segments: BTreeMap<String, String>,
+    /// 每张截图一个。键是截图 id,如 `s003`。
+    pub shots: BTreeMap<String, String>,
+    /// 每条补图候选一个。键是候选 id(数字,但和上面一样按字符串存,
+    /// 免得 JSON 对象键的三套写法各写各的)。
+    pub supplements: BTreeMap<String, String>,
+}
+
 /// 一次确认。
 ///
 /// **没有"谁签的"这个字段** —— 拿不到。服务端能观察到的只有:什么时候、当时什么状态。
@@ -137,8 +179,19 @@ pub struct ReviewCounts {
 #[serde(deny_unknown_fields)]
 pub struct Approval {
     pub approved_at: DateTime<FixedOffset>,
-    /// 确认当时的材料状态。之后任何一项变了,这次确认就作废。
+    /// 确认当时的四项计数。用来把话说清楚,不单独作判据(判据是 [`Self::digests`])。
     pub counts: ReviewCounts,
+    /// 确认当时的材料内容。**这一条变了,这次确认就作废。**
+    ///
+    /// `None` = 这次确认签在"逐条记摘要"这版之前,当时只记了计数 —— 那时
+    /// **没法判断材料后来有没有被改过**。门认得出这个区别,会说"查不了,再确认一次",
+    /// 而不是假装材料变了。
+    ///
+    /// 为什么要 `Option` 而不是"空表就当没有":**空表是有意义的** ——
+    /// 一个刚建好、什么都还没跑的项目,材料本来就是空的。
+    /// 两者分不开的话,那种项目一签字就再也过不去门了(测试当场抓到了这一条)。
+    #[serde(default)]
+    pub digests: Option<MaterialDigests>,
     /// **带着未处理项通过**时的说明(正常通过是 `None`)。
     /// 事后要能回答"当初为什么放行"。
     pub note: Option<String>,

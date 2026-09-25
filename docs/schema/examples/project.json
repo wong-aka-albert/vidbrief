@@ -37,6 +37,18 @@
         "supplement_pending": 0,
         "uncertain": 2
       },
+      "digests": {
+        "segments": {
+          "12": "3f2a91c4",
+          "31": "8b07de15"
+        },
+        "shots": {
+          "s001": "c41e77aa",
+          "s002": "0d93b6f2",
+          "s003": "5a6c2048"
+        },
+        "supplements": {}
+      },
       "note": "用户说:那 3 张我知道,先往下走"
     }
   }

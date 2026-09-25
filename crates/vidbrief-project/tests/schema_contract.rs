@@ -382,6 +382,7 @@ fn writer_output_validates_against_the_schemas() {
                 note: "好 → 好,开始".into(),
                 reason: "上下文".into(),
             }),
+            checked_at: Some(now()),
         }],
     };
     let mut shots = Shots::new();

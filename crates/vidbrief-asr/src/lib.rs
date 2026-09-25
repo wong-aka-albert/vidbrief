@@ -97,9 +97,10 @@ pub fn from_srt(text: &str, meta: &VideoMeta, cfg: &Config) -> Result<Transcript
                 start: r.start,
                 end: r.end,
                 text: r.text,
-                // 原始转录**永不就地改写**;这两个字段留给 agent 在步 2 填
+                // 原始转录**永不就地改写**;这三项留给 agent 在步 2 填
                 corrected_text: None,
                 correction: None,
+                checked_at: None,
             })
             .collect(),
     })

@@ -215,6 +215,38 @@
         }
       }
     },
+    "material_digests": {
+      "description": "确认当时的材料内容,逐条一个短摘要。任何一条对不上,这次确认就作废 —— 判据是它,不是 counts(计数抓不住「只改了一个字」)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segments",
+        "shots",
+        "supplements"
+      ],
+      "properties": {
+        "segments": {
+          "$ref": "#/$defs/digest_map",
+          "description": "转录里被动过的段(改过或标了存疑),键是段 id。没被动过的段不进这里 —— 原始转录永不就地改写,它们没有会变的字段"
+        },
+        "shots": {
+          "$ref": "#/$defs/digest_map",
+          "description": "每张截图一个,键是截图 id(如 s003)"
+        },
+        "supplements": {
+          "$ref": "#/$defs/digest_map",
+          "description": "每条补图候选一个,键是候选 id"
+        }
+      }
+    },
+    "digest_map": {
+      "description": "id → 8 位十六进制的内容摘要",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}$"
+      }
+    },
     "approval": {
       "description": "一次确认。没有 approved_by —— 拿不到,填不出来的字段迟早被填成假的",
       "type": "object",
@@ -222,6 +254,7 @@
       "required": [
         "approved_at",
         "counts",
+        "digests",
         "note"
       ],
       "properties": {
@@ -230,6 +263,17 @@
         },
         "counts": {
           "$ref": "#/$defs/review_counts"
+        },
+        "digests": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/material_digests"
+            }
+          ],
+          "description": "确认当时的材料内容。**判据是它**:变了就作废。null = 这次确认签在摘要这版之前,那时没法判断材料后来有没有被改过 —— 门会说「查不了,再确认一次」,而不是假装材料变了"
         },
         "note": {
           "oneOf": [

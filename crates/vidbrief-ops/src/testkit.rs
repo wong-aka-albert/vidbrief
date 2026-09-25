@@ -90,6 +90,7 @@ impl Fake {
                     text: (*text).to_string(),
                     corrected_text: None,
                     correction: None,
+                    checked_at: None,
                 })
                 .collect(),
         };

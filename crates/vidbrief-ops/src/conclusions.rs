@@ -111,6 +111,8 @@ pub struct CorrectionOutcome {
     pub changed: usize,
     /// 全稿里"存疑但未改"的段数(累计)。
     pub uncertain: usize,
+    /// 全稿里**核验过**的段数(累计)。含改过的、没动过的、和标了存疑的。
+    pub reviewed: usize,
 }
 
 /// 把 agent 的纠错写进 `02_calibrate/transcript.fixed.json`,并刷新对照表。
@@ -119,12 +121,22 @@ pub struct CorrectionOutcome {
 /// 这样"agent 到底改了什么"永远可查;就地改的话原文就消失了,核对纠错是否合理就没了依据。
 ///
 /// 可以反复调用:每次都在**现有纠错稿**上继续改,所以 agent 可以分批发现、分批写回。
+///
+/// # `reviewed`:审过但没话说的那些段
+///
+/// `items` 只装"**确实有话说**"的段(改了哪儿 / 哪儿没把握)。可校准里绝大多数段是
+/// **审了、没问题** —— 没有地方记它们的话,"审过没问题"和"压根没审"就分不开,
+/// 门也就拦不住"跳过了 300 段"。
+///
+/// 所以这个列表是"这一段我看过了,不用改",和 `items` 一起提交(它们本来就是
+/// 同一趟活:读完一批 → 挑出有问题的 → 其余照过)。改过的段自动算审过,不用重复列。
 pub fn apply_corrections(
     opened: &OpenProject,
     items: &[CorrectionInput],
+    reviewed: &[u32],
 ) -> Result<CorrectionOutcome> {
-    if items.is_empty() {
-        bail!("没有要写的纠错条目");
+    if items.is_empty() && reviewed.is_empty() {
+        bail!("没有要写的东西 —— `corrections` 和 `reviewed` 至少给一个");
     }
     let layout = opened.layout();
     let raw = Transcript::load(&layout.transcript()).with_context(|| {
@@ -146,6 +158,11 @@ pub fn apply_corrections(
     for item in items {
         if !fixed.segments.iter().any(|s| s.id == item.segment_id) {
             unknown.push(item.segment_id);
+        }
+    }
+    for id in reviewed {
+        if !fixed.segments.iter().any(|s| s.id == *id) {
+            unknown.push(*id);
         }
     }
     if !unknown.is_empty() {
@@ -181,6 +198,16 @@ pub fn apply_corrections(
         });
     }
 
+    // "审过"的戳盖在两处:改过的段(改了当然就是审过)+ 调用方点名的那批
+    let now = vidbrief_project::now();
+    for segment in &mut fixed.segments {
+        let touched = items.iter().any(|i| i.segment_id == segment.id)
+            || reviewed.contains(&segment.id);
+        if touched {
+            segment.checked_at = Some(now);
+        }
+    }
+
     fixed
         .save(&layout.transcript_fixed())
         .context("写入 transcript.fixed.json 失败")?;
@@ -195,6 +222,11 @@ pub fn apply_corrections(
         applied: items.len(),
         changed: fixed.segments.iter().filter(|s| s.is_corrected()).count(),
         uncertain: fixed.segments.iter().filter(|s| s.is_uncertain()).count(),
+        reviewed: fixed
+            .segments
+            .iter()
+            .filter(|s| s.checked_at.is_some())
+            .count(),
     })
 }
 
@@ -333,11 +365,46 @@ pub enum WriteMode {
     Append,
 }
 
+/// `write_note` 只许写这两个目录 —— 它们是"笔记"的地盘。
+const NOTE_DIRS: [&str; 2] = [
+    vidbrief_project::layout::CALIBRATE_DIR,
+    vidbrief_project::layout::SUMMARY_DIR,
+];
+
+/// **有专属工具的落点**:`write_note` 一律不许碰,哪怕它们就在 [`NOTE_DIRS`] 里面。
+///
+/// 为什么光查目录不够:这两个文件正好落在允许的两个目录里,而它们偏偏是最不该手写的 ——
+/// `summary.md` 要过步 2 的审核门、写完还要标上步 3 的进度;`transcript.diff.md`
+/// 是给人核对纠错的**证据**,得像纠错稿一样由 `apply_corrections` 刷。手写它们不是
+/// "格式不对",是**门和账一起失效**。
+///
+/// 这不是假想的:M4 第三轮真 agent 联调里,agent 就是在审核门关着的情况下
+/// 用 `write_note` 把 `summary.md` 整个重写掉的 —— 它没打算绕门,它只是想改个文件。
+/// 一道"顺手就能绕过去、而且绕的人自己都不知道"的门不算门。
+///
+/// 每项是 `(路径, 该走的工具, 绕过它连带失效的东西)`。
+const OWNED_BY_TOOLS: [(&str, &str, &str); 2] = [
+    (
+        vidbrief_project::layout::SUMMARY_FILE,
+        "write_summary",
+        "步 2 的审核门和步 3 的进度",
+    ),
+    (
+        vidbrief_project::layout::TRANSCRIPT_DIFF_FILE,
+        "apply_corrections",
+        "这份证据与纠错稿的一致",
+    ),
+];
+
 /// 写一份 Markdown 到项目里(`write_note`)。
 ///
-/// `rel` 必须是项目根相对路径且落在允许的目录里 —— 路径校验有两道:
-/// [`RelPath`] 保证不越出项目根(挡目录穿越),这里再限一层"只能写哪几个目录",
-/// 免得 agent 顺手把 `project.json` 覆盖掉。
+/// `rel` 必须是项目根相对路径且落在允许的目录里 —— 路径校验有三道:
+/// [`RelPath`] 保证不越出项目根(挡目录穿越),这里再挡掉 [`OWNED_BY_TOOLS`]
+/// (有专属工具的文件),最后限一层"只能写哪几个目录",免得 agent 顺手把
+/// `project.json` 覆盖掉。
+///
+/// [`RelPath`] 不做归一化(`.` / `..` / 反斜杠 / 空段全被它拒了),所以 `as_str()`
+/// 已经是规范形式,**精确串比就是严的** —— 不需要再考虑"换个写法绕过去"。
 pub fn write_note(
     opened: &mut OpenProject,
     rel: &RelPath,
@@ -345,14 +412,23 @@ pub fn write_note(
     mode: WriteMode,
     count_round: bool,
 ) -> Result<PathBuf> {
-    let allowed = [
-        vidbrief_project::layout::CALIBRATE_DIR,
-        vidbrief_project::layout::SUMMARY_DIR,
-    ];
     let path = rel.as_str();
-    if !allowed.iter().any(|dir| path.starts_with(dir)) {
+
+    if let Some((_, tool, also)) = OWNED_BY_TOOLS.iter().find(|(f, _, _)| *f == path) {
         bail!(
-            "只能写在 {allowed:?} 下面,不允许写 `{path}` —— 材料文件有自己的工具,别绕过它们"
+            "`{path}` 有自己的工具(`{tool}`),不能走 write_note —— \
+             它写这个文件的同时还管着{also},绕过它,那些也就一起失效了"
+        );
+    }
+
+    // 比的是**路径段**而不是字符串:不然 `02_calibrate_extra/` 会从
+    // `02_calibrate` 这个前缀底下溜过去。
+    let in_note_dir = NOTE_DIRS
+        .iter()
+        .any(|dir| path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')));
+    if !in_note_dir {
+        bail!(
+            "只能写在 {NOTE_DIRS:?} 下面,不允许写 `{path}` —— 材料文件有自己的工具,别绕过它们"
         );
     }
     if !path.ends_with(".md") {
@@ -493,6 +569,7 @@ mod tests {
                     reason: "上下文在讲培训课程".into(),
                 },
             ],
+            &[],
         )
         .unwrap();
 
@@ -534,6 +611,7 @@ mod tests {
                 note: None,
                 reason: "第一次".into(),
             }],
+            &[],
         )
         .unwrap();
         let second = apply_corrections(
@@ -545,6 +623,7 @@ mod tests {
                 note: None,
                 reason: "第二次".into(),
             }],
+            &[],
         )
         .unwrap();
 
@@ -577,6 +656,7 @@ mod tests {
                     reason: "坏的那条".into(),
                 },
             ],
+            &[],
         )
         .unwrap_err()
         .to_string();
@@ -601,6 +681,7 @@ mod tests {
                 note: None,
                 reason: "说不上来".into(),
             }],
+            &[],
         )
         .unwrap_err()
         .to_string();
@@ -673,6 +754,78 @@ mod tests {
         );
     }
 
+    /// **有专属工具的文件,写在允许的目录里也不行。**
+    ///
+    /// 这条曾经漏掉:判据是"路径开头是不是那两个目录",而 `summary.md` 与
+    /// `transcript.diff.md` 正好落在里面 —— 于是 agent 能在审核门关着的时候
+    /// 用 `write_note` 把 `summary.md` 整个重写掉(M4 第三轮真 agent 联调实测,
+    /// 而且它自己都没意识到绕了门)。报错必须点出**该走哪个工具**,否则调用方
+    /// 只会觉得"这里不让写",转头再找个别的写入口。
+    #[test]
+    fn write_note_refuses_files_that_have_their_own_tool() {
+        let fake = Fake::new("concl-note-owned");
+        let mut opened = fake.open();
+
+        for (path, tool) in [
+            (
+                vidbrief_project::layout::SUMMARY_FILE,
+                "write_summary",
+            ),
+            (
+                vidbrief_project::layout::TRANSCRIPT_DIFF_FILE,
+                "apply_corrections",
+            ),
+        ] {
+            let err = write_note(
+                &mut opened,
+                &rel(path).unwrap(),
+                "# 手写的\n",
+                WriteMode::Overwrite,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(tool), "{path} 该告诉它走哪个工具:{err}");
+            assert!(
+                !fake.layout().rel(path).is_file(),
+                "{path} 被拒了却还是写下去了"
+            );
+        }
+
+        // 同一个目录里**没有**专属工具的那些照写不误 —— 别把整片地都封了
+        for ok in [
+            vidbrief_project::layout::CROSS_VALIDATE_FILE,
+            vidbrief_project::layout::AGENT_LOG_FILE,
+            "03_summary/notes/案例一.md",
+        ] {
+            write_note(&mut opened, &rel(ok).unwrap(), "笔记", WriteMode::Overwrite, false)
+                .unwrap_or_else(|e| panic!("{ok} 该能写:{e:#}"));
+        }
+    }
+
+    /// 目录判据比的是**路径段**,不是字符串前缀。
+    ///
+    /// 不然 `02_calibrate_extra/`(以及任何以这两个名字开头的兄弟目录)会从
+    /// 前缀底下溜过去。
+    #[test]
+    fn write_note_matches_whole_path_segments_not_just_a_prefix() {
+        let fake = Fake::new("concl-note-prefix");
+        let mut opened = fake.open();
+
+        for bad in ["02_calibrate_extra/x.md", "03_summary_backup/x.md"] {
+            let err = write_note(
+                &mut opened,
+                &rel(bad).unwrap(),
+                "x",
+                WriteMode::Overwrite,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("只能写在"), "{bad} 靠前缀溜进去了:{err}");
+        }
+    }
+
     #[test]
     fn write_note_appends_without_losing_the_previous_round() {
         let fake = Fake::new("concl-append");
@@ -709,19 +862,36 @@ mod tests {
 
     #[test]
     fn summary_and_report_mark_their_steps() {
-        let fake = Fake::new("concl-steps");
+        let fake = Fake::new("concl-steps").with_curve(5).with_shot(1, 2.0);
         let mut opened = fake.open();
 
-        // 步 2 的门:没确认过就不许写总结(M4 联调之后加的)
+        // 步 2 的门:这一步的活没干完就不许写总结。
+        // 这里那张图还没核验,所以挡的是"还没核验完"那一档 —— 不需要任何人出面。
         let blocked = write_summary(&mut opened, "# 总结\n").unwrap_err().to_string();
-        assert!(blocked.contains("还没经过用户确认"), "{blocked}");
+        assert!(blocked.contains("还没核验完"), "{blocked}");
         assert!(
             !fake.layout().summary_md().is_file(),
             "被挡住的时候**不该留下半成品**"
         );
 
-        crate::review::approve(&mut opened, None).unwrap();
-        write_summary(&mut opened, "# 总结\n").unwrap();
+        // 把活干完 —— 走正经工具写回结论,**不用签字**,门自己就开
+        let id = vidbrief_project::ShotId::new(1).unwrap();
+        record_shot_check(
+            &opened,
+            id,
+            &ShotCheckInput {
+                r#match: true,
+                audio_visual_sync: true,
+                type_read: "画面内容".into(),
+                issues: Vec::new(),
+                confidence: vidbrief_project::Confidence::High,
+                neighbor_text: None,
+            },
+        )
+        .unwrap();
+        let _ = &mut opened;
+        write_summary(&mut opened, "# 总结\n").unwrap_or_else(|e| panic!("{e:#}"));
+
         write_report_md(&mut opened, "# 报告\n").unwrap();
 
         let project = vidbrief_project::Project::load(&fake.layout().project_json()).unwrap();

@@ -116,6 +116,14 @@ pub struct ApplyCorrectionsParams {
     pub project_id: String,
     /// 本次要写的纠错条目。可以分批多次调用 —— 每次都在已有纠错稿上继续改。
     pub corrections: Vec<CorrectionItem>,
+    /// **审过、没问题**的段 id 列表 —— 比如刚读完 1–50 段,里面只有 2 段要改,
+    /// 那 `corrections` 给那 2 段,这里给剩下 48 段。
+    ///
+    /// 为什么要有它:校准里绝大多数段是"审了、没问题",而 `corrections` 只装
+    /// **确实有话说**的段。没有这个列表,"审过没问题"和"压根没审"就分不开 ——
+    /// 而审核门要拦的正是"跳过了某一段"。改过的段自动算审过,不用在这里重复列。
+    #[serde(default)]
+    pub reviewed: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -184,7 +192,11 @@ impl VidbriefServer {
                        并刷新人可核对的 `transcript.diff.md`。可以分批多次调用。\
                        纠错依据的优先级:**关键帧画面上的文字 > 上下文语义 > 术语表**。\
                        只改明确的识别错误,不润色、不改语序;数字/单位/时间除非明显错了否则保留;\
-                       没把握的别改,标 `uncertain` 并在 note 里写疑似写法。",
+                       没把握的别改,标 `uncertain` 并在 note 里写疑似写法。\
+                       \n\n\
+                       **审过、没问题的段用 `reviewed` 一并报上来**(如 `[1,2,3,…]`),\
+                       否则那些段在系统里跟'压根没审'分不开 —— 而审核门拦的就是跳段。\
+                       改过的段自动算审过,不用重复列。",
         annotations(title = "写回转录纠错", read_only_hint = false, idempotent_hint = true)
     )]
     async fn apply_corrections(
@@ -203,14 +215,20 @@ impl VidbriefServer {
                 reason: c.reason,
             })
             .collect();
-        let outcome = blocking(move || vidbrief_ops::apply_corrections(&opened, &items)).await?;
+        let reviewed = p.reviewed;
+        let outcome =
+            blocking(move || vidbrief_ops::apply_corrections(&opened, &items, &reviewed)).await?;
         Ok(attach_warning(json(&outcome)?, slot.warning()))
     }
 
     #[tool(
         description = "往项目里写一份 Markdown:交叉印证结论(`02_calibrate/cross_validate.md`)、\
-                       校准日志(`02_calibrate/calibration_log.md`)、总结笔记(`03_summary/notes/…`)。\
-                       只允许写这两个目录下的 `.md` —— 材料文件有自己的工具,别绕过它们。",
+                       校准日志(`02_calibrate/calibration_log.md`)、总结笔记(`03_summary/notes/…`)、\
+                       agent 探索轨迹(`03_summary/agent_log.md`)。\
+                       只允许写 `02_calibrate/` 与 `03_summary/` 下的 `.md`,而且**有专属工具的文件\
+                       这里写不了**:`summary.md` 归 `write_summary`、`transcript.diff.md` 归 \
+                       `apply_corrections` —— 它们不只是写文件,还带着审核门、进度和证据刷新,\
+                       绕过去那些就一起失效了。",
         annotations(title = "写笔记", read_only_hint = false, idempotent_hint = true)
     )]
     async fn write_note(
@@ -268,16 +286,16 @@ impl VidbriefServer {
     }
 
     #[tool(
-        description = "记下「**用户确认了校准这一步**」—— 这是步 2 通往步 3 的门。\
+        description = "记下「**用户拍板了悬着的那一批**」—— 只对'等人拍板'那一类有效。\
                        \n\n\
-                       什么时候调:把结果给用户看过(render_timeline 的链接)、他点头之后。\
-                       **不要替用户点头** —— 门挡的是「没人注意就漏过去了」,不是防你。\
+                       门本身不看签字:它是按**核验状态**判的(还有没核验的就拦着让你接着审;\
+                       有等用户拍板的就拦着让你去问)。所以这个工具是给**后一类**用的:\
+                       用户说'这些我知道,就这样过',把他的话记下来,门才放行那一批。\
                        \n\n\
-                       调用时服务端会把当时的材料状态记下来;之后你**再改任何东西**,\
-                       这次确认就作废,得让他重新看一眼再确认。\
-                       \n\n\
-                       还有没处理完的项而用户就想往下走:可以,把他那句理由放进 `note`。",
-        annotations(title = "记用户确认", read_only_hint = false, idempotent_hint = true)
+                       **不要替用户点头。** 用户没说过'就这样过',就该去问他;\
+                       他给了具体决定(比如某张图确实有问题要改),那是把决定落到条目上\
+                       (`record_shot_check` / `apply_corrections`),不是调这个。",
+        annotations(title = "记用户拍板", read_only_hint = false, idempotent_hint = true)
     )]
     async fn approve(
         &self,
@@ -285,14 +303,27 @@ impl VidbriefServer {
     ) -> Result<CallToolResult, CallToolResult> {
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let note = p.note;
-        let approval = blocking(move || vidbrief_ops::approve(&mut opened, note)).await?;
+        let (approval, still) = blocking(move || {
+            let approval = vidbrief_ops::approve(&mut opened, note)?;
+            // 拍完板顺手看看门现在什么状态 —— 说"门开了"而不查,就会说错
+            let still = vidbrief_ops::gate_calibrate(&opened).err().map(|e| e.to_string());
+            Ok::<_, anyhow::Error>((approval, still))
+        })
+        .await?;
+
         let c = approval.counts;
+        let tail = match still {
+            None => "门开了(核验状态上没有拦着的了),可以写总结。".to_string(),
+            Some(why) => format!(
+                "**门还没开** —— 拍板只顶掉'等人拍板'那一类,核验状态还是拦着的:\n{why}"
+            ),
+        };
         Ok(attach_warning(
             text(format!(
-                "已记下用户确认({})。\n\
-                 确认时:未校准 {} 张 / 待裁决 {} 张 / 未处理补图候选 {} 条 / 存疑转录 {} 段{}\n\
+                "已记下用户拍板({})。\n\
+                 当时状态:未校准 {} 张 / 待裁决 {} 张 / 未处理补图候选 {} 条 / 存疑转录 {} 段{}\n\
                  \n\
-                 门开了,可以写总结。**注意:从现在起你再改任何材料,这次确认就作废。**",
+                 {tail}",
                 approval.approved_at.format("%Y-%m-%d %H:%M:%S"),
                 c.unchecked,
                 c.needing_review,
