@@ -1,7 +1,7 @@
 # 视频图文总结 MCP — 从零设计
 
-> 版本:v0.8(§4 数据模型定稿:JSON Schema 与 Rust 类型落成真实文件,M0)
-> 状态:待评审
+> 版本:v0.9(M3 完成:MCP stdio 服务 + A–F 组工具 + 提示模板 P1/P3/P4)
+> 状态:M0–M3 已实现,下一步 M4
 > 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)、[./schema/](./schema/)(**项目材料格式的唯一权威**)与 [./devlog/](./devlog/)(开发过程记录)
 
 ---
@@ -319,9 +319,24 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 | **进程内串行** | 同一 MCP 进程内对同一项目的写操作串行化(内部互斥)。 |
 
 > 结论:多会话**同时查看**任意;**同时编辑同一项目**由写锁 + 修订号保证不互相踩。若将来提供 HTTP 传输供多客户端共享一个服务,则改为"单服务 + 按 session 路由 + 同样的写锁/修订号"。
->
-> **实现进度**:M0 只定 `project.lock` 的格式与类型(`vidbrief_project::ProjectLock`),
-> 获取/释放/死锁检测的逻辑随 M3(MCP 多会话真正出现时)一起做。
+
+**实现(M3,已落地)**:"谁持有锁"由**操作系统的文件锁**决定(`std::fs::File::try_lock`,Windows 落
+`LockFileEx`、Unix 落 `flock`),**不由 `project.lock` 存不存在决定** —— 文件里那份 JSON
+(`pid`/`host`/`session`/`opened_at`)只是给人看的诊断信息。
+
+- **放弃"探测 pid 还活着没有"**(M0 时设想的做法),因为:进程崩溃时 OS 会**自动释放**锁,
+  不存在"陈旧锁把项目永久锁死";而 pid 会被复用,拿它当判据既不可靠又要分平台写探测代码。
+- **锁文件的内容不能用原子写**:`write_atomic` 靠 rename,而 rename 会让目录项指向另一个
+  文件标识,锁就留在没人再打开的旧文件上了 —— 互斥当场失效。持锁期间一律原地写。
+- **会话级持有**:MCP 服务在**第一次要写某个项目**时取锁,一直拿到进程结束。
+  这样第二个会话在第一次动手时就得到明确答复,而不是改到一半才发现。CLI 每个命令取一次、命令结束即放。
+- **锁只保护材料与结论**(`project.json` / `shots.json` / `transcript.fixed.json` / 报告),
+  **不保护派生视图**(`timeline.html`)—— 后者由材料推出来,两个会话同时渲染也不会有坏结果,
+  而"另一个会话正开着项目"不该让查看也变成不可能。
+
+> **已知平台限制**:Windows 上的字节区间锁是**强制**的 —— 持锁期间别的 handle 连读都读不了。
+> 所以**跨进程**时第二个会话只能说"占用者信息不可读",报不出是哪个会话占着。
+> 要修得加一个不被锁住的旁路文件,那是改项目目录格式,暂不做(见 `devlog/PLAN.md` 技术债)。
 
 ### 4.8 源视频如何进入项目(`source.link`)
 
@@ -638,11 +653,20 @@ agent: → find_supplement_candidates() → 判断后 extract_shot 补 3 张
 
 - **传输:MCP stdio JSON-RPC**(agent 本地拉起)。**协议层与具体 agent 无关。**
 - **可视化交互**:渲染视图的工具在返回 HTML 路径的同时,可**启动本地查看服务并自动打开默认浏览器**(弹出 UI,见 §9.1)。stdio 只做控制,本地服务只负责展示。
-- 实现:优先 Rust 生态 MCP SDK(如 `rmcp`);API 不稳则直接实现 tools 的 JSON-RPC。
+- **实现:官方 Rust SDK [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) 3.1**,已落地(M3)。
+  开工前先验证过它在本机**离线可编**(只加依赖、不写代码,`cargo build -p vidbrief-mcp --offline` 25 秒通过),
+  再读源码确认 3.x 的形态:`#[tool_router]` / `#[tool_handler]` / `#[prompt]` / `#[prompt_handler]`
+  宏、`Parameters<T>` 提取参数、`ToolRouter: Add`(所以工具可以**分组声明再相加**)。
+  workspace 的 `rust-version` 因此提到 **1.88**。
 - 同时暴露:
   - **Tools**:动作与服务(§11)
-  - **Resources**:只读项目文件(`change_curve.json`、`transcript.json`、`shots/*.jpg` 等),便于 agent 直接读
+  - **Resources**:只读项目文件,URI 形如 `vidbrief://project/<id>/<项目根相对路径>`
   - **Prompts**:内置校准/总结/报告的提示模板(§10.4),降低接入门槛
+
+> ⛔ **stdio 上有一条不能破的规矩:stdout 是协议通道。**
+> 任何 `println!`、进度条、调试输出掉进去,客户端就会收到一段不是 JSON-RPC 的字节流,整个会话当场坏掉。
+> 所以:**库层(`vidbrief-ops` 往下)根本不打印**,诊断一律走 stderr。
+> 端到端测试逐行解析 stdout,这条规矩是被机器守着的,不靠人记。
 
 ### 10.3 模块划分
 
@@ -651,9 +675,10 @@ vidbrief/
 ├── crates/
 │   ├── vidbrief-core/     # 差帧、密集区、抽帧(重写;旧实现已不在本仓库)
 │   ├── vidbrief-asr/      # 调 whisper-cli,解析 srt → transcript.json
-│   ├── vidbrief-project/  # 项目目录 + 数据结构 + project.json
+│   ├── vidbrief-project/  # 项目目录 + 数据结构 + 写锁(契约层叶子)
 │   ├── vidbrief-viz/      # 时间线/对照表/报告 HTML 渲染(含视频回跳 + 前端脚本)
 │   ├── vidbrief-report/   # MD → HTML 图表化模板
+│   ├── vidbrief-ops/      # **动作层**:一步的编排与项目上的读写,CLI 与 MCP 共用
 │   ├── vidbrief-mcp/      # MCP 服务:供材料 + 存结论 + 算法动作 + 提示模板
 │   └── vidbrief-cli/      # 独立命令行(脱离 agent 也能测/用)
 ├── ui/              # 视图模板 + 前端时间线组件(被 `vidbrief-viz` 用 include_str! 编进去)
@@ -665,7 +690,45 @@ vidbrief/
 
 > 注意:没有 "vision" 模块——识别由 agent 完成,工具侧无对应代码。
 
+**依赖方向**(只能从上往下):
+
+```
+project  ←  core  ←  asr          project  ←  viz          project  ←  report(→ viz)
+                    └──────────────┬──────────────┘
+                                ops  →  {project, core, asr, viz}
+                             ┌────┴────┐
+                            cli       mcp        ← 两者平等,互不依赖
+```
+
+`vidbrief-ops` 是 M3 加的**动作层**。判据很直接:
+**把这一层删掉,CLI 和 MCP 就得各写一份一模一样的流程**(建项目 = 探测 + 搬运 + 落盘;
+步 1 = 视觉 + 转录 + 标记完成 + 渲染)。而它们写的是同一批 JSON —— 两份流程迟早分家。
+
+| 层 | 有什么 | 没有什么 |
+|----|--------|---------|
+| 契约 `vidbrief-project` | 文件格式、目录、写锁 | 不知道"一步"是什么 |
+| 能力 `-core` / `-asr` / `-viz` / `-report` | 单个算法或渲染 | **不跨 crate 编排** |
+| 动作 `vidbrief-ops` | "建项目"、"跑步 1"、取材料、存结论 | 不打印、不解析参数、不认识 JSON-RPC |
+| 入口 `-cli` / `-mcp` | 参数 / JSON-RPC,把结果说给人或 agent 听 | 不含任何流程判断 |
+
 ### 10.4 MCP 提示模板(由本工具提供,内容自定)
+
+> **放出来的前提:模板里提到的每个工具都必须已经存在。**
+> 模板是**接口契约** —— 写着"调用 `record_shot_check`",那个工具就必须在工具表里,
+> 否则 agent 照着做会拿到 "method not found",然后开始怀疑整个服务。
+> 所以按里程碑逐个放开,不做"先把文本写上、工具以后补"的事:
+>
+> | 模板 | 依赖 | 状态 |
+> |------|------|------|
+> | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ M3 |
+> | P2 `fix_transcript` | apply_corrections / **render_calibration_table** | ⏳ M4 |
+> | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ M3 |
+> | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ M3 |
+> | P5 `build_report` | **build_report** | ⏳ M6 |
+>
+> 没放出来的能力**照样能用** —— agent 直接调那些工具就行,只是暂时没有现成的话术。
+> `vidbrief-mcp/src/prompts.rs` 里有测试钉住这条规矩(查"每个模板引用的工具都存在"
+> 与"未就绪的模板确实没注册")。
 
 **P1 `calibrate_shots`** —— 校准截图
 ```
@@ -723,9 +786,13 @@ vidbrief init <video> [-n id] [-t title] [-p dir]   # 建项目(已实现)
 vidbrief preprocess <project> [options]             # 步 1:差帧图/密集区/截图/转录(已实现)
 vidbrief ui <project> [--no-open]                   # 时间线视图 + 本地服务(已实现)
 vidbrief status <project> [--verify]                # 状态 + 健康检查(已实现)
-vidbrief mcp        [--stdio|--http]   # 启动 MCP 服务
-vidbrief help                          # 用法
+vidbrief mcp        [--stdio]                       # 启动 MCP 服务(已实现)
+vidbrief help                                       # 用法
 ```
+
+> CLI 从 M3 起**只剩"解析参数 + 打印"** —— 它写的是**派生视图**,不是材料,
+> 所以 `ui` 不取写锁:两个会话同时渲染也不会有坏结果,
+> 而"另一个会话正开着项目"不该让查看也变成不可能。
 
 `ui` 会渲染 `01_preprocess/timeline.html`、把项目目录挂到本地服务上、打开默认浏览器。
 **服务是必须的**:浏览器用 `file://` 打开时对本地媒体有跨域限制,时间轴点了不跳。
@@ -760,6 +827,12 @@ vidbrief help                          # 用法
 ## 11. MCP 工具清单
 
 **约定**:【供】= 把材料给 agent;【存】= 把 agent 的结论落盘;【算】= 纯算法动作。**没有任何工具调用外部模型 API。**
+
+> **实现进度(M3)**:下表除 `build_report` 与 `render_calibration_table` 外**全部已实现**。
+> 那两个被推迟,是因为它们的实质是**渲染器**(报告 HTML / 校准对照表),各自是 M6、M4 的主体,
+> 而不是这里的薄包装 —— 详情见 [devlog 260925-06](./devlog/2026-09.md)。
+> `extract_shot` 与 `request_shot` 是**同一个实现的两个名字**(模板里两种说法都会出现,
+> 不必让 agent 记哪一个才对)。
 
 ### A. 项目
 | 工具 | 类型 | 入参 | 出参 |
@@ -843,11 +916,11 @@ agent: → 重写 MD → build_report(html) 重渲染
 | **M0 schema 定稿** ✅ | §4 的 JSON schema + 目录结构落成真实文件 | 本文评审 |
 | **M1 vidbrief-core + 步1** ✅ | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
 | **M2 时间线视图** ✅ | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
-| **M3 MCP 骨架** | `vidbrief-mcp` 服务 + 项目/材料/算法工具接上 | M1,M2 |
-| **M4 步2 循环** | `get_shot`/`record_shot_check`/`apply_corrections` + 提示模板 P1–P3 + 对照表视图 | M3 |
-| **M5 步3 总结** | 只读/补图/写入工具 + 提示模板 P4 | M4 |
-| **M6 步4 报告** | MD 生成 + HTML 模板 + P5 | M5 |
-| **M7 加固** | 增量重跑、失败重试、批量、性能、外挂接口 | 全部 |
+| **M3 MCP 骨架** ✅ | `vidbrief-mcp` stdio 服务 + A–F 组工具(除两个渲染器)+ 写锁 + P1/P3/P4 | M1,M2 |
+| **M4 步2 循环** | `render_calibration_table` 对照表视图 + 提示模板 P2 + 在真实 agent 上联调 | M3 |
+| **M5 步3 总结** | 自主探索联调 + 提示模板 P4 的实战打磨 | M4 |
+| **M6 步4 报告** | `vidbrief-report` + `build_report` + 提示模板 P5 | M5 |
+| **M7 加固** | 增量重跑、失败重试、批量、性能、进度通知、外挂接口 | 全部 |
 
 ---
 
@@ -855,10 +928,13 @@ agent: → 重写 MD → build_report(html) 重渲染
 
 | # | 决策 | 说明 |
 |---|------|------|
-| 1 | **MCP 传输:stdio** | agent 本地拉起;渲染视图时**可弹出 UI**(启本地查看服务 + 打开浏览器)。 |
+| 1 | **MCP 传输:stdio** | agent 本地拉起;渲染视图时**可弹出 UI**(启本地查看服务 + 打开浏览器)。实现用官方 Rust SDK `rmcp` 3.1(§10.2)。 |
 | 2 | **术语表:默认关闭、可选** | 纠错优先依据"画面文字 + 上下文";用户需要时可补一份领域词表。 |
 | 3 | **报告 HTML:相对路径 assets** | 图片引用 `04_report/assets/`,避免 base64 单文件膨胀;自包含为可选模式。 |
 | 4 | **视频回跳:本地查看服务** | 绑 `127.0.0.1:0`(OS 自动分配空闲端口)的极简 HTTP 静态服务,保证 `<video>` 可加载可 seek;与 stdio 控制通道分离;**每 MCP 进程单例长驻**(多会话 = 多进程 = 各端口,不冲突,见 §4.7)。 |
+| 5 | **写锁用 OS 文件锁,不探 pid** | 崩溃时 OS 自动释放,不存在陈旧锁;pid 会被复用,不可作判据(§4.7)。 |
+| 6 | **动作层独立成 crate(`vidbrief-ops`)** | CLI 与 MCP 是两个**平等入口**,共用同一套流程;不让任何一个入口依赖另一个(§10.3)。 |
+| 7 | **提示模板按"引用的工具已就绪"放开** | 模板是接口契约,不写指向不存在工具的说明(§10.4)。 |
 
 > 至此无遗留待定项,可进入 M0 / M1。
 

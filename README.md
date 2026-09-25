@@ -39,8 +39,10 @@ crates/
   vidbrief-project/  项目目录 + 全部数据结构(格式的代码侧权威)+ 写锁与并发控制
   vidbrief-viz/      HTML 视图渲染 + 本地查看服务(视频回跳)
   vidbrief-report/   Markdown → 图表化 HTML
+  vidbrief-ops/      动作层:一步的编排与项目上的读写,CLI 与 MCP 共用
   vidbrief-mcp/      MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)
   vidbrief-cli/      `vidbrief` 独立命令行(脱离 agent 也能自测)
+ui/                  视图模板(被 vidbrief-viz 用 include_str! 编进二进制)
 docs/
   DESIGN.md          主设计文档
   schema/            项目材料格式的唯一权威:JSON Schema + 示例(同时是测试夹具)
@@ -50,6 +52,19 @@ fixtures/            测试素材(含已知切换点的回归视频)
 tools/whisper/       whisper.cpp 二进制 + ggml 模型(注意:体积大,不入 git)
 projects/            项目工作区(不入 git,由 `vidbrief init` 生成)
 ```
+
+**依赖方向**(只能从上往下):
+
+```
+project  ←  core  ←  asr          project  ←  viz          project  ←  report(→ viz)
+                    └──────────────┬──────────────┘
+                                ops  →  {project, core, asr, viz}
+                             ┌────┴────┐
+                            cli       mcp        ← 两个入口平等,互不依赖
+```
+
+`vidbrief-ops` 存在的理由很直接:**把这一层删掉,CLI 和 MCP 就得各写一份一模一样的流程**
+(建项目 = 探测 + 搬运 + 落盘;步 1 = 视觉 + 转录 + 标记完成 + 渲染)—— 而它们写的是同一批 JSON。
 
 ## 项目工作区长什么样
 
@@ -71,7 +86,7 @@ projects/<id>/
 
 ```bash
 cargo build --workspace        # 编译
-cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端到端)
+cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端到端 + MCP 协议)
 
 # 建项目(建目录骨架 + 探测源视频 + 写 project.json)
 ./target/debug/vidbrief init <video> [-n id] [-t "中文名"] [-p 项目目录]
@@ -85,17 +100,42 @@ cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端�
 
 # 查看状态 + 健康检查(--verify 会重算 sha256,发现源文件被就地改写)
 ./target/debug/vidbrief status <项目> [--verify]
-
-# 其余子命令待各里程碑实现
 ./target/debug/vidbrief help
 ```
+
+### 接到 agent 上
+
+MCP 服务走 **stdio**,由 agent 客户端把它拉起来(不占端口、不用先起服务):
+
+```jsonc
+// 以某个 MCP 客户端为例
+{
+  "mcpServers": {
+    "vidbrief": { "command": "E:/path/to/vidbrief.exe", "args": ["mcp", "--stdio"] }
+  }
+}
+```
+
+也可以直接在命令行里起它,自己发 JSON-RPC 试:
+
+```bash
+./target/debug/vidbrief mcp --stdio
+# 然后往 stdin 写(每个请求一行):
+# {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"me","version":"0"}}}
+# {"jsonrpc":"2.0","method":"notifications/initialized"}
+# {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+```
+
+> ⚠️ **stdout 是协议通道**。调试时任何 `println!` 混进去都会让会话当场坏掉 —— 诊断一律走 stderr。
+> 服务不往 stdout 写协议以外的任何东西,这一条由端到端测试逐行解析 stdout 守着。
 
 ## 关键决策(摘自设计文档 §14)
 
 | 项 | 决策 |
 |----|------|
-| MCP 传输 | **stdio**;渲染视图时可弹出 UI(启本地查看服务 + 开浏览器) |
+| MCP 传输 | **stdio**(官方 Rust SDK `rmcp` 3.1);渲染视图时可弹出 UI(启本地查看服务 + 开浏览器) |
 | 视频回跳 | 本地查看服务,绑 `127.0.0.1:0`(OS 分配空闲端口,多会话不冲突) |
+| 项目写锁 | **操作系统的文件锁**决定谁持有(不探 pid:崩溃时 OS 自动释放,而 pid 会被复用);文件里的 JSON 只是给人看的 |
 | 报告形态 | 相对路径 `assets/`(自包含为可选) |
 | 术语表 | 默认关闭、可选;纠错优先依据"画面文字 + 上下文" |
 | 语言 | 统一 Rust,成本过高处可子进程外挂 |
@@ -106,4 +146,6 @@ cargo test  --workspace        # 全部测试(单元 + schema 契约 + CLI 端�
 
 - ✅ **M0** 数据模型定稿:JSON Schema + Rust 类型 + 目录骨架 + `vidbrief init`
 - ✅ **M1** 步 1 打通:`vidbrief-core` 差帧/密集区/抽帧 + `vidbrief-asr` 转录 + `vidbrief preprocess`
-- ⏳ **M2**(下一步)时间线视图:四层共轴 + 视频回跳 + 本地查看服务
+- ✅ **M2** 时间线视图:四层共轴 + 视频回跳 + 本地查看服务
+- ✅ **M3** MCP 服务:stdio 传输 + 19 个工具 + 资源 + 提示模板 + 项目写锁
+- ⏳ **M4**(下一步)步 2 校准循环:对照表视图 + **在真实 agent 上联调**

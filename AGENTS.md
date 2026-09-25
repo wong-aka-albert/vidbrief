@@ -81,7 +81,18 @@ rg 'pattern' -g '!target' -g '!*.bin'   # glob 排除
 [`docs/DESIGN.md` §4.1](docs/DESIGN.md),里面每个 JSON 文件的格式见 [`docs/schema/`](docs/schema/)。
 默认放在 `./projects/`(已 gitignore)。
 
-**当前进度**:M0(数据模型定稿 + 目录骨架 + `vidbrief init`)已完成;下一步 M1(差帧 / 密集区 / 抽帧 / 转录)。
+**当前进度**:M0(数据模型 + 目录骨架 + `vidbrief init`)、M1(差帧/密集区/抽帧/转录)、
+M2(时间线视图 + 本地查看服务)、**M3(MCP stdio 服务 + 19 个工具 + 写锁)** 均已完成;
+下一步 **M4**(步 2 校准循环:对照表视图 + 在真实 agent 上联调)。详见 [`docs/devlog/PLAN.md`](docs/devlog/PLAN.md)。
+
+**两条实现层面的硬约束**(踩过就知道疼):
+
+- **stdio 上的 stdout 是协议通道。** `vidbrief-mcp` 一旦跑起来,任何 `println!`、进度条、
+  调试输出掉进 stdout,客户端就会收到一段不是 JSON-RPC 的字节流,整个会话当场坏掉。
+  **库层(`vidbrief-ops` 往下)一律不打印**;诊断走 stderr。
+  这条由 `crates/vidbrief-cli/tests/mcp.rs` 逐行解析 stdout 守着 —— 不靠人记。
+- **`project.lock` 的内容不能用 `write_atomic` 写。** 原子写靠 rename,而 rename 会让目录项
+  指向另一个文件标识,锁就留在没人再打开的旧文件上了,互斥当场失效。持锁期间一律原地写。
 
 ---
 
@@ -142,14 +153,15 @@ git commit -m "feat(vidbrief-core): 实现变化密集区检测 [260925-01]"
 | [`docs/WHISPER_SETUP.md`](docs/WHISPER_SETUP.md) | 本地 Whisper:硬件要求、模型规格、实测记录 |
 | [`docs/devlog/`](docs/devlog/) | **开发过程记录**(迭代安排 / 进度 / 决策 / 问题 / 计划变更) |
 | [`docs/devlog/PLAN.md`](docs/devlog/PLAN.md) | 当前迭代安排与里程碑状态 |
-| `crates/vidbrief-core/` | 步 1 算法核心。**纯函数占一半**(`feature`/`regions`/`shots` 不碰进程),便于毫秒级调试 |
+| `crates/vidbrief-core/` | 步 1 算法核心。**纯函数占一半**(`feature`/`regions`/`shots`/`supplement` 不碰进程),便于毫秒级调试 |
 | `crates/vidbrief-asr/` | ffmpeg 抽音 + whisper-cli 封装 → 结构化转录。**不做任何纠错** |
 | `crates/vidbrief-project/` | **项目目录 + 全部数据结构 + 写锁与并发控制**(格式的代码侧权威) |
 | `crates/vidbrief-viz/` | HTML 视图渲染 + **本地查看服务**(绑 `127.0.0.1:0`、进程内单例、挂载表、Range 支持) |
 | `ui/` | 视图模板与前端时间线组件(被 `vidbrief-viz` 用 `include_str!` 编进二进制) |
 | `crates/vidbrief-report/` | Markdown → 图表化 HTML |
-| `crates/vidbrief-mcp/` | MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板) |
-| `crates/vidbrief-cli/` | `vidbrief` 独立命令行(脱离 agent 也能自测);已实现 `init` |
+| `crates/vidbrief-ops/` | **动作层**:一步的编排与项目上的读写。CLI 与 MCP 共用这一层;它不打印、不解析参数、不认识 JSON-RPC |
+| `crates/vidbrief-mcp/` | MCP 服务(供材料 / 存结论 / 算法动作 / 提示模板)。**改工具看 `src/tools/`,改模板看 `src/prompts.rs`** |
+| `crates/vidbrief-cli/` | `vidbrief` 独立命令行(脱离 agent 也能自测)。**只做参数解析 + 打印** |
 | `fixtures/test_sample.mp4` | 回归素材:60s 合成视频,已知切换点 **t=20/30/50** |
 | `tools/whisper/` | whisper.cpp 二进制 + ggml 模型(**体积大,不入 git**) |
 
@@ -167,6 +179,21 @@ cp fixtures/test_sample.mp4 /tmp/smoke.mp4
 # 视图:渲染 + 起服务。--no-open 免得每次跑测试都弹浏览器;它会一直活着,记得关
 ./target/debug/vidbrief ui /tmp/smoke-proj --no-open
 ```
+
+**MCP 服务的验收**:`crates/vidbrief-cli/tests/mcp.rs` 是**手写的 JSON-RPC 客户端**
+(故意不用 SDK —— 三条铁律里有一条是"协议通用"),它真的把 `vidbrief mcp` 拉起来,
+走完 建项目 → 跑步 1 → `get_shot` 拿到 JPEG → 写回结论 → 渲染视图 → 读资源,
+外加一条"第二个会话只读能过、写被挡下"的锁测试。手工试的时候:
+
+```bash
+./target/debug/vidbrief mcp --stdio
+# 往 stdin 写三行(每行一个 JSON-RPC):
+# {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"me","version":"0"}}}
+# {"jsonrpc":"2.0","method":"notifications/initialized"}
+# {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+```
+
+> ⛔ 调 MCP 时**永远不要在服务进程里加 `println!`**:stdout 是协议通道。
 
 **需要显式跑的**(要拉 whisper-cli 与 466MB 模型,约 4 秒):
 
