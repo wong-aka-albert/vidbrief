@@ -165,8 +165,13 @@ impl Shot {
     }
 
     /// 是否还等着 agent 看图。
+    ///
+    /// **判了 `drop` 的不算** —— 弃用本身就是结论,没人需要再看它一眼。
+    /// 门(`review::state`)只数留用图;这里要是把弃用的也数进来,
+    /// `status` 就会报出一扇其实并不存在的没关的门(M5 联调实测:
+    /// 「未校准 1」指的是一张已弃用的图,而门是开的)。
     pub fn is_unchecked(&self) -> bool {
-        self.check.is_none()
+        self.status == ShotStatus::Keep && self.check.is_none()
     }
 
     /// 是否该出现在最终产物里(留用 且 未被判定图文不符)。
@@ -405,6 +410,19 @@ mod tests {
         shots.sort_by_time();
         assert_eq!(shots.shots[0].id, ShotId::new(1).unwrap());
         assert!(shots.get(ShotId::new(2).unwrap()).is_some());
+    }
+
+    /// 弃用的图不再算「未校准」 —— 弃用本身就是结论。
+    /// (M5 联调:一张 drop 且无 check 的图让 status 报「未校准 1」,而门是开的。)
+    #[test]
+    fn dropped_shots_are_not_unchecked() {
+        let mut shots = Shots::new();
+        shots.shots.push(shot(1, 9.0, ShotOrigin::DenseRegion));
+        assert_eq!(shots.unchecked().count(), 1);
+
+        shots.shots[0].status = ShotStatus::Drop;
+        assert_eq!(shots.unchecked().count(), 0, "弃用的图不等着被看");
+        assert_eq!(shots.usable().count(), 0);
     }
 
     #[test]

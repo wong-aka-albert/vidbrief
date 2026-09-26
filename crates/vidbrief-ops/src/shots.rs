@@ -45,10 +45,42 @@ pub fn find_supplement_candidates(
     let fresh = vidbrief_core::find_candidates(&transcript, &shots, window);
     // `rebuild` 是给"上一份读不动"留的出路:**显式**说重来,才允许不看旧的那份。
     // 没明说就读不动 → 报错(见 `materials::supplements`),不许悄悄覆盖。
-    let previous = if rebuild {
-        None
-    } else {
-        crate::materials::supplements(opened)?
+    //
+    // **读得动、而且上面还有结论时,`rebuild` 一律拦下**(M5 真 agent 实测):
+    // 一次 `rebuild=true` 把 298 条候选的历史处置清成了 pending —— 用户一轮轮攒的
+    // "补过哪些、拒过哪些、为什么"一句话就没了,而门随后会按"还没表态"再拦一次,
+    // 把 agent 拖回去重做几百条。它不是刷新按钮;要刷新,不带 `rebuild` 就够
+    // (会按段号把旧结论合回来)。**读不动**才是它该出现的场合 —— 那时除了重算没有别的路。
+    let previous = match crate::materials::supplements(opened) {
+        Ok(list) => {
+            if rebuild {
+                let decided = list
+                    .as_ref()
+                    .map_or(0, |l| l.requests.iter().filter(|r| !r.is_pending()).count());
+                if decided > 0 {
+                    anyhow::bail!(
+                        "`rebuild` 会把已有的 {decided} 条候选结论**全部丢掉**\
+                         (补过哪些、拒过哪些、各自的理由)—— 它是留给「候选清单读不动」的出路,\
+                         不是刷新用的。\n\
+                         \n\
+                         **不带 `rebuild` 再调一次**:它会保留你对同一段的判断,\
+                         同时把新算出来的候选合进来。\n\
+                         确实一条都不要了,先问过用户 —— 这是他攒下来的记录,不是缓存。"
+                    );
+                }
+                None
+            } else {
+                list
+            }
+        }
+        // 读不动:只有这时 `rebuild` 才放行(读得动就按上面那条办)
+        Err(e) => {
+            if rebuild {
+                None
+            } else {
+                return Err(e);
+            }
+        }
     };
 
     let merged = match previous {
@@ -692,5 +724,53 @@ mod tests {
 
         let fresh = find_supplement_candidates(&mut opened, 3.0, true).expect("显式重算该能过");
         assert!(!fresh.requests.is_empty());
+    }
+
+    /// `rebuild` 不是刷新按钮:清单读得动、上面还有结论时**一律拦下**。
+    ///
+    /// M5 真 agent 实测:一次 `rebuild=true` 把 298 条候选的历史处置清成了 pending ——
+    /// 用户一轮轮攒的"补过哪些、拒过哪些、为什么"一句话就没了,而门随后按
+    /// "还没表态"再拦一次,把 agent 拖回去把几百条重做一遍。
+    #[test]
+    fn rebuild_refuses_to_discard_existing_conclusions() {
+        let fake =
+            Fake::new("shots-rebuild-guard").with_transcript(&[(0.0, 2.0, "大家看一下这张图")]);
+        let mut opened = fake.open();
+        let list = find_supplement_candidates(&mut opened, 3.0, false).unwrap();
+        let id = list.requests[0].id;
+        disposition_supplements(
+            &mut opened,
+            &[SupplementDecision {
+                id,
+                decision: SupplementDecisionKind::NoShot,
+                note: "旁边就有图,不用补".into(),
+                t: None,
+            }],
+        )
+        .unwrap();
+
+        let err = find_supplement_candidates(&mut opened, 3.0, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1 条"), "该报出会丢几条:{err}");
+        assert!(err.contains("不带 `rebuild`"), "该给去路:{err}");
+
+        // 拦下之后清单**一个字没动** —— 那条结论还在
+        let after = crate::materials::supplements(&opened).unwrap().unwrap();
+        let kept = after.requests.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(kept.status, SupplementStatus::Rejected, "{after:?}");
+    }
+
+    /// 一条结论都没有时,`rebuild` 照常 —— 没有可丢的东西,别误伤。
+    #[test]
+    fn rebuild_is_fine_when_nothing_would_be_lost() {
+        let fake =
+            Fake::new("shots-rebuild-empty").with_transcript(&[(0.0, 2.0, "大家看一下这张图")]);
+        let mut opened = fake.open();
+        find_supplement_candidates(&mut opened, 3.0, false).unwrap();
+
+        let fresh = find_supplement_candidates(&mut opened, 3.0, true)
+            .expect("全是 pending,没有可丢的,该放行");
+        assert_eq!(fresh.requests.len(), 1, "{fresh:?}");
     }
 }

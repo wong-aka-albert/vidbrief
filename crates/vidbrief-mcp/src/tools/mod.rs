@@ -1,10 +1,12 @@
-//! §11 的 A–F 组工具,一个模块一组。
+//! §11 的 A–F 组工具,一个模块一组 —— 外加 `guide`(说明书,不属于 A–F,
+//! 是「怎么把说明递给没有 prompt 能力的宿主」的那个出口)。
 //!
 //! 每个工具函数都是**薄薄一层**:把 MCP 的 JSON 参数翻译成 `vidbrief-ops` 的调用,
 //! 再把结果翻回 JSON。判断、流程、文件格式一概不在这里 ——
 //! 那三样分别属于 agent、`vidbrief-ops`、`docs/schema/`。
 
 pub mod conclusions;
+pub mod guide;
 pub mod materials;
 pub mod preprocess;
 pub mod project;

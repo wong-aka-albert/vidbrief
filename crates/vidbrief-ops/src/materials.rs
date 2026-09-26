@@ -214,7 +214,9 @@ pub fn save_transcript_projection(opened: &OpenProject, merged: &Transcript) -> 
         .with_context(|| format!("写入 {} 失败", path.display()))
 }
 
-/// 截图分档计数(留用 / 未校准 / 待裁决)。
+/// 截图分档计数(留用 / 未校准 / 值得再看)。
+///
+/// 第三项是**视图口径**(`needs_look`),不是门那个「待裁决」 —— 见 `ShotCounts` 的注释。
 pub fn shot_counts(shots: &Shots) -> ShotCounts {
     ShotCounts::of(shots)
 }
@@ -379,14 +381,20 @@ pub struct SegmentView {
     /// 当前有效的文本(有改动就是改后的那一版)。
     pub text: String,
     /// 对这一段下的结论:`corrected` 改了 / `kept` 决定保留原句 /
-    /// `uncertain` 存疑留给人 / `null` 没话说(也可能还没看过)。
+    /// `uncertain` 存疑留给人 / **键不在** = 没话说(也可能还没看过)。
     ///
     /// **一个字段说清四种状态**,不给"改没改""存没存疑"各开一个布尔 ——
     /// 两个字段能表达同一件事时,迟早填成两样。
+    ///
+    /// 三个 `Option` 字段在 `None` 时**整个键都不写出去**(不是写 `null`):
+    /// 322 段全量里这些键绝大多数是空,省下的是三成的体积 —— 那是 agent 的上下文。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
     /// 改动内容 / 为什么这么定。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// 判断依据。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
@@ -591,6 +599,28 @@ mod tests {
         assert_eq!(cut.changes.len(), 2);
         assert_eq!(cut.changes[0].t, 1.0);
         assert!(change_curve(&opened, Some((3.0, 1.0))).is_err());
+    }
+
+    /// 没结论的段,`outcome`/`note`/`reason` 三个键**整个不写出去**(不是写 `null`)——
+    /// 全量转录里它们绝大多数是空,省下的是 agent 的上下文(M5 联调:322 段省约三成)。
+    #[test]
+    fn empty_conclusion_keys_are_left_out_entirely() {
+        let fake = Fake::new("materials-lean")
+            .with_transcript(&[(0.0, 2.0, "各位好"), (2.0, 4.0, "接着讲")]);
+        let mut opened = fake.open();
+        opened.state_mut().segment_mut(2).set_conclusion(Some(
+            vidbrief_project::Conclusion::Kept {
+                note: "原句通顺".into(),
+                reason: "上下文".into(),
+            },
+        ));
+
+        let text = serde_json::to_string(&transcript(&opened, None).unwrap()).unwrap();
+        let first = text.split("\"id\":2").next().unwrap();
+        assert!(!first.contains("\"outcome\""), "没结论的段不该有 outcome 键:{first}");
+        // 有结论的段照常带齐三个键
+        assert!(text.contains("\"outcome\":\"kept\""), "{text}");
+        assert!(text.contains("\"reason\":\"上下文\""), "{text}");
     }
 
     #[test]

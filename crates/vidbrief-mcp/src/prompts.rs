@@ -36,6 +36,142 @@ fn user_says(text: String) -> Result<Vec<PromptMessage>, ErrorData> {
     Ok(vec![PromptMessage::new_text(Role::User, text)])
 }
 
+// ── 说明文本:两个出口,一份维护 ─────────────────────────────────────
+//
+// MCP 的 prompts 是**可选能力**:宿主可以不实现 `prompts/list`。M5 真 agent 联调实测
+// 手上的宿主就没实现 —— 四个提示模板一个都到不了 agent(`tools/guide.rs` 开头有全记录)。
+// 所以同一份说明再开一个**工具**出口(`get_guide`);文本留在这一处,
+// 两个出口都从函数拿。
+
+/// P1 `calibrate_shots` 的说明。
+pub(crate) fn calibrate_shots_text(project_id: &str) -> String {
+    format!(
+        "你是视频图文校准助手。项目:`{project_id}`。\n\
+         \n\
+         请对项目中的每张关键截图完成图文匹配与音画同步检查:\n\
+         1. 调用 `list_shots` 拿到截图清单;对每张调用 `get_shot` 拿到**图像本身**与同期转录。\n\
+         2. 亲自查看图像,并严格对照同期转录:转录明确说的信息(对象/规格/方向)必须服从;\n\
+            画面独有的信息(形态/标注线/数值)如实读出,并注明这是从画面推断的。\n\
+         3. 若转录与画面矛盾,写进 `issues`。\n\
+         4. 有些图**压根不值得校准**:画面全黑或纯色(讲完话切黑、片尾淡出常出这种)、\n\
+            与另一张是同一张幻灯片、或者糊到什么都看不出来。这类用 `update_shot` 的\n\
+            `drop` 弃掉(它只标记不删文件),在汇报里说明为什么 —— **不要硬写结论**。\n\
+            实测:16 分钟的视频里,末尾那次切黑就让算法白截了一张。\n\
+         5. **发现转录写错了就改掉**(`apply_corrections`),不要只写进 `issues`。\n\
+            校准是把材料改对,不是列一张待办清单 —— 用户要看的是改完的结果。\n\
+            **审过、没问题的段一并报上来**(`reviewed`):不报等于没审,\n\
+            工具分不出'看过没问题'和'压根没看'。\n\
+         6. 用 `record_shot_check` 逐张存回结论。**不要臆测** —— 不确定就 `confidence: low`,或\n\
+            在 `type_read` 里如实写「画面无法确认」。读不出来的地方**不要拿转录去补**。\n\
+         7. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
+         \n\
+         最后向用户汇报:多少张匹配、多少张存疑、哪几张需要他裁决。**不要替他下结论。**\n\
+         有要他裁决的项时,进下一步会被工具挡住 —— 那时去问他;他说'就这样过',\n\
+         把那句话放进 `approve` 的 `note`。他没说过的,不要自己替他点头。"
+    )
+}
+
+/// P2 `fix_transcript` 的说明。
+pub(crate) fn fix_transcript_text(project_id: &str) -> String {
+    format!(
+        "你是转录校对助手。项目:`{project_id}`。这份视频的转录可能有语音识别错误\n\
+         (同音错字、专有名词听错 —— 实测「Python」→「派森」、「达摩院」→「打墨院」),\n\
+         请你逐段核对,**把错的改对**。\n\
+         \n\
+         1. 调用 `get_transcript` 读全量转录;用 `list_shots` / `get_shot` 看截图 ——\n\
+            **画面上的文字是纠错的第一依据**(截图里常直接写着正确写法,如「Python 列表」),\n\
+            上下文语义次之;用户若给了术语表,再拿它对照。\n\
+         2. 用 `apply_corrections` 逐条写回,每条附 `reason`(写清依据:画面文字 / 上下文 / 术语表)。\n\
+            - 只改明确的识别错误:**不润色、不改语序**,数字/单位/时间保留原样。\n\
+            - 没把握的标 `uncertain`,**不要臆造**一个看起来像的写法 —— 那些留给用户裁决。\n\
+            - **审过、没问题的段一并放进 `reviewed`**:不报等于没审,\n\
+              工具分不出「看过没问题」和「压根没看」;有没审的段,写总结时会被门挡住。\n\
+         3. 写完调用 `render_calibration_table`,把返回的 url 给用户 —— 那一页能看到\n\
+            每段的原文/改后/依据,以及还没核验的部分。\n\
+         4. 把这一轮写进校准日志(`write_note` 到 `02_calibrate/calibration_log.md`,\n\
+            mode `append`,带 `count_round`):第一行写 `## 第 N 轮(日期 时间段)`,\n\
+            下面列这轮改了哪几段、依据是什么。**每轮都要写** —— 对照表把这份日志原样\n\
+            嵌在末尾,用户就靠它分清每条结论是哪一轮写的;同一处被后轮改写时,\n\
+            旧结论只在这份日志里。\n\
+         5. **停下来**等用户看过对照表;他说哪里不对,那就是下一轮 —— 不要自己接着写总结。"
+    )
+}
+
+/// P3 `find_missing_shots` 的说明。
+pub(crate) fn find_missing_shots_text(project_id: &str) -> String {
+    format!(
+        "项目:`{project_id}`。\n\
+         \n\
+         调用 `find_supplement_candidates` 取回候选补图请求 —— 算法挑的是\n\
+         「语音里提到了画面上的东西、但那个时刻附近没有截图」的位置。\n\
+         \n\
+         **候选不等于结论**:用户说「看这里」不代表真有个图值得看。\n\
+         **每一条都要有结论**,用 `disposition_supplements` 一次报一批:\n\
+         要补的报 `need_shot`(工具去抽帧;那一刻附近已经有图就沿用,不重复抽),\n\
+         不用补的报 `no_shot` —— 两种都要写一句理由。\n\
+         `need_shot` 的图补完用 `get_shot` 看一眼,再核结论(`record_shot_check`)。\n\
+         \n\
+         剩下没结论的候选会被审核门挡住(它数的就是这个数),所以别留下没表态的。\n\
+         \n\
+         补完后调用 `render_timeline` 刷新,并把新增的图逐张给用户过一眼。"
+    )
+}
+
+/// P4 `summarize_video` 的说明。
+pub(crate) fn summarize_video_text(project_id: &str) -> String {
+    format!(
+        "项目:`{project_id}`。你要为这个视频产出一份图文总结。\n\
+         \n\
+         1. 先建整体结构,三样东西各有分工:\n\
+            - `list_regions` 看画面在哪几段变化密集(那是内容段落的候选边界);\n\
+            - `list_shots` 看有哪些截图、各落在什么时刻(有些可能已被校准阶段判为弃用);\n\
+            - 转录(`get_transcript`)通读一遍;太长就按 `start`/`end` 分段读。\n\
+            差帧图原始点(`get_change_curve`)不必读 —— 它的结论已经在密集区里了。\n\
+            **通读时把讲者明确给出的步骤、框架、清单记下来**(「先做 A 再做 B」的流程、\n\
+            「两种方式/四个方面」这类分点、列出来的清单)—— 那是他特意讲的,\n\
+            总结里要写全;只有闲聊和过渡句可以略。实测:漏掉的多半是这些**框架**,\n\
+            而它们是视频里信息密度最高的部分。\n\
+         2. 对每个关键段,用 `get_shot` 把图拿到眼前看,和同期转录**互相对照**再下结论。\n\
+            只靠转录写出来的总结会把「样本 15 分钟」写成别的对象 —— 实测过。\n\
+            注意:`get_shot` 的返回里带着校准阶段存下的旧结论(`type_read` 等)——\n\
+            那是**上一轮**写下的,可以参考,但你要自己看过图再引用,不要照抄。\n\
+         3. 某处缺画面(语音提到某个形态/图表却没有图)时,先用 `search_transcript` 定位,\n\
+            再用 `request_shot(t, reason)` 补看。搜索匹配的是当前文本:搜不到时换个词形\n\
+            再试(英文原名 / 中文说法各试一次 —— 语音里说「列表」,转录里不会有「list」)。\n\
+            **补来的图也要记一条结论**(`record_shot_check`):它对新图来说等于「还没人看过」,\
+            不写的话写总结时门会拦。\n\
+         4. **每条结论都要附来源**:截图 id + 转录时间戳。没有来源的话就不要写。\n\
+             **画面上的文字与数字照抄下来**(函数名、版本号、比例、标注)——看不清就不写那个数,\n\
+             别给一个「差不多」的。实测:不要求照抄时,模型会把画面上的 3.12.1 写成 3.21.1,\n\
+             把画面里没有的 3.12 写成一个像是从图上读来的数 —— **结构对、数字错**,\n\
+             而读总结的人没法分辨哪个数是抄来的、哪个是记得的。\n\
+         5. 用 `write_summary` 落盘;中间笔记写 `write_note`(`03_summary/notes/…`)。\n\
+            项目里已有 `03_summary/summary.md` 时,那是上一轮的总结 —— 先读旧稿,\n\
+            用户的修改意见是在它之上提的。\n\
+         6. 写完**停下来**把总结呈现给用户,等他说改哪儿 —— 不要自己接着报告。"
+    )
+}
+
+/// `get_guide` 的总目录:有哪几步、各能拿到什么。
+pub(crate) fn guide_index(project_id: &str) -> String {
+    format!(
+        "vidbrief 的四步工作流,每一步开工前用 `get_guide(step=…)` 取详细说明。\n\
+         项目:`{project_id}`。\n\
+         \n\
+         - `preprocess` —— 前处理:`preprocess` 一次调用做完(纯算法);细节见服务的\n\
+           instructions。\n\
+         - `calibrate_shots` —— 逐张看截图:list_shots → get_shot 看图 → record_shot_check。\n\
+         - `fix_transcript` —— 逐段核对转录(`get_transcript`):画面文字是第一依据,改完用\n\
+           `apply_corrections` 报回(审过没问题的段也要报)。\n\
+         - `find_missing_shots` —— 补图候选逐条表态:`find_supplement_candidates` →\n\
+           `disposition_supplements`(补的报 need_shot、不补的报 no_shot)。\n\
+         - `summarize_video` —— 图文总结:`list_regions` + `list_shots` + 转录通读建结构,\n\
+           逐张看图互证,溯源(截图 id + 时间戳),`write_summary` 落盘。\n\
+         \n\
+         说明是给「手上没有提示模板能力」的宿主用的;能取到 prompts 的话,那边是同一份文本。"
+    )
+}
+
 #[prompt_router]
 impl VidbriefServer {
     /// 逐张检查关键截图:图文对不对得上、音画同不同步
@@ -44,31 +180,7 @@ impl VidbriefServer {
         &self,
         Parameters(args): Parameters<ProjectArg>,
     ) -> Result<Vec<PromptMessage>, ErrorData> {
-        let project_id = args.project_id;
-        user_says(format!(
-            "你是视频图文校准助手。项目:`{project_id}`。\n\
-             \n\
-             请对项目中的每张关键截图完成图文匹配与音画同步检查:\n\
-             1. 调用 `list_shots` 拿到截图清单;对每张调用 `get_shot` 拿到**图像本身**与同期转录。\n\
-             2. 亲自查看图像,并严格对照同期转录:转录明确说的信息(对象/规格/方向)必须服从;\n\
-                画面独有的信息(形态/标注线/数值)如实读出,并注明这是从画面推断的。\n\
-             3. 若转录与画面矛盾,写进 `issues`。\n\
-             4. 有些图**压根不值得校准**:画面全黑或纯色(讲完话切黑、片尾淡出常出这种)、\n\
-                与另一张是同一张幻灯片、或者糊到什么都看不出来。这类用 `update_shot` 的\n\
-                `drop` 弃掉(它只标记不删文件),在汇报里说明为什么 —— **不要硬写结论**。\n\
-                实测:16 分钟的视频里,末尾那次切黑就让算法白截了一张。\n\
-             5. **发现转录写错了就改掉**(`apply_corrections`),不要只写进 `issues`。\n\
-                校准是把材料改对,不是列一张待办清单 —— 用户要看的是改完的结果。\n\
-                **审过、没问题的段一并报上来**(`reviewed`):不报等于没审,\n\
-                工具分不出'看过没问题'和'压根没看'。\n\
-             6. 用 `record_shot_check` 逐张存回结论。**不要臆测** —— 不确定就 `confidence: low`,或\n\
-                在 `type_read` 里如实写「画面无法确认」。读不出来的地方**不要拿转录去补**。\n\
-             7. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
-             \n\
-             最后向用户汇报:多少张匹配、多少张存疑、哪几张需要他裁决。**不要替他下结论。**\n\
-             有要他裁决的项时,进下一步会被工具挡住 —— 那时去问他;他说'就这样过',\n\
-             把那句话放进 `approve` 的 `note`。他没说过的,不要自己替他点头。"
-        ))
+        user_says(calibrate_shots_text(&args.project_id))
     }
 
     /// 逐段核对转录,把听错的改对
@@ -77,29 +189,7 @@ impl VidbriefServer {
         &self,
         Parameters(args): Parameters<ProjectArg>,
     ) -> Result<Vec<PromptMessage>, ErrorData> {
-        let project_id = args.project_id;
-        user_says(format!(
-            "你是转录校对助手。项目:`{project_id}`。这份视频的转录可能有语音识别错误\n\
-             (同音错字、专有名词听错 —— 实测「Python」→「派森」、「达摩院」→「打墨院」),\n\
-             请你逐段核对,**把错的改对**。\n\
-             \n\
-             1. 调用 `get_transcript` 读全量转录;用 `list_shots` / `get_shot` 看截图 ——\n\
-                **画面上的文字是纠错的第一依据**(截图里常直接写着正确写法,如「Python 列表」),\n\
-                上下文语义次之;用户若给了术语表,再拿它对照。\n\
-             2. 用 `apply_corrections` 逐条写回,每条附 `reason`(写清依据:画面文字 / 上下文 / 术语表)。\n\
-                - 只改明确的识别错误:**不润色、不改语序**,数字/单位/时间保留原样。\n\
-                - 没把握的标 `uncertain`,**不要臆造**一个看起来像的写法 —— 那些留给用户裁决。\n\
-                - **审过、没问题的段一并放进 `reviewed`**:不报等于没审,\n\
-                  工具分不出「看过没问题」和「压根没看」;有没审的段,写总结时会被门挡住。\n\
-             3. 写完调用 `render_calibration_table`,把返回的 url 给用户 —— 那一页能看到\n\
-                每段的原文/改后/依据,以及还没核验的部分。\n\
-             4. 把这一轮写进校准日志(`write_note` 到 `02_calibrate/calibration_log.md`,\n\
-                mode `append`,带 `count_round`):第一行写 `## 第 N 轮(日期 时间段)`,\n\
-                下面列这轮改了哪几段、依据是什么。**每轮都要写** —— 对照表把这份日志原样\n\
-                嵌在末尾,用户就靠它分清每条结论是哪一轮写的;同一处被后轮改写时,\n\
-                旧结论只在这份日志里。\n\
-             5. **停下来**等用户看过对照表;他说哪里不对,那就是下一轮 —— 不要自己接着写总结。"
-        ))
+        user_says(fix_transcript_text(&args.project_id))
     }
 
     /// 找算法漏掉的画面,需要就补图
@@ -108,23 +198,7 @@ impl VidbriefServer {
         &self,
         Parameters(args): Parameters<ProjectArg>,
     ) -> Result<Vec<PromptMessage>, ErrorData> {
-        let project_id = args.project_id;
-        user_says(format!(
-            "项目:`{project_id}`。\n\
-             \n\
-             调用 `find_supplement_candidates` 取回候选补图请求 —— 算法挑的是\n\
-             「语音里提到了画面上的东西、但那个时刻附近没有截图」的位置。\n\
-             \n\
-             **候选不等于结论**:用户说「看这里」不代表真有个图值得看。\n\
-             **每一条都要有结论**,用 `disposition_supplements` 一次报一批:\n\
-             要补的报 `need_shot`(工具去抽帧;那一刻附近已经有图就沿用,不重复抽),\n\
-             不用补的报 `no_shot` —— 两种都要写一句理由。\n\
-             `need_shot` 的图补完用 `get_shot` 看一眼,再核结论(`record_shot_check`)。\n\
-             \n\
-             剩下没结论的候选会被审核门挡住(它数的就是这个数),所以别留下没表态的。\n\
-             \n\
-             补完后调用 `render_timeline` 刷新,并把新增的图逐张给用户过一眼。"
-        ))
+        user_says(find_missing_shots_text(&args.project_id))
     }
 
     /// 自主探索后产出图文总结
@@ -133,20 +207,7 @@ impl VidbriefServer {
         &self,
         Parameters(args): Parameters<ProjectArg>,
     ) -> Result<Vec<PromptMessage>, ErrorData> {
-        let project_id = args.project_id;
-        user_says(format!(
-            "项目:`{project_id}`。你要为这个视频产出一份图文总结。\n\
-             \n\
-             1. 先读转录(`get_transcript`)与差帧图/密集区(`get_change_curve` / `list_regions`),\n\
-                建立整体结构:分几段、每段在讲什么。\n\
-             2. 对每个关键段,用 `get_shot` 看图 + 读同期转录,以**图文互证**得出结论。\n\
-                只靠转录写出来的总结会把「样本 15 分钟」写成别的对象 —— 实测过。\n\
-             3. 某处缺画面(语音提到某个形态/图表却没有图)时,先用 `search_transcript` 定位,\n\
-                再用 `request_shot(t, reason)` 补看。\n\
-             4. **每条结论都要附来源**:截图 id + 转录时间戳。没有来源的话就不要写。\n\
-             5. 用 `write_summary` 落盘;中间笔记写 `write_note`(`03_summary/notes/…`)。\n\
-             6. 写完**停下来**把总结呈现给用户,等他说改哪儿 —— 不要自己接着写报告。"
-        ))
+        user_says(summarize_video_text(&args.project_id))
     }
 }
 
@@ -200,11 +261,12 @@ mod tests {
                 "summarize_video",
                 &[
                     "get_transcript",
-                    "get_change_curve",
                     "list_regions",
+                    "list_shots",
                     "get_shot",
                     "search_transcript",
                     "request_shot",
+                    "record_shot_check",
                     "write_summary",
                     "write_note",
                 ],
@@ -239,5 +301,39 @@ mod tests {
         ] {
             assert!(registered.map.contains_key(name), "缺提示模板 {name}");
         }
+    }
+
+    /// `get_guide` 的目录是 agent 拿到说明的第一入口 —— 它点名的工具都得在,
+    /// 而且四步一步不落(少了哪步,没 prompts 能力的宿主就永远不知道有那么一步)。
+    #[test]
+    fn guide_index_covers_every_step_and_names_real_tools() {
+        let names = VidbriefServer::new().tool_names_for_test();
+        let text = guide_index("示例项目");
+        for (step, tools) in [
+            ("preprocess", &["preprocess"][..]),
+            (
+                "calibrate_shots",
+                &["list_shots", "get_shot", "record_shot_check"][..],
+            ),
+            ("fix_transcript", &["get_transcript", "apply_corrections"][..]),
+            (
+                "find_missing_shots",
+                &["find_supplement_candidates", "disposition_supplements"][..],
+            ),
+            (
+                "summarize_video",
+                &["list_regions", "list_shots", "get_transcript", "write_summary"][..],
+            ),
+        ] {
+            assert!(text.contains(step), "目录缺这一步 {step}:{text}");
+            for tool in tools {
+                assert!(text.contains(tool), "{step} 那段该提到 {tool}:{text}");
+                assert!(
+                    names.iter().any(|n| n == tool),
+                    "目录提到了不存在的工具 {tool}"
+                );
+            }
+        }
+        assert!(text.contains("示例项目"), "项目名该填进说明里:{text}");
     }
 }

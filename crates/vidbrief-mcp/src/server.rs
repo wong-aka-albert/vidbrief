@@ -30,12 +30,14 @@ impl VidbriefServer {
         Self {
             // 六组工具各在自己的模块里声明,这里只是把它们接起来。
             // 分组的意义:一个模块对应 DESIGN §11 里的一组,改哪组看哪个文件。
+            // `guide_tools` 是第七个、不在 A–F 里:说明书出口(见 `tools/guide.rs`)。
             tool_router: VidbriefServer::project_tools()
                 + VidbriefServer::preprocess_tools()
                 + VidbriefServer::materials_tools()
                 + VidbriefServer::conclusion_tools()
                 + VidbriefServer::shot_tools()
-                + VidbriefServer::view_tools(),
+                + VidbriefServer::view_tools()
+                + VidbriefServer::guide_tools(),
             prompt_router: crate::prompts::router(),
             state: Arc::new(State::new()),
         }
@@ -85,6 +87,10 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
   ③ 总结:search_transcript / get_shot 自主探索 → write_summary
   ④ 报告:write_report_md
 
+**每一步动手前,先取一次操作说明**:提示模板里有一套(prompts,本服务已声明 prompts 能力);
+客户端不暴露 prompts 时用 `get_guide(step)`,同一份文本。不看说明容易漏掉
+「审过的段也要报」「补来的图也要核」「旧结论别照抄」这类规矩 —— 实测过。
+
 **校准要一项一项核验完,不能跳。** 每一项只有三种状态:已核验 / 还没核验 /
 核验过但要用户拍板。进下一步之前工具会替你数:
   - 有没核验的 → 它拦着你,接着审就是(不用问用户,这是你自己的活);
@@ -103,13 +109,17 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
 **校准是把材料改对,不是在旁边记笔记。** 只写「这里图文不符」而不去改,等于没校准 ——
 用户要看的是改完的结果,不是待办清单。
 
-三条硬规矩:
+四条硬规矩:
   1. **看了图再下结论。** get_shot 会把图像交给你;不要只看转录就推断画面上有什么。
   2. **转录可能听错。** 实测「Python」被听成「派森」、「元组」被听成「元祖」。
      纠错的第一依据是**画面上的文字**,其次是上下文,术语表最后。
   3. **诚实地写\"看不出来\"。** get_shot 返回的图像若是糊的/切走的/与转录不符,
      如实写进 issues 并给 low confidence —— 用户会在审查节点裁决。
      **读不出来的地方不要拿转录去补** —— 编得像真的,比说「不知道」危险得多。
+  4. **材料与结论一律经工具改。** 你可能带着宿主给的文件工具(read/write/exec)——
+     读项目文件可以(材料即接口),但**改**(写 summary、改转录、动 shots.json)必须走本服务
+     的工具:门数的是工具写出去的那一份,绕过它改出来的东西,**下一次开门就会被认出来**
+     (「材料不是工具写出去的那一份」),而用户与体检看到的是一份对不上的材料。
 
 **别自己动手改文件。** 谁审过、哪张图看过、哪一步拍过板这些**状态**记在 `state.bin`
 (二进制,带校验和);手改它,工具会当场报「状态文件读不动」并**拒绝开工**,

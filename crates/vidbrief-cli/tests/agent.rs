@@ -381,13 +381,18 @@ fn p4_summarize_video_tools_all_answer() {
         "搜不到刚写进去的词:{hit}"
     );
 
-    // 整体结构
-    let curve = as_json(&client.tool_text("get_change_curve", json!({"project_id": proj})));
-    assert_eq!(curve["changes"].as_array().unwrap().len(), 60);
+    // 整体结构:密集区 + 截图清单(P4 的第一手材料 —— 差帧图原始点不必读,
+    // 它的结论已经在密集区里了;M5 起 P4 不再让 agent 吞那份全量)
     let regions = as_json(&client.tool_text("list_regions", json!({"project_id": proj})));
     assert!(
         regions["regions"].is_array(),
         "密集区清单该在 `regions` 下(另带算法参数,好回答「为什么挑中这一段」):{regions}"
+    );
+    let shots = as_json(&client.tool_text("list_shots", json!({"project_id": proj})));
+    let shot0 = &shots["shots"][0];
+    assert!(
+        shot0["t"].is_number() && shot0["status"].is_string(),
+        "建结构要靠每张图的时刻与留用状态:{shots}"
     );
 
     // 缺画面就补一张(模板里说的是 request_shot 这个写法)

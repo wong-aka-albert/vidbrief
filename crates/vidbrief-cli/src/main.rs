@@ -1264,8 +1264,11 @@ fn print_materials(m: &vidbrief_ops::Materials) {
     println!("  差帧图   {} 个采样点", count(m.curve_points));
     println!("  密集区   {} 个", count(m.regions));
     match m.shots {
+        // 「值得再看」是**视图口径**(把握低 / 报了问题 / 图文不符),不是门那个
+        // 「待裁决」(模型自己说没把握)—— 同名不同义,这里绝不能写「待裁决」,
+        // 否则读的人会以为门是关着的(M5 联调实测:门开着,这里却报「待裁决 1」)。
         Some(s) => println!(
-            "  截图     {} 张(留用 {},未校准 {},待裁决 {})",
+            "  截图     {} 张(留用 {},未校准 {},值得再看 {})",
             s.total, s.keep, s.unchecked, s.needs_look
         ),
         None => println!("  截图     —"),

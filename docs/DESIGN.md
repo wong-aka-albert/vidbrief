@@ -1,7 +1,7 @@
 # 视频图文总结 MCP — 从零设计
 
-> 版本:v0.11(M4 收口:`render_calibration_table` 对照表视图 + 提示模板 P2,§9.3、§10.4)
-> 状态:M0–M4 已实现,M5 待开(步 3 总结的自主探索联调)
+> 版本:v0.13(M5 联调二:`get_guide` 说明书出口 + `rebuild` 护栏 + P4 实战验证,§7、§10.4、§11)
+> 状态:M0–M4 已实现,M5 进行中(步 3 联调:自家客户端 + 真 agent 都已走通)
 > 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)、[./schema/](./schema/)(**项目材料格式的唯一权威**)与 [./devlog/](./devlog/)(开发过程记录)
 
 ---
@@ -825,6 +825,18 @@ vidbrief upgrade <项目> --fresh   # 什么都不收,状态清零(材料原样�
 | 转录段 | `checked_at` 非空 | `checked_at` 为空 | `conclusion.outcome == uncertain` |
 | 补图候选 | 已接受或已拒绝 | 还是 `pending` | ——(要不要补,模型自己定得了) |
 
+**门的边界(要说清它挡不住什么)**:门管的是**走工具的路径**。宿主可能给 agent
+配上自己的文件工具(read/write/exec)—— **读,欢迎**(材料即接口,项目文件本来就该能直接读);
+**写,挡不住** —— 那工具不在我们手里。能做的只有三样,而且都做了:
+
+1. `instructions` 硬规矩第 4 条:**材料与结论一律经工具改**(写总结、改转录、动 shots.json);
+2. **改出来会被认出来**:绕过工具改的明文与 `state.bin` 里的内容底账对不上,
+   下一次开门就是⓪那条拦下(§4.10)—— 机制本身就是最好的劝阻;
+3. 文档写明白(就是这一段)。
+
+实测(M5 真 agent 两轮):agent 确实会开局 `exec dir` 把项目翻一遍 —— 那是它的自由;
+两轮最后都是从 `write_summary` 落的盘。
+
 状态**读不动**时门按最保守那头算:每件工具都拒绝开工,报错点名
 `vidbrief upgrade <项目>`(见 §4.10)。那次事故的全部差别就在这两个方向之间:
 
@@ -950,19 +962,22 @@ agent: → approve()        ← **这一步不过,下面写不了**
 |------|------|
 | `list_shots` / `get_shot` | 看有哪些截图、**把图递给 agent 看** |
 | `search_transcript` / `get_transcript` | 转录检索/读取 |
-| `get_change_curve` / `list_regions` | 差帧图与密集区(决定聚焦哪段) |
-| `request_shot(t, reason)` | **补图**:发现缺画面时临时抽帧(同 `extract_shot`) |
+| `list_regions` | 密集区清单(决定聚焦哪段)。**建结构的首选** —— 它的密度量纲就是"这段热闹" |
+| `get_change_curve` | 差帧图原始点(986 个 `(t, score)`)。**建结构时不必读** —— 那是噪音,而结论已在密集区里;要看分布时才用 |
+| `request_shot(t, reason)` | **补图**:发现缺画面时临时抽帧(同 `extract_shot`;补来的图要用 `record_shot_check` 记结论,门一视同仁) |
 | `write_note(path, md)` | 写中间笔记(只写 `02_calibrate/` 与 `03_summary/` 下的 `.md`;`summary.md`、`transcript.diff.md` 有专属工具,这里写不了) |
 | `write_summary(md)` | 落盘 `summary.md` |
 | (agent 自带) | 联网检索背景知识(术语、事件、对象) |
 
-### 7.2 建议的探索策略(写进提示模板 §10.4)
+### 7.2 建议的探索策略(写进提示模板 §10.4;M5 按联调实测打磨过)
 
-1. **先读全局**:transcript.fixed + change_curve + 密集区 → "总—分"框架。
+1. **先读全局**:转录 + 密集区 + 截图清单 → "总—分"框架。
+   差帧图原始点不必读(986 个数字对建结构是噪音)—— 它的结论已经在密集区里了。
 2. **再核局部**:对候选关键段,`get_shot` 看图 + 读同期转录,**agent 图文印证**。
+   `get_shot` 返回里带着校准阶段的旧结论 —— 可参考,但要自己看过图再引用。
 3. **缺口驱动补看**:语音提到某形态/图表却没图 → `request_shot`;外部知识缺口 → 联网检索。
 4. **边看边记**:每主题写 `notes/`,保留引用来源(截图 id + 转录时间戳)。
-5. **汇总**:`write_summary`。
+5. **汇总**:`write_summary`。已有旧稿时先读旧稿再改(§7.4)。
 
 ### 7.3 溯源要求
 
@@ -1136,6 +1151,11 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 
 ### 10.4 MCP 提示模板(由本工具提供,内容自定)
 
+> **同一份文本还有一个工具出口**(§11 G 组 `get_guide`)。M5 真 agent 联调发现:
+> MCP 的 prompts 是**可选能力**,宿主可以不实现 —— 实测手上的宿主就没实现,
+> 四个模板一个都到不了 agent。工具是必选能力,所以 `get_guide(step)` 给同一份说明;
+> 文本只在 `crates/vidbrief-mcp/src/prompts.rs` 里维护一处,有测试逐字比对两个出口。
+>
 > **放出来的前提:模板里提到的每个工具都必须已经存在。**
 > 模板是**接口契约** —— 写着"调用 `record_shot_check`",那个工具就必须在工具表里,
 > 否则 agent 照着做会拿到 "method not found",然后开始怀疑整个服务。
@@ -1146,7 +1166,7 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 > | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ M3 |
 > | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ M4 |
 > | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ M3 |
-> | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ M3 |
+> | P4 `summarize_video` | get_transcript / list_regions / list_shots / get_shot / search_transcript / request_shot / write_summary / write_note | ✅ M5 实战打磨 |
 > | P5 `build_report` | **build_report** | ⏳ M6 |
 >
 > 没放出来的能力**照样能用** —— agent 直接调那些工具就行,只是暂时没有现成的话术。
@@ -1185,14 +1205,26 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 完成后 render_timeline 刷新。
 ```
 
-**P4 `summarize_video`** —— 总结
+**P4 `summarize_video`** —— 总结(M5 按联调实测打磨过)
 ```
 你要为这个视频产出一份图文总结:
-1. 先读 transcript.fixed 与 change_curve/dense_regions,建立整体结构。
-2. 对每个关键段,用 get_shot 看图 + 读同期转录,以图文互证得出结论。
-3. 若某处缺画面(语音提到某形态/图表却没有图),调用 request_shot 补看。
-4. 每条结论必须附来源:截图 id + 转录时间戳。
-5. 用 write_summary 落盘;需要时先写 notes/ 笔记。
+1. 先建整体结构:list_regions 看画面在哪几段变化密集,list_shots 看有哪些截图、
+   各落在什么时刻;转录(get_transcript)通读,太长就按 start/end 分段。
+   差帧图原始点(get_change_curve)不必读 —— 它的结论已经在密集区里了。
+   通读时把讲者明确给出的**步骤、框架、清单**记下来(流程、「两种方式/四个方面」
+   这类分点、列出的清单)—— 那是他特意讲的,总结里要写全;只有闲聊和过渡句可以略。
+   实测(M5 内容质检):漏掉的多半是这些**框架**,而它们是视频里信息密度最高的部分。
+2. 对每个关键段,用 get_shot 把图拿到眼前看,和同期转录互相对照再下结论。
+   get_shot 返回里带着校准阶段存下的旧结论 —— 可以参考,但要自己看过图再引用,不要照抄。
+3. 缺画面时先 search_transcript 定位,再 request_shot(t, reason) 补看。
+   搜不到时换个词形再试(英文原名 / 中文说法各试一次)。
+   **补来的图也要记一条结论**(record_shot_check)—— 不然写总结时门会拦。
+4. 每条结论必须附来源:截图 id + 转录时间戳。没有来源的话就不要写。
+   **画面上的文字与数字照抄下来**——看不清就不写那个数,别给一个「差不多」的。
+   实测(M5 两轮):不要求照抄时,模型会把 3.12.1 写成 3.21.1、把画面里没有的
+   3.12 写成像是读来的数 —— **结构对、数字错**,读的人分不出哪个是抄的。
+5. 用 write_summary 落盘;需要时先写 notes/ 笔记。已有旧稿时先读旧稿再改。
+6. 写完停下来呈现给用户,等他说改哪儿 —— 不要自己接着写报告。
 ```
 
 **P5 `build_report`** —— 报告
@@ -1321,7 +1353,7 @@ vidbrief help                                       # 用法
 ### E. 算法动作
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
-| `find_supplement_candidates` | 算 | `project_id` | 补图请求清单 |
+| `find_supplement_candidates` | 算 | `project_id, [window], [rebuild]` | 补图请求清单。`rebuild` 只给"上一份读不动"用 —— **读得动、且上面还有结论时一律拦下**(它会把已有的处置全丢掉;不带 `rebuild` 就会按段号把旧结论合回来) |
 | `extract_shot` / `request_shot` | 算 | `project_id, t, reason` | 新 shot_id |
 | `update_shot` | 算 | `project_id, shot_id, action(keep/drop/retime)` | 更新结果 |
 | `build_report` | 算 | `project_id, format(md/html), self_contained?` | `path` |
@@ -1331,6 +1363,18 @@ vidbrief help                                       # 用法
 |------|------|------|------|
 | `render_timeline` | 算 | `project_id, open_browser?` | `html_path, url` |
 | `render_calibration_table` | 算 | `project_id, open_browser?` | `html_path, url`(对照表内容见 §9.3) |
+
+### G. 说明书(不属于 A–F)
+| 工具 | 类型 | 入参 | 出参 |
+|------|------|------|------|
+| `get_guide` | 供 | `project_id, [step]` | 该步的操作说明(**纯文本**,与提示模板同一份);`step` 不给 = 目录 |
+
+> **为什么有这一组**(M5 真 agent 联调):MCP 的 **prompts 是可选能力** —— 宿主可以不实现。
+> 实测手上的宿主就没实现 `prompts/list`:四个提示模板一个都到不了 agent,
+> 它只能照着 `instructions` 里那几行自己摸索。**工具是必选能力**,
+> 所以同一份说明再开一个工具出口 —— 文本只有一处(`crates/vidbrief-mcp/src/prompts.rs`
+> 里的四个 `*_text` 函数),两个出口(`prompts/get` 与 `get_guide`)都从那里拿,
+> 有一条协议层测试逐字比对两边。
 
 ---
 

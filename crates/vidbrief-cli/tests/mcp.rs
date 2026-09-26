@@ -112,6 +112,47 @@ fn prompts_and_resources_are_advertised() {
     assert!(resources["resources"].is_array(), "{resources}");
 }
 
+/// **两个出口,一份文本**:`prompts/get` 与 `get_guide` 给的东西必须逐字相同。
+///
+/// M5 真 agent 联调发现:手上的宿主没实现 MCP 的 prompts(那是**可选能力**),
+/// 四个模板一个都到不了 agent —— 它只能照着 instructions 里那几行自己摸索。
+/// 于是同一份说明又开了一个**工具**出口(工具是必选能力)。
+/// 两处一旦漂移,「有 prompts 的宿主」和「没有的宿主」会拿到两套说法,
+/// 而这类分叉最难查。这条测试替我们盯着。
+#[test]
+fn the_guide_tool_and_the_prompts_serve_the_same_text() {
+    let dir = TempDir::new("guide");
+    let mut client = McpClient::start(dir.path());
+    client.initialize();
+
+    for step in [
+        "calibrate_shots",
+        "fix_transcript",
+        "find_missing_shots",
+        "summarize_video",
+    ] {
+        let prompt = client.call(
+            "prompts/get",
+            json!({"name": step, "arguments": {"project_id": "示例项目"}}),
+        );
+        let from_prompt = prompt["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let from_guide =
+            client.tool_text("get_guide", json!({"project_id": "示例项目", "step": step}));
+        assert_eq!(from_prompt, from_guide, "`{step}` 两个出口的文本不一样了");
+    }
+
+    // 不带 step = 目录;瞎填 = 报错,而且给出有哪些步
+    let index = client.tool_text("get_guide", json!({"project_id": "示例项目"}));
+    assert!(index.contains("summarize_video"), "{index}");
+    let bad = client.call_tool("get_guide", json!({"project_id": "示例项目", "step": "nope"}));
+    assert!(tool_failed(&bad), "{bad}");
+    let text = first_text(&bad);
+    assert!(text.contains("summarize_video"), "报错该列出有哪些步:{text}");
+}
+
 #[test]
 fn a_tool_that_needs_a_missing_project_fails_with_a_usable_message() {
     let dir = TempDir::new("missing");
