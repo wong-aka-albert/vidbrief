@@ -60,13 +60,26 @@
 
 ### 1.6 版本与迁移
 
-版本号只出现在 **`project.json.schema_version`**(当前 `1`),它代表**该项目下所有 JSON 文件**的格式版本。
+版本号只出现在 **`project.json.schema_version`**(当前 `2`),它代表**该项目下所有 JSON 文件**的格式版本。
 
 规则:
 
 - 任一文件结构发生**不兼容**变更 → `schema_version` +1;
 - 工具读项目时**先读 `project.json`**;版本不等于代码期望值 → **直接报错退出**,不做静默兼容、不猜测;
 - 需要支持旧项目时,写显式迁移函数(而不是让解析器容忍两种形状)。
+
+**v1 → v2(2026-09-25,devlog [260925-30] 第 2 条)**:进度、核验戳、看图结论、拍板记录
+从明文搬进 `state.bin`(非明文,见下)。`project.json` 于是只剩**身份**:
+`rev` / `progress` / `review` 三个字段**移除**了。
+
+老项目怎么走:
+
+```bash
+vidbrief upgrade <项目>            # 收状态 + 把 project.json 改写成 v2;材料一个字节都不动
+```
+
+不跑它就打开,会看到一句「这个项目是旧格式(v1)」并**点名这条命令** ——
+不做静默兼容,也不猜。
 
 ### 1.7 数值范围
 
@@ -79,22 +92,45 @@
 
 ### 1.8 谁写这些文件
 
-**这是本设计最容易搞混的一点**:
+**这是本设计最容易搞混的一点** —— 而且从 v2 起还要再分一层:
+**文件里的东西** ≠ **判据**。
 
-| 文件 | 谁写 | 何时 |
-|------|------|------|
-| `project.json` | 工具 | 建项目 / 每步完成后更新进度 |
-| `source/video.meta.json` | 工具(ffprobe) | 建项目时 |
-| `change_curve.json` | 工具(算法) | 步 1 |
-| `dense_regions.json` | 工具(算法) | 步 1 |
-| `transcript.json` | 工具(whisper) | 步 1 |
-| `shots.json` | 工具建,**agent 改** | 步 1 建;步 2/3 增删改 |
-| `transcript.fixed.json` | **agent** | 步 2 |
-| `supplement_requests.json` | 工具建,**agent 改** `status` | 步 2 |
-| `*.md`(summary / report / log) | **agent** | 步 2/3/4 |
+| 文件 | 谁写 | 何时 | 是不是判据 |
+|------|------|------|-----------|
+| `state.bin` | **工具**(agent 的结论经工具落进来) | 全程 | ✅ **状态都在这里**,见下 |
+| `project.json` | 工具 | 建项目 / 升级 | 身份,不是判据 |
+| `source/video.meta.json` | 工具(ffprobe) | 建项目时 | 是(时长/指纹) |
+| `change_curve.json` | 工具(算法) | 步 1 | 是 |
+| `dense_regions.json` | 工具(算法) | 步 1 | 是 |
+| `transcript.json` | 工具(whisper) | 步 1 | 是(原文) |
+| `shots.json` | 工具 | 步 1 建;步 2/3 增删改 | 内容**是**;`status`/`check`/`reason` 只是**投影** |
+| `transcript.fixed.json` | 工具 | 步 2 起每次纠错 | **整份都是投影**(原文 + 当前结论) |
+| `supplement_requests.json` | 工具 | 步 2 | 内容**是**;`status`/`shot_id`/`note` 只是**投影** |
+| `*.md`(summary / report / log) | **agent** | 步 2/3/4 | 产物(用户读的就是它) |
+
+### `state.bin`(不是 JSON,本目录只交代一句)
+
+**项目状态**住在这儿:进度、修订号、用户确认、每张图的看图结论、每段转录的结论与核验戳、
+每条补图候选的处置。它是**二进制**:文件头放格式版本与 payload 的 sha256,
+内容 bincode 编码。**不加密** —— 要的不是保密,是「改不动、坏了看得出来」。
+
+它**不在本目录的管辖范围**(没有 JSON Schema,`examples/` 里也不该有它 ——
+那份清单与测试是给 JSON 用的),格式的权威是
+[`crates/vidbrief-project/src/state.rs`](../../crates/vidbrief-project/src/state.rs)
+与 [DESIGN §4.10](../DESIGN.md)。
+
+**为什么要这么一个文件**:上面那些"投影"栏位,模型用宿主给的文件工具随手就能改 ——
+M4 第五轮实测:它把 `report.done` 改成 `true`、`at` 编成未来时刻;还手写了整份
+`supplement_requests.json`(值不合法),门看不见那 298 条候选、一路放行。
+**判据不能是能随手写的东西。**
+
+它另外装一份**内容底账**:三份明文材料上次被工具写出去时长什么样(几条 + 内容的 sha256)。
+理由是门的第①条从文件里数"还有哪些没核验" —— **行被拿掉了,活就看不见了**。
+底账按内容算(不是按文件字节),所以换个缩进不算变;底账**默认不换**,
+要认下改过的材料得显式 `vidbrief upgrade <项目> --accept-material`。
 
 - `transcript.json`(步 1,**原始**)与 `transcript.fixed.json`(步 2,**经纠错**)是**两个独立文件**,共用 [`transcript.schema.json`](transcript.schema.json)。
-- `transcript.json` 里 `corrected_text` / `correction` **恒为 `null`** —— 原始产出不得被就地改写,否则"agent 改了什么"就查不出来了。
+- `transcript.json` 里 `conclusion` **恒为 `null`** —— 原始产出不得被就地改写,否则"agent 改了什么"就查不出来了。
 
 ---
 
@@ -102,7 +138,7 @@
 
 | 文件 | 位置 | Schema | 示例 |
 |------|------|--------|------|
-| 项目元数据与进度 | `project.json` | [project.schema.json](project.schema.json) | [examples/project.json](examples/project.json) |
+| 项目**身份**(不含状态) | `project.json` | [project.schema.json](project.schema.json) | [examples/project.json](examples/project.json) |
 | 源视频技术元数据 | `source/video.meta.json` | [video_meta.schema.json](video_meta.schema.json) | [examples/video.meta.json](examples/video.meta.json) |
 | 差帧图 | `01_preprocess/change_curve.json` | [change_curve.schema.json](change_curve.schema.json) | [examples/change_curve.json](examples/change_curve.json) |
 | 变化密集区 | `01_preprocess/dense_regions.json` | [dense_regions.schema.json](dense_regions.schema.json) | [examples/dense_regions.json](examples/dense_regions.json) |
@@ -111,7 +147,8 @@
 | 截图清单 | `01_preprocess/shots.json` | [shots.schema.json](shots.schema.json) | [examples/shots.json](examples/shots.json) |
 | 补图请求 | `02_calibrate/supplement_requests.json` | [supplement_requests.schema.json](supplement_requests.schema.json) | [examples/supplement_requests.json](examples/supplement_requests.json) |
 
-无 schema 的文件(`.md` 与 `.srt/.txt/.vtt` 转录副本、图片、HTML 视图)不在本目录管辖范围。
+无 schema 的文件(`.md` 与 `.srt/.txt/.vtt` 转录副本、图片、HTML 视图、以及
+**`state.bin`** —— 它不是 JSON)不在本目录管辖范围。
 
 ---
 
@@ -140,21 +177,30 @@
 | `shot.origin` | `dense_region` / `isolated_peak` / `agent_request` / `manual` | 这张图从哪来 |
 | `shot.status` | `keep` / `drop` | 是否保留(算法默认全 `keep`) |
 | `shot.check.confidence` | `high` / `medium` / `low` | agent 看图结论的把握程度 |
-| `correction.type` | `homophone` / `terminology` / `number` / `uncertain` / `other` | 纠错类型 |
+| `conclusion.outcome` | `corrected` / `kept` / `uncertain`(字段为 `null` 表示没话说) | 这一段的结论 |
+| `conclusion.type` | `homophone` / `terminology` / `number` / `other` | 只在 `corrected` 时有:错的性质 |
 | `supplement.trigger` | `deictic_phrase` / `no_shot_nearby` / `both` | 为什么被列为补图候选 |
 | `supplement.status` | `pending` / `accepted` / `rejected` | agent 的判断结果 |
 | `progress.*` | `done` / `at` / `rounds` / `last_at` | 见 §5 |
 
-### `correction.type` 的一个要点
+### `conclusion` 的一个要点
 
-`type: "uncertain"` 表示 **agent 认为这里可能有问题但不敢改** —— 此时 `corrected_text` **保持 `null`**(不得臆造),只在 `correction.note` 里写下疑似正确写法。这区分了两种情况:
+结论是**四选一的枚举**,不是一个可以在旁边另填的字段:
 
-- **改了**:`corrected_text` 有值,`type` 是具体错因;
-- **存疑但没改**:`corrected_text` 为 `null`,`type: "uncertain"`,留给用户在审查节点裁决。
+- **改了**:`outcome: "corrected"`,**改后的整句就在 `text` 里** —— 不给它单开一栏,不然"说要改"和"改成什么"能各说各话;
+- **决定保留原句**:`outcome: "kept"`,正文一个字不动,`note` 写为什么;
+- **存疑未改**:`outcome: "uncertain"`,疑似写法写在 `note` 里,留给用户在审查节点裁决;
+- **没话说**:`conclusion` 为 `null`。
+
+四类加上"还没核验",**互斥且穷尽,加起来等于总段数** —— 计数口径收在 `Transcript::stats()` 一处,见 [DESIGN §4.5](../DESIGN.md)。
+老格式(`corrected_text` + `correction` 两个字段)读得进来,会按同一套规则并成结论;写出去永远是新格式。
 
 ---
 
 ## 5. `progress` 与 `review`:做过什么 vs 用户点过头没有
+
+> **⚠️ v2 起这两样都不在 `project.json` 里** —— 它们住 `state.bin`(见 §1.8)。
+> 形状没变,下面那份 JSON 是把它写出来给人看。
 
 **这两件事分开记。**
 
@@ -191,7 +237,7 @@
 
 本目录定义格式,**不定义加锁**。并发规则见 DESIGN §4.7:
 
-- `project.json.rev` 是**乐观并发**的修订号:任何写操作须带上读到的 `rev`,不匹配则返回 `stale`,由 agent 重读后再改。工具自身每次成功写入 `project.json` 时 `rev += 1`。
+- `state.bin` 里的 `rev` 是**乐观并发**的修订号:任何写操作须带上读到的 `rev`,不匹配则返回 `stale`,由 agent 重读后再改。工具自身每次成功写入状态时 `rev += 1`。
 - 所有写盘走"**临时文件 + 原子 rename**"(见 `vidbrief_project::json::write_atomic`),避免读到半截 JSON。
 - `project.lock` **不归本目录管**:它是个 **0 字节的哨兵**,不是材料文件 ——
   里面没有任何内容,所以既没有 schema 也没有示例。判据是"锁拿不拿得到",
@@ -208,7 +254,7 @@
 # 1) 改 docs/schema/*.schema.json
 # 2) 同步 crates/vidbrief-project/src/*.rs(保持 deny_unknown_fields)
 # 3) 同步 docs/schema/examples/*.json —— 测试会用它做三方锚定
-# 4) 若为不兼容变更:project.json 的 schema_version +1
+# 4) 若为不兼容变更:project.json 的 schema_version +1,并想清楚旧项目怎么迁(§1.6)
 # 5) cargo test -p vidbrief-project   # 三方锚定测试必须绿
 # 6) 补 devlog 条目 + 更新 ../DESIGN.md §4,bump 文档版本号
 ```

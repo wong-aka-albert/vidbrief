@@ -37,7 +37,7 @@ impl Fake {
         let rel = video_rel_for(std::path::Path::new("video.mp4"));
         std::fs::write(layout.rel(rel.as_str()), b"not a real video").expect("占位源视频");
 
-        let mut project = Project::new(
+        let project = Project::new(
             ProjectId::new("demo").expect("demo 是合法 id"),
             "测试项目",
             rel.clone(),
@@ -45,6 +45,11 @@ impl Fake {
             SourceLink::Copy,
         );
         project.save(&layout.project_json()).expect("写 project.json");
+        // 状态文件跟真项目一样**建出来就是空的**(见 `ops::project::create`)。
+        // 不建的话,"状态不在"会变成这套夹具的常态,而它本该是一种异常。
+        vidbrief_project::ProjectState::new()
+            .write(&layout.state_file())
+            .expect("写 state.bin");
 
         let meta = VideoMeta {
             path: rel,
@@ -71,6 +76,70 @@ impl Fake {
         crate::project::OpenProject::from_layout(self.layout.clone()).expect("打开假项目")
     }
 
+    // ── 直接往**状态**里写(测试用) ──────────────────────────────────
+    //
+    // 为什么不做成"改 shots.json 的那几栏":那几栏现在只是投影,门不看它 ——
+    // 拿它造场景,测的就不是门了(而且是绿着骗人的那种)。这几个助手写的是
+    // 真项目里工具写的那一处:state.bin。
+
+    /// 读一份当前状态。
+    pub fn state(&self) -> vidbrief_project::ProjectState {
+        vidbrief_project::ProjectState::read_file(&self.layout.state_file())
+            .expect("读状态")
+            .expect("状态文件该在")
+    }
+
+    /// 写一份状态。
+    pub fn set_state(&self, state: &vidbrief_project::ProjectState) {
+        state.write(&self.layout.state_file()).expect("写状态");
+    }
+
+    /// 记一份材料**内容**的底账 —— 真项目里由写它的那个工具记(见 `materials::save_*`)。
+    ///
+    /// 夹具写的材料也得记:不记的话,"材料不是工具写的那一份"这条会**全体误报**,
+    /// 而那正是"底账"这套东西要防的假警报。记的键与工具一致(项目根相对路径)。
+    fn note_content(&self, rel: &str, print: vidbrief_project::ContentPrint) {
+        let mut state = self.state();
+        state.note_content(rel, print);
+        self.set_state(&state);
+    }
+
+    /// 记一张图的看图结论。
+    pub fn set_shot_check(&self, id: u32, check: Option<vidbrief_project::ShotCheck>) {
+        let mut state = self.state();
+        state.shot_mut(ShotId::new(id).expect("合法 shot id")).check = check;
+        self.set_state(&state);
+    }
+
+    /// 改一张图的留用/弃用。
+    pub fn set_shot_status(&self, id: u32, status: ShotStatus) {
+        let mut state = self.state();
+        state.shot_mut(ShotId::new(id).expect("合法 shot id")).status = status;
+        self.set_state(&state);
+    }
+
+    /// 给一段转录下结论,并盖核验戳。
+    pub fn set_segment_conclusion(
+        &self,
+        id: u32,
+        conclusion: Option<vidbrief_project::Conclusion>,
+    ) {
+        let mut state = self.state();
+        let entry = state.segment_mut(id);
+        entry.set_conclusion(conclusion);
+        entry.checked_at = Some(vidbrief_project::now());
+        self.set_state(&state);
+    }
+
+    /// 只盖核验戳(审过、没话说)。
+    pub fn mark_segments_checked(&self, ids: &[u32]) {
+        let mut state = self.state();
+        for id in ids {
+            state.segment_mut(*id).checked_at = Some(vidbrief_project::now());
+        }
+        self.set_state(&state);
+    }
+
     /// 写一份转录。`(起, 止, 文本)`。
     pub fn with_transcript(self, segs: &[(f64, f64, &str)]) -> Self {
         let transcript = Transcript {
@@ -88,8 +157,7 @@ impl Fake {
                     start: *start,
                     end: *end,
                     text: (*text).to_string(),
-                    corrected_text: None,
-                    correction: None,
+                    conclusion: None,
                     checked_at: None,
                 })
                 .collect(),
@@ -97,6 +165,10 @@ impl Fake {
         transcript
             .save(&self.layout.transcript())
             .expect("写 transcript.json");
+        self.note_content(
+            vidbrief_project::layout::TRANSCRIPT_FILE,
+            vidbrief_project::transcript_print(&transcript),
+        );
         self
     }
 
@@ -164,6 +236,10 @@ impl Fake {
         });
         shots.sort_by_time();
         shots.save(&self.layout.shots_json()).expect("写 shots.json");
+        self.note_content(
+            vidbrief_project::layout::SHOTS_FILE,
+            vidbrief_project::shots_print(&shots),
+        );
     }
 }
 

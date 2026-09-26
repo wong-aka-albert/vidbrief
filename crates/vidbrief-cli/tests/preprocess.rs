@@ -18,6 +18,13 @@ use vidbrief_project::{ChangeCurve, DenseRegions, Layout, Project, Shots};
 const SWITCH_POINTS: &[f64] = &[20.0, 30.0, 50.0];
 const TOLERANCE: f64 = 0.01;
 
+/// 读项目状态(它现在住在 `state.bin` 里,不在 `project.json`)。
+fn state_of(layout: &Layout) -> vidbrief_project::ProjectState {
+    vidbrief_project::ProjectState::read_file(&layout.state_file())
+        .expect("读状态")
+        .expect("状态文件该在")
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -215,12 +222,12 @@ fn curve_and_regions_are_internally_consistent() {
 }
 
 #[test]
-fn preprocess_marks_the_step_done_in_project_json() {
+fn preprocess_marks_the_step_done_in_the_state() {
     let (_tmp, layout) = prepared("progress");
-    let project = Project::load(&layout.project_json()).unwrap();
-    assert!(project.progress.preprocess.done, "跑完了就该标记");
-    assert!(project.progress.preprocess.at.is_some());
-    assert!(project.rev > 1, "写了 project.json 就该推进 rev");
+    let state = state_of(&layout);
+    assert!(state.progress.preprocess.done, "跑完了就该标记");
+    assert!(state.progress.preprocess.at.is_some());
+    assert!(state.rev > 1, "写一次状态就该推进 rev");
 }
 
 #[test]
@@ -275,8 +282,8 @@ fn a_failed_transcription_does_not_mark_the_step_done() {
     let out = run_in(&tmp.0, &["preprocess", "test-sample"]);
     assert!(out.status.success(), "无音轨应当仍算完成:\n{}", stderr(&out));
     assert!(stdout(&out).contains("没有音轨"), "{}", stdout(&out));
-    let mut project = Project::load(&layout.project_json()).unwrap();
-    assert!(project.progress.preprocess.done, "没音轨可转,这一步就算做完了");
+    let project = Project::load(&layout.project_json()).unwrap();
+    assert!(state_of(&layout).progress.preprocess.done, "没音轨可转,这一步就算做完了");
     assert!(!layout.transcript().exists());
 
     // ② 换成**有音轨**的视频,但让 whisper 找不到 → 必须判失败
@@ -301,8 +308,10 @@ fn a_failed_transcription_does_not_mark_the_step_done() {
     let meta = vidbrief_core::probe(&project_path, project.source.path.clone()).unwrap();
     meta.save(&layout.video_meta()).unwrap();
 
-    project.progress.preprocess = Default::default();
-    project.save(&layout.project_json()).unwrap();
+    // 把步 1 的进度清回去,验"失败就不标记"
+    let mut state = state_of(&layout);
+    state.progress.preprocess = Default::default();
+    state.write(&layout.state_file()).unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_vidbrief"))
         .current_dir(&tmp.0)
@@ -317,9 +326,8 @@ fn a_failed_transcription_does_not_mark_the_step_done() {
         "视频确实有音轨、whisper 又用不了,必须判失败:\n{}",
         stdout(&out)
     );
-    let project = Project::load(&layout.project_json()).unwrap();
     assert!(
-        !project.progress.preprocess.done,
+        !state_of(&layout).progress.preprocess.done,
         "转录没完成就不该标记步 1 已完成"
     );
     // 但视觉产出要保留 —— 重跑时不必重算差帧图

@@ -232,8 +232,7 @@ mod tests {
                     start: *start,
                     end: *end,
                     text: (*text).to_string(),
-                    corrected_text: None,
-                    correction: None,
+                    conclusion: None,
                     checked_at: None,
                 })
                 .collect(),
@@ -243,7 +242,12 @@ mod tests {
     /// 造一份纠错过的转录:单段,`text` 是 ASR 原文,`corrected` 是 agent 的结论。
     fn corrected_transcript(text: &str, corrected: &str) -> Transcript {
         let mut t = transcript(&[(1, 0.0, 10.0, text)]);
-        t.segments[0].corrected_text = Some(corrected.to_string());
+        t.segments[0].conclusion = Some(vidbrief_project::Conclusion::Corrected {
+            text: corrected.to_string(),
+            kind: vidbrief_project::CorrectionType::Other,
+            note: "测试".into(),
+            reason: "测试".into(),
+        });
         t
     }
 

@@ -8,7 +8,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use vidbrief_ops::{CreateOptions, Notice, OpenProject};
+use vidbrief_ops::{CreateOptions, Notice};
 use vidbrief_project::SourceLink;
 
 use crate::json::{blocking, json};
@@ -184,7 +184,8 @@ impl VidbriefServer {
     #[tool(
         description = "看一个项目的全貌:四步进度、材料清单(差帧图/密集区/截图/转录各做了多少)、\
                        源视频健康检查。**开工前先调它** —— 你会知道哪些材料已经有了、\
-                       哪些还没做,不用靠猜。",
+                       哪些还没做,不用靠猜。项目状态文件读不动、或者项目还是旧格式时,\
+                       它也照样答,并在 materials.state_note 里说清是怎么回事、下一步该做什么。",
         annotations(title = "看项目状态", read_only_hint = true)
     )]
     async fn get_project(
@@ -193,12 +194,13 @@ impl VidbriefServer {
     ) -> Result<CallToolResult, CallToolResult> {
         let state = self.state.clone();
         let id = p.project_id.clone();
-        let report = blocking(move || {
-            let opened = OpenProject::open(&id)?;
-            state.note(opened.dir(), opened.id());
-            vidbrief_ops::inspect_opened(&opened, &vidbrief_ops::InspectOptions::default())
-        })
-        .await?;
+        // 走**能容忍坏状态**的那条路(与 `vidbrief status` 同一条):这是"看一眼"的工具,
+        // 项目有毛病的时候正是它最该说话的时候。要动手的工具走 `OpenProject`
+        // (状态读不动就直接拒绝开工)—— 两者的分工见 `inspect` 的模块说明。
+        let report =
+            blocking(move || vidbrief_ops::inspect(&id, &vidbrief_ops::InspectOptions::default()))
+                .await?;
+        state.note(&report.dir, report.project.id.as_ref());
         json(&report)
     }
 }

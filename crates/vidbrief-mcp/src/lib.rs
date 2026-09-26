@@ -59,7 +59,7 @@ pub fn serve_stdio() -> anyhow::Result<()> {
         let server = VidbriefServer::new();
         // 页面上的按钮要能落到这个进程里执行 —— **用同一份 State**(同一把写锁、
         // 同一张"见过的项目"表),并用同一个运行时排队,免得和工具调用各写各的
-        // `project.json`。见 `action_handler` 的模块说明。
+        // 项目状态(`state.bin`)。见 `action_handler` 的模块说明。
         install_action_handler(server.state_arc(), tokio::runtime::Handle::current());
         let running = server
             .serve(rmcp::transport::stdio())

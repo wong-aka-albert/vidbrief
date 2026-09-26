@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use vidbrief_project::{
-    Health, Layout, Project, ProjectId, SourceLink, VideoMeta, check_source_link, materialize, plan,
-    simplify_path, video_rel_for,
+    Health, Layout, Project, ProjectId, ProjectState, SourceLink, VideoMeta, check_source_link,
+    materialize, plan, simplify_path, video_rel_for,
 };
 
 /// 打开(或新建)项目时的统一入口参数。
@@ -31,15 +31,32 @@ pub fn resolve(arg: &str) -> Result<Layout> {
     )
 }
 
-/// 一个已经打开的项目:`project.json` + `source/video.meta.json` 都读进来了。
+/// 一个已经打开的项目:身份 + 视频元数据 + **状态**。
 ///
-/// **不含写锁**。锁回答的是"谁有资格改",那是入口层的事(CLI 一次命令一把,
-/// MCP 是会话级长持);混进来会让"只想看一眼"的材料查询也被锁挡住。
+/// # 状态为什么是必要条件
+///
+/// 状态(`state.bin`)装着"谁审过、哪张图看过、哪一步拍过板" —— 那是这道门的判据,
+/// 也是所有工具写回去的地方。它读不动时**必须报错**,不许拿一份空状态顶上:
+/// 空状态的意思是"什么都还没核验"(拦),而"读不动"的意思是"**不知道**审过什么"。
+/// 两者都拦,但说出来的话完全不同,人要做的事也不同(前者接着干,后者去修文件)。
+/// M4 第五轮实测:`load().ok()` 把一份读不动的材料当成了"没有",门数出 0 条、一路放行。
+///
+/// # 不含写锁
+///
+/// 锁回答的是"谁有资格改",那是入口层的事(CLI 一次命令一把,MCP 是会话级长持);
+/// 混进来会让"只想看一眼"的材料查询也被锁挡住。
 #[derive(Debug, Clone)]
 pub struct OpenProject {
     layout: Layout,
     project: Project,
     meta: VideoMeta,
+    state: ProjectState,
+    /// 状态文件**不在**时的一句话(读得动就是 `None`)。
+    ///
+    /// 为什么"不在"不报错:"不在"推不出"被人拿掉了" —— 新项目、手搓的项目目录都长这样,
+    /// 而且按空状态算是**最保守**的那头(什么都没核验 → 门全拦),
+    /// 拿不到任何便宜。所以工具照常能用,只把这件事报到明面上,由 `status` / `get_project` 说给人听。
+    state_note: Option<String>,
 }
 
 impl OpenProject {
@@ -50,19 +67,20 @@ impl OpenProject {
 
     /// 已经拿到 [`Layout`] 时直接打开(不重复解析路径)。
     pub fn from_layout(layout: Layout) -> Result<Self> {
-        let project = Project::load(&layout.project_json()).with_context(|| {
-            format!("读取项目文件失败:{}", layout.project_json().display())
-        })?;
+        let project = load_identity(&layout)?;
         let meta = VideoMeta::load(&layout.video_meta()).with_context(|| {
             format!(
                 "读取视频元数据失败:{} —— 项目可能没建完(重跑 `vidbrief init` 或换个项目)",
                 layout.video_meta().display()
             )
         })?;
+        let (state, state_note) = load_state(&layout)?;
         Ok(Self {
             layout,
             project,
             meta,
+            state,
+            state_note,
         })
     }
 
@@ -74,6 +92,17 @@ impl OpenProject {
     }
     pub fn meta(&self) -> &VideoMeta {
         &self.meta
+    }
+    /// 项目状态 —— **门和所有写操作读的都是它**。
+    pub fn state(&self) -> &ProjectState {
+        &self.state
+    }
+    pub fn state_mut(&mut self) -> &mut ProjectState {
+        &mut self.state
+    }
+    /// 状态文件不在时的那句话(`None` = 它在,而且读得动)。
+    pub fn state_note(&self) -> Option<&str> {
+        self.state_note.as_deref()
     }
     /// 项目 id。
     pub fn id(&self) -> &str {
@@ -107,22 +136,383 @@ impl OpenProject {
         Ok(video)
     }
 
-    /// 存回 `project.json`(会把 `rev` +1)。
+    /// 存回**状态**(`state.bin`),并把 `rev` +1。
+    ///
+    /// 身份(`project.json`)不在这里写:它只在建项目和升级时变一次
+    /// (见 [`Self::save_identity`])。
     pub fn save(&mut self) -> Result<()> {
+        self.state
+            .save(&self.layout.state_file())
+            .with_context(|| format!("写入 {} 失败", self.layout.state_file().display()))
+    }
+
+    /// 存回**身份**(`project.json`)。
+    pub fn save_identity(&self) -> Result<()> {
         self.project
             .save(&self.layout.project_json())
             .with_context(|| format!("写入 {} 失败", self.layout.project_json().display()))
-    }
-
-    /// 可变地拿到 `project.json` 的内容(改进度、改术语表)。
-    pub fn project_mut(&mut self) -> &mut Project {
-        &mut self.project
     }
 
     /// 源视频的链接健康检查(不算哈希,很快)。
     pub fn link_health(&self) -> Health {
         check_source_link(&self.project, &self.layout)
     }
+}
+
+/// 读 `project.json` —— 版本对不上时把**去路**说清楚。
+///
+/// 老项目(v1)与新项目要给的提示完全不一样:"跑一次 `vidbrief upgrade`"和
+/// "你这一版工具打不开这个项目"是两条不同的路,含糊成"解析失败"就等于什么都没说。
+pub fn load_identity(layout: &Layout) -> Result<Project> {
+    let path = layout.project_json();
+    match Project::load(&path) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let version = Project::peek_version(&path).ok();
+            match version {
+                Some(v) if v < vidbrief_project::SCHEMA_VERSION => bail!(
+                    "这个项目是旧格式(v{v}):{}\n\
+                     \n\
+                     材料都在,只是 `project.json` 的版本比本工具旧。跑一次\n\
+                     `vidbrief upgrade {}`\n\
+                     就会把它对齐到 v{}:进度、核验戳、看图结论、拍板记录照旧收进状态文件,\
+                     材料一个字节都不动。",
+                    path.display(),
+                    layout.root().display(),
+                    vidbrief_project::SCHEMA_VERSION
+                ),
+                Some(v) => bail!(
+                    "这个项目的版本(v{v})比本工具认的(v{})新:{} —— \
+                     用**写它的那一版**工具打开它,别在这一版里覆盖。\n\
+                     原始报错:{e:#}",
+                    vidbrief_project::SCHEMA_VERSION,
+                    path.display()
+                ),
+                None => Err(e).with_context(|| {
+                    format!("读取项目文件失败:{} —— 这份文件读不动了", path.display())
+                }),
+            }
+        }
+    }
+}
+
+/// 旧格式(v1)项目的**身份 + 状态那几栏**。不是 v1 就返回 `None`。
+///
+/// 给体检(`vidbrief status`)用:它要能在"项目还没迁"的时候照样把项目里有什么
+/// 说清楚 —— 连进度和修订号也要,不然旧项目在它嘴里会变成"什么都没做"。
+/// 真正的升级走 [`upgrade`]。
+pub fn load_legacy(layout: &Layout) -> Option<(Project, vidbrief_project::LegacyStateV1)> {
+    let path = layout.project_json();
+    let version = Project::peek_version(&path).ok()?;
+    if version >= vidbrief_project::SCHEMA_VERSION {
+        return None;
+    }
+    Project::load_v1(&path).ok()
+}
+
+/// 读 `state.bin`。三态见 [`OpenProject`] 的说明。
+pub fn load_state(layout: &Layout) -> Result<(ProjectState, Option<String>)> {
+    let path = layout.state_file();
+    match ProjectState::read_file(&path)? {
+        Some(state) => Ok((state, None)),
+        None => Ok((ProjectState::new(), Some(missing_state_note(layout)))),
+    }
+}
+
+/// 状态文件**不在**时的那句话。**不许出现"删"**(`AGENTS.md` §2)。
+fn missing_state_note(layout: &Layout) -> String {
+    format!(
+        "这个项目没有状态文件({})。按「什么都还没核验」算 —— \
+         材料(转录、截图、候选)都还在,但谁审过、哪张图看过、哪一步拍过板都推不出来了,得重做。\n\
+         让人跑一次 `vidbrief upgrade {}` 可以照材料重新起一份状态。",
+        layout.state_file().display(),
+        layout.root().display()
+    )
+}
+
+// ── 升级 / 重新起一份状态 ────────────────────────────────────────────
+
+/// `upgrade` 的选项。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpgradeOptions {
+    /// 什么都不收,起一份空状态(材料原样保留)。
+    pub fresh: bool,
+    /// **把现在这份材料当成新底账** —— 连"跟底账对不上"的那些也重记。
+    ///
+    /// 只有一种时候该用它:人**知道**材料为什么变了、并且认了它。
+    /// 不显式说就把对不上的底账悄悄换掉的话,底账就成了摆设 ——
+    /// 而它挡的正是"把没审的行从文件里拿掉"这件事。
+    pub accept_material: bool,
+}
+
+/// `upgrade` 干了什么 —— **要说清楚"收回了什么"**,不然人不知道自己那几轮活还在不在。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpgradeOutcome {
+    pub project_id: String,
+    /// 动手之前 `project.json` 是第几版。
+    pub from_version: u32,
+    /// 升级之后的修订号。
+    pub rev: u64,
+    /// 收回来的:有看图结论的截图张数。
+    pub shot_checks: usize,
+    /// 有结论或核验戳的转录段数。
+    pub segments: usize,
+    /// 有处置结论的补图候选条数。
+    pub supplements: usize,
+    /// 有没有收回用户拍板的记录。
+    pub approval: bool,
+    /// 旧格式里那几栏进度是不是搬过来了。
+    pub progress_moved: bool,
+    /// **内容底账**每份材料一行:记上了 / 重记了 / 没动。
+    pub content: Vec<String>,
+    /// 什么都没做时的说明(幂等:已经是最新的就什么都不用做)。
+    pub note: Option<String>,
+}
+
+/// 把一个项目对齐到当前版本:**状态照材料重新起一份**。
+///
+/// # 什么时候用
+///
+/// 两种情况,去路是同一条:
+///
+/// 1. **旧格式(v1)**:进度、核验戳、看图结论、拍板记录当年都写在明文里
+///    (`project.json` / `shots.json` / `transcript.fixed.json` / `supplement_requests.json`)。
+///    这里把它们收进 `state.bin`,并把 `project.json` 改写成 v2 的身份部分。
+///    **材料一个字节都不动。**
+/// 2. **状态文件不见了或者读不动**:照明文材料里还读得到的那部分重新起一份。
+///
+/// # 为什么它可以被随手跑,而且不可怕
+///
+/// 它的产物永远是**最保守**的那一份:读得到什么就收什么,读不到的就是"还没核验"。
+/// 拿它去绕门是绕不过去的 —— "还没核验"只会让门拦得更死。
+/// (所以就算这是条命令行、模型自己也跑得动,它也不构成一条捷径。)
+///
+/// `fresh` = 什么都不收,起一份空的:所有核验记录清零,材料原样保留。
+/// 那是留给"状态坏了、也不想照明文将就"的人的。
+pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
+    let layout = resolve(arg)?;
+    // 自己取锁:这条路要能在"项目打不开"的时候跑,所以不走 `with_write`
+    // (那个先 `OpenProject::open`,而状态读不动时它直接报错)。
+    let _guard = vidbrief_project::acquire(&layout)?;
+
+    let from_version = Project::peek_version(&layout.project_json()).unwrap_or(0);
+
+    // 身份:v1 与 v2 两种读法
+    let (project, legacy) = if from_version < vidbrief_project::SCHEMA_VERSION {
+        let (project, legacy) = Project::load_v1(&layout.project_json())?;
+        (project, Some(legacy))
+    } else {
+        (load_identity(&layout)?, None)
+    };
+
+    // 已经是最新的、而且状态读得动 → **只对底账**,不动别的
+    //
+    // (状态在、材料也在,那就没有"收回来"这回事;剩下唯一可能要做的,
+    //  是这份材料还没有底账 —— 那种情况记上就行。)
+    if legacy.is_none() && !opts.fresh {
+        if let Ok(Some(mut state)) = ProjectState::read_file(&layout.state_file()) {
+            let content = record_ledgers(&layout, &mut state, opts.accept_material)?;
+            let changed = content.iter().any(|line| !line.contains("没动"));
+            if changed {
+                state.save(&layout.state_file())?;
+            }
+            let note = if changed {
+                Some("已经是最新的:只把内容底账对齐了一遍,核验记录一条都没动。".to_string())
+            } else {
+                Some("已经是最新的:状态文件在,而且读得动,什么都没动。".to_string())
+            };
+            return Ok(UpgradeOutcome {
+                project_id: project.id.to_string(),
+                from_version,
+                rev: state.rev,
+                shot_checks: state.shots.values().filter(|s| s.check.is_some()).count(),
+                segments: state.segments.len(),
+                supplements: state.supplements.len(),
+                approval: state.review.calibrate.is_some(),
+                progress_moved: false,
+                content,
+                note,
+            });
+        }
+    }
+
+    let mut state = ProjectState::new();
+    if let Some(legacy) = &legacy {
+        state.rev = legacy.rev;
+        state.progress = legacy.progress.clone();
+        state.review = legacy.review.clone();
+    }
+
+    let mut note = None;
+    if opts.fresh {
+        note = Some("`--fresh`:什么都没收 —— 已有的核验记录清零,材料原样保留。".to_string());
+    } else {
+        // 明文里那几份材料:读得动就收,读不动就**报错**(不许当没有 ——
+        // 一次静默的"没有结论"会让升级这件事本身变成一把抹掉记录的刀)
+        if let Some(shots) = load_legacy_shots(&layout)? {
+            state.absorb_shots(&shots);
+        }
+        if let Some(fixed) = load_legacy_transcript(&layout)? {
+            state.absorb_transcript(&fixed);
+        }
+        if let Some(list) = load_legacy_supplements(&layout)? {
+            state.absorb_supplements(&list);
+        }
+    }
+    state.prune();
+
+    // 内容底账:重起一份状态时**总是**记上(它记的是"工具写过的材料长什么样",
+    // 而这条路本身就是"照材料起一份";`--fresh` 也不例外 —— 不然新状态一出生就带着
+    // 一堆"没有底账"的假警报)。
+    let content = record_ledgers(&layout, &mut state, true)?;
+
+    // 落盘:状态 + 身份(v2 的身份里没有状态那几栏,所以这一步同时也是 v1 → v2)
+    state.save(&layout.state_file())?;
+    project.save(&layout.project_json())?;
+
+    Ok(UpgradeOutcome {
+        project_id: project.id.to_string(),
+        from_version,
+        rev: state.rev,
+        shot_checks: state.shots.values().filter(|s| s.check.is_some()).count(),
+        segments: state.segments.len(),
+        supplements: state.supplements.len(),
+        approval: state.review.calibrate.is_some(),
+        progress_moved: legacy.is_some(),
+        content,
+        note,
+    })
+}
+
+/// 照**当前**这几份材料把内容底账记一遍。
+///
+/// 规则只有两条,都是为了"底账不能顺手就被换掉":
+///
+/// - **缺的记上**:没底账的材料,记上它 —— 这是"把工具写出去的这份认下来",不构成绕过;
+/// - **对不上的不换**:除非 `overwrite`(`--accept-material`)。
+///   `overwrite` 还负责把**不在了**的那几份的底账抹掉(显式认了"它没就没了吧")。
+fn record_ledgers(
+    layout: &Layout,
+    state: &mut ProjectState,
+    overwrite: bool,
+) -> Result<Vec<String>> {
+    use vidbrief_project::layout as paths;
+    let mut lines = Vec::new();
+
+    let shots = load_legacy_shots(layout)?;
+    let transcript = load_raw_transcript(layout)?;
+    let supplements = load_legacy_supplements(layout)?;
+
+    let rows: [(&str, Option<vidbrief_project::ContentPrint>); 3] = [
+        (
+            paths::TRANSCRIPT_FILE,
+            transcript.as_ref().map(vidbrief_project::transcript_print),
+        ),
+        (
+            paths::SHOTS_FILE,
+            shots.as_ref().map(vidbrief_project::shots_print),
+        ),
+        (
+            paths::SUPPLEMENT_REQUESTS_FILE,
+            supplements
+                .as_ref()
+                .map(vidbrief_project::supplements_print),
+        ),
+    ];
+
+    for (rel, now) in rows {
+        match (&now, state.content.get(rel).cloned()) {
+            // 材料不在:有底账的话,只有显式认了才抹掉
+            (None, Some(then)) => {
+                if overwrite {
+                    state.content.remove(rel);
+                    lines.push(format!(
+                        "{rel}:材料不在,底账也跟着抹了(原来记着 {} 条)",
+                        then.items
+                    ));
+                } else {
+                    lines.push(format!("{rel}:底账没动(原来记着 {} 条,材料现在不在)", then.items));
+                }
+            }
+            (None, None) => {}
+            (Some(print), None) => {
+                state.note_content(rel, print.clone());
+                lines.push(format!("{rel}:记上底账({} 条)", print.items));
+            }
+            (Some(print), Some(then)) => {
+                if print.digest == then.digest {
+                    lines.push(format!("{rel}:底账没动({} 条,对得上)", then.items));
+                } else if overwrite {
+                    lines.push(format!(
+                        "{rel}:**重记了底账**(原来 {} 条,现在 {} 条)",
+                        then.items, print.items
+                    ));
+                    state.note_content(rel, print.clone());
+                } else {
+                    lines.push(format!(
+                        "{rel}:底账没动 —— 它跟现在这份对不上(底账 {} 条,现在 {} 条);要认现在这份,加 `--accept-material`",
+                        then.items, print.items
+                    ));
+                }
+            }
+        }
+    }
+    Ok(lines)
+}
+
+/// 读**原始**转录(不是纠错稿)。不在 → `None`,读不动 → 报错。
+///
+/// 底账记的是**原文**:纠错稿是投影(结论在状态里),原文才是"材料"。
+fn load_raw_transcript(layout: &Layout) -> Result<Option<vidbrief_project::Transcript>> {
+    let path = layout.transcript();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let t = vidbrief_project::Transcript::load(&path)
+        .with_context(|| format!("读取 {} 失败 —— 转录取不出来(被改过或坏了)", path.display()))?;
+    Ok(Some(t))
+}
+
+/// 明文里能读到的截图清单。不在 → `None`,读不动 → 报错。
+fn load_legacy_shots(layout: &Layout) -> Result<Option<vidbrief_project::Shots>> {
+    let path = layout.shots_json();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let shots = vidbrief_project::Shots::load(&path).with_context(|| {
+        format!(
+            "读取 {} 失败 —— 这份截图清单读不动,没法从它里面收结论。\
+             先修好它(或者跑一次 `preprocess` 重算),再来升级。",
+            path.display()
+        )
+    })?;
+    Ok(Some(shots))
+}
+
+/// 明文里能读到的转录结论(`transcript.fixed.json`)。
+fn load_legacy_transcript(layout: &Layout) -> Result<Option<vidbrief_project::Transcript>> {
+    let path = layout.transcript_fixed();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let fixed = vidbrief_project::Transcript::load(&path)
+        .with_context(|| format!("读取 {} 失败 —— 这份纠错稿读不动,没法从它里面收结论。", path.display()))?;
+    Ok(Some(fixed))
+}
+
+/// 明文里能读到的补图候选处置。
+fn load_legacy_supplements(layout: &Layout) -> Result<Option<vidbrief_project::SupplementRequests>> {
+    let path = layout.supplement_requests();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let list = vidbrief_project::SupplementRequests::load(&path).with_context(|| {
+        format!(
+            "读取 {} 失败 —— 这份补图候选清单读不动,没法从它里面收处置。",
+            path.display()
+        )
+    })?;
+    Ok(Some(list))
 }
 
 // ── 建项目 ───────────────────────────────────────────────────────────
@@ -239,7 +629,7 @@ fn fill_project(
     // `canonicalize` 在 Windows 上带 `\\?\` 前缀;写进 project.json 之前去掉,
     // 否则这个字段对人就没法看了
     let original = simplify_path(video);
-    let mut project = Project::new(
+    let project = Project::new(
         id.clone(),
         title,
         rel,
@@ -247,6 +637,13 @@ fn fill_project(
         placed.link,
     );
     project.save(&layout.project_json())?;
+    // 状态文件在**建项目时**就立起来(空的那一份)。
+    //
+    // 为什么不让它"以后写第一次的时候再建":那样"状态文件不在"就同时表示
+    // "这个项目还没跑过"和"那份记录被人拿掉了",两者要人做的事完全相反。
+    // 立起来之后,"不在"只剩后者一种意思,`status` 才敢把它当异常报。
+    let mut state = ProjectState::new();
+    state.save(&layout.state_file())?;
 
     Ok(Created {
         id,
@@ -384,9 +781,11 @@ pub struct ProjectSummary {
     /// 源视频的来处(纯信息性,可能已经失效)。
     pub source_original: String,
     pub link: SourceLink,
+    /// 修订号与四步进度 —— **都来自状态文件**。
     pub rev: u64,
-    /// 四步进度。
     pub progress: vidbrief_project::Progress,
+    /// 状态文件读不动 / 不在时的说明(正常是 `null`)。
+    pub state_note: Option<String>,
     /// 源视频还在不在(轻量检查,不重算哈希)。
     pub health: crate::inspect::HealthView,
     /// 材料做到哪一步了(只看文件在不在,不解析内容)。
@@ -427,11 +826,19 @@ pub fn list_projects(root: &Path) -> Result<Vec<ProjectSummary>> {
 }
 
 /// 单个项目的摘要。读不出来时也返回一条记录,只是 `health` 是 problem。
+///
+/// 身份读不出来(版本对不上、文件坏了)时**照样返回一条**,而且把原因原样带上 ——
+/// 列表里少一行比多一行坏消息危险得多。
 fn summarize(layout: &Layout) -> Result<ProjectSummary> {
     let materials = crate::inspect::scan_materials(layout);
     let dir = layout.root().to_path_buf();
+    // 状态读不动时,进度与修订号照 `Default` 走,并把原因放进 `state_note` 说给人听
+    let (state, state_note) = match load_state(layout) {
+        Ok((state, note)) => (state, note),
+        Err(e) => (ProjectState::new(), Some(format!("{e:#}"))),
+    };
 
-    let project = match Project::load(&layout.project_json()) {
+    let project = match load_identity(layout) {
         Ok(p) => p,
         Err(e) => {
             return Ok(ProjectSummary {
@@ -445,9 +852,10 @@ fn summarize(layout: &Layout) -> Result<ProjectSummary> {
                 created_at: vidbrief_project::now(),
                 source_original: String::new(),
                 link: SourceLink::Copy,
-                rev: 0,
-                progress: vidbrief_project::Progress::default(),
-                health: crate::inspect::HealthView::problem(format!("项目文件读不出来:{e:#}")),
+                rev: state.rev,
+                progress: state.progress.clone(),
+                state_note,
+                health: crate::inspect::HealthView::problem(format!("{e:#}")),
                 materials,
             });
         }
@@ -462,8 +870,9 @@ fn summarize(layout: &Layout) -> Result<ProjectSummary> {
         created_at: project.created_at,
         source_original: project.source.original.clone(),
         link: project.source.link,
-        rev: project.rev,
-        progress: project.progress.clone(),
+        rev: state.rev,
+        progress: state.progress.clone(),
+        state_note,
         health,
         materials,
     })
@@ -496,5 +905,254 @@ mod tests {
         let root = std::env::temp_dir().join(format!("vidbrief-ops-nope-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         assert!(list_projects(&root).unwrap().is_empty());
+    }
+
+    // ── 升级:旧格式 → 状态文件 ──────────────────────────────────────
+
+    /// 把假项目改造成**旧格式(v1)**:`project.json` 带上那三栏、`state.bin` 拿掉。
+    fn make_v1(fake: &crate::testkit::Fake, rev: u64) {
+        let text = format!(
+            r#"{{
+  "schema_version": 1,
+  "rev": {rev},
+  "id": "demo",
+  "name": "测试项目",
+  "created_at": "2026-09-24T21:00:00+08:00",
+  "source": {{"path": "source/video.mp4", "original": "E:/fake/video.mp4", "link": "copy"}},
+  "glossary": null,
+  "progress": {{
+    "preprocess": {{"done": true, "at": "2026-09-24T21:03:11+08:00"}},
+    "calibrate": {{"rounds": 2, "last_at": "2026-09-24T21:20:00+08:00"}},
+    "summarize": {{"done": false, "at": null}},
+    "report": {{"done": false, "at": null}}
+  }},
+  "review": {{"calibrate": null}}
+}}
+"#
+        );
+        std::fs::write(fake.layout().project_json(), text).unwrap();
+        std::fs::remove_file(fake.layout().state_file()).unwrap();
+    }
+
+    fn a_check() -> vidbrief_project::ShotCheck {
+        vidbrief_project::ShotCheck {
+            r#match: true,
+            audio_visual_sync: true,
+            type_read: "Python 列表 结构图".into(),
+            neighbor_text: None,
+            issues: vec![],
+            confidence: vidbrief_project::Confidence::High,
+            evidence: Some(vidbrief_project::Evidence {
+                segment: 1,
+                quote: "各位好".into(),
+            }),
+            checked_at: vidbrief_project::now(),
+        }
+    }
+
+    /// **旧项目迁一次:状态从明文收进 state.bin —— 材料一个字节都不动。**
+    ///
+    /// 这条和 `vidbrief-project` 里那条"老格式读得进来"是同一件事的两半:
+    /// 那边保证**读得到**,这边保证**收得回、而且不改材料**。
+    #[test]
+    fn upgrade_collects_the_state_that_lived_in_plaintext() {
+        let fake = crate::testkit::Fake::new("upgrade-v1")
+            .with_transcript(&[(0.0, 2.0, "派森列表"), (2.0, 4.0, "各位好")])
+            .with_shot(1, 2.0);
+        make_v1(&fake, 7);
+
+        // 明文里放一份"当年写的"看图结论与转录结论
+        let mut shots = vidbrief_project::Shots::load(&fake.layout().shots_json()).unwrap();
+        shots.shots[0].check = Some(a_check());
+        shots.save(&fake.layout().shots_json()).unwrap();
+        let mut fixed = vidbrief_project::Transcript::load(&fake.layout().transcript()).unwrap();
+        fixed.segments[0].conclusion = Some(vidbrief_project::Conclusion::Corrected {
+            text: "Python 列表".into(),
+            kind: vidbrief_project::CorrectionType::Terminology,
+            note: "派森 → Python".into(),
+            reason: "画面标题".into(),
+        });
+        fixed.segments[0].checked_at = Some(vidbrief_project::now());
+        fixed.save(&fake.layout().transcript_fixed()).unwrap();
+
+        let shots_before = std::fs::read(fake.layout().shots_json()).unwrap();
+        let fixed_before = std::fs::read(fake.layout().transcript_fixed()).unwrap();
+        let transcript_before = std::fs::read(fake.layout().transcript()).unwrap();
+
+        let out = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(out.from_version, 1);
+        assert_eq!(out.shot_checks, 1, "那张图的结论该收回来");
+        assert_eq!(out.segments, 1, "那一句的结论该收回来");
+        assert!(out.progress_moved);
+        assert_eq!(out.rev, 8, "旧修订号 7 之上再加一次写");
+        assert!(out.note.is_none());
+
+        // 材料**一个字节都没动**
+        assert_eq!(std::fs::read(fake.layout().shots_json()).unwrap(), shots_before);
+        assert_eq!(
+            std::fs::read(fake.layout().transcript_fixed()).unwrap(),
+            fixed_before
+        );
+        assert_eq!(
+            std::fs::read(fake.layout().transcript()).unwrap(),
+            transcript_before
+        );
+
+        // 身份回来了,状态搬进去了
+        let project = Project::load(&fake.layout().project_json()).unwrap();
+        assert_eq!(project.id.as_ref(), "demo");
+        let state = vidbrief_project::ProjectState::read_file(&fake.layout().state_file())
+            .unwrap()
+            .expect("升级之后状态文件该在");
+        assert_eq!(state.rev, 8);
+        assert!(state.progress.preprocess.done, "进度也搬过来了");
+        assert_eq!(state.progress.calibrate.rounds, 2);
+        assert!(
+            state
+                .shot(vidbrief_project::ShotId::FIRST)
+                .unwrap()
+                .check
+                .is_some()
+        );
+        assert_eq!(state.segments.len(), 1);
+        match state.segment(1).unwrap().conclusion() {
+            Some(vidbrief_project::Conclusion::Corrected { text, .. }) => {
+                assert_eq!(text, "Python 列表")
+            }
+            other => panic!("该收回「改了」这条结论:{other:?}"),
+        }
+
+        // 升级之后项目能正常打开,而且门读的是刚收回来的状态
+        let opened = OpenProject::from_layout(fake.layout().clone()).unwrap();
+        assert!(opened.state_note().is_none());
+        let s = crate::review::state(&opened).unwrap();
+        assert!(s.unchecked.shots.is_empty(), "{s:?}");
+        assert_eq!(s.unchecked.segments.len(), 1, "第 2 段还没核验:{s:?}");
+
+        // 幂等:已经是最新的就什么都不做
+        let again = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions::default(),
+        )
+        .unwrap();
+        assert!(again.note.is_some(), "第二次该什么都不做:{again:?}");
+        assert_eq!(again.rev, 8, "什么都不做就不该再推进修订号");
+    }
+
+    /// **底账默认不换**:材料被人手改过时,`upgrade` 只把话说清楚,不替人认下来。
+    ///
+    /// 这一条是"底账"这套东西的命门:要是随手跑一次 `upgrade` 就能把对不上的底账换掉,
+    /// 那它挡不住任何人 —— 而它挡的正是"把没审的行从文件里拿掉"这件事。
+    /// 真要认,得显式说 `--accept-material`。
+    #[test]
+    fn upgrade_keeps_a_mismatched_ledger_unless_asked_to_accept_it() {
+        let fake = crate::testkit::Fake::new("upgrade-ledger")
+            .with_transcript(&[(0.0, 2.0, "各位好"), (2.0, 4.0, "接着讲")])
+            .with_shot(1, 2.0);
+
+        // 手改正文:底账立刻对不上
+        let path = fake.layout().transcript();
+        let mut t = vidbrief_project::Transcript::load(&path).unwrap();
+        t.segments[0].text = "手改过的正文".into();
+        t.save(&path).unwrap();
+
+        let opened = OpenProject::from_layout(fake.layout().clone()).unwrap();
+        assert_eq!(crate::materials::content_mismatches(&opened).unwrap().len(), 1);
+
+        // ① 不加 flag:底账**不换**,而且报出"要认就加 --accept-material"
+        let out = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.content.iter().any(|l| l.contains("--accept-material")),
+            "该说清怎么才能认下它:{:?}",
+            out.content
+        );
+        let opened = OpenProject::from_layout(fake.layout().clone()).unwrap();
+        assert_eq!(
+            crate::materials::content_mismatches(&opened).unwrap().len(),
+            1,
+            "没让改的底账不许被换掉"
+        );
+
+        // ② 显式认了:重记底账,并对不上变对得上
+        let out = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions {
+                fresh: false,
+                accept_material: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            out.content.iter().any(|l| l.contains("重记了底账")),
+            "重记了要说出来:{:?}",
+            out.content
+        );
+        let opened = OpenProject::from_layout(fake.layout().clone()).unwrap();
+        assert!(crate::materials::content_mismatches(&opened).unwrap().is_empty());
+        // 核验记录**一条都没动**:这条路只管底账
+        let s = crate::review::state(&opened).unwrap();
+        assert_eq!(s.unchecked.shots.len(), 1, "那张图还是没看过:{s:?}");
+    }
+
+    /// 旧格式迁过来时,底账**一次记齐** —— 不然新状态一出生就带着一堆假警报。
+    #[test]
+    fn upgrade_records_ledgers_for_a_v1_project() {
+        let fake = crate::testkit::Fake::new("upgrade-ledger-v1")
+            .with_transcript(&[(0.0, 2.0, "各位好")])
+            .with_shot(1, 2.0);
+        make_v1(&fake, 3);
+        upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions::default(),
+        )
+        .unwrap();
+
+        let opened = OpenProject::from_layout(fake.layout().clone()).unwrap();
+        assert!(
+            crate::materials::content_mismatches(&opened).unwrap().is_empty(),
+            "迁移之后底账该是齐的"
+        );
+        assert_eq!(opened.state().content.len(), 2, "转录 + 截图,两份都在底账里");
+    }
+
+    /// `--fresh`:什么都不收,状态清零 —— 留给"状态坏了、也不想照明文将就"的人。
+    ///
+    /// 而且它**拿不到任何便宜**:清出来的状态是"什么都还没核验",门只会拦得更死。
+    #[test]
+    fn upgrade_fresh_starts_over_without_touching_the_materials() {
+        let fake = crate::testkit::Fake::new("upgrade-fresh")
+            .with_transcript(&[(0.0, 2.0, "各位好")])
+            .with_shot(1, 2.0);
+        fake.set_shot_check(1, Some(a_check()));
+        let shots_before = std::fs::read(fake.layout().shots_json()).unwrap();
+
+        // 状态读不动了 —— 正是这条路要救的场面
+        std::fs::write(fake.layout().state_file(), b"broken").unwrap();
+        let out = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions {
+                fresh: true,
+                accept_material: false,
+            },
+        )
+        .unwrap();
+        assert!(out.note.as_deref().unwrap_or("").contains("--fresh"));
+        assert_eq!(out.shot_checks, 0);
+
+        let state = vidbrief_project::ProjectState::read_file(&fake.layout().state_file())
+            .unwrap()
+            .expect("该写出一份能读的状态");
+        assert!(state.shots.is_empty(), "清零就该真的空");
+
+        // 材料原样:投影不写、内容不动
+        assert_eq!(std::fs::read(fake.layout().shots_json()).unwrap(), shots_before);
     }
 }

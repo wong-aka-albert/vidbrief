@@ -104,7 +104,7 @@ fn status_shows_identity_health_and_progress() {
     for expected in ["项目     proj", "名称", "目录", "源视频   source/video.mp4", "健康", "进度"] {
         assert!(text.contains(expected), "输出缺 `{expected}`:\n{text}");
     }
-    assert!(text.contains("格式   schema v1 / rev"), "{text}");
+    assert!(text.contains("格式   schema v2 / rev"), "{text}");
     // 刚建的项目四步都没做
     assert!(text.contains("① 前处理   — 未做"), "{text}");
     assert!(text.contains("② 校准     0 轮"), "{text}");

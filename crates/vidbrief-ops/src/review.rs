@@ -197,14 +197,16 @@ pub struct ReviewState {
 ///
 /// 缺文件一律按"空"算:没跑过前处理的项目不是错误。反过来,
 /// 刚转录完、一段都没核验的项目会如实报"322 段未核验" —— 那就是实情。
+///
+/// **但"缺文件"和"读不动"是两件事。** 前者按空算,后者**报错**:
+/// 一份读不动的清单不是"没有待办",而是"不知道有没有待办" ——
+/// 门在这两种情况下要做的判断正好相反(前者没得拦,后者必须拦)。
+/// M4 第五轮实测:`.ok()` 把一份读坏的候选清单当成了"没有候选",门一路放行。
 pub fn state(opened: &OpenProject) -> Result<ReviewState> {
-    let shots = crate::materials::shots(opened).unwrap_or_default();
-    let supplements =
-        vidbrief_project::SupplementRequests::load(&opened.layout().supplement_requests()).ok();
+    let shots = crate::materials::shots_optional(opened)?.unwrap_or_default();
+    let supplements = crate::materials::supplements(opened)?;
     // 有纠错稿就用纠错稿 —— 核验痕迹盖在它上面。
-    let transcript = crate::materials::effective_transcript(opened)
-        .ok()
-        .map(|(t, _, _)| t);
+    let transcript = crate::materials::effective_transcript_optional(opened)?.map(|(t, _, _)| t);
 
     let mut out = ReviewState::default();
 
@@ -281,14 +283,12 @@ pub fn counts(opened: &OpenProject) -> Result<ReviewCounts> {
 /// 和 [`counts`] 读同一批文件,回答的是另一个问题:计数问"有几项",
 /// 这里问"是哪几份"。改一个字不动计数,却会动这里 —— 这就是它存在的理由。
 ///
-/// 缺文件一律按"空"算,和 [`counts`] 一致:没跑过前处理的项目不是错误。
+/// 缺文件一律按"空"算,和 [`state`] 一致:没跑过前处理的项目不是错误。
+/// **读不动照旧报错** —— 摘要算不出来,就不能拿它当"没有变化"。
 pub fn digests(opened: &OpenProject) -> Result<MaterialDigests> {
-    let shots = crate::materials::shots(opened).unwrap_or_default();
-    let supplements =
-        vidbrief_project::SupplementRequests::load(&opened.layout().supplement_requests()).ok();
-    let transcript = crate::materials::effective_transcript(opened)
-        .ok()
-        .map(|(t, _, _)| t);
+    let shots = crate::materials::shots_optional(opened)?.unwrap_or_default();
+    let supplements = crate::materials::supplements(opened)?;
+    let transcript = crate::materials::effective_transcript_optional(opened)?.map(|(t, _, _)| t);
 
     Ok(MaterialDigests {
         segments: transcript
@@ -396,7 +396,7 @@ pub fn approve(opened: &mut OpenProject, note: Option<String>) -> Result<vidbrie
         digests: Some(digests(opened)?),
         note: note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
-    opened.project_mut().review.calibrate = Some(approval.clone());
+    opened.state_mut().review.calibrate = Some(approval.clone());
     opened.save()?;
     Ok(approval)
 }
@@ -417,26 +417,65 @@ pub fn approve(opened: &mut OpenProject, note: Option<String>) -> Result<vidbrie
 /// 照着用户最初那句交代决定的**(判断归 agent),不是这道门替他决定的 ——
 /// 用户说了"每个节点找我确认",模型自然会在全绿之后仍然停一停。
 pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
+    // ⓪ **材料还是工具写的那一份吗**
+    //
+    // 第①条是**从明文文件里数**"还有哪些没核验"的,所以文件里没有的行它看不见 ——
+    // 把没审的段/图/候选从文件里拿掉,活就被藏起来了(用户问的"它改了不还得改回去吗":
+    // **改**是这样,**拿掉**不是)。所以开口之前先拿**内容底账**对一遍。
+    //
+    // 改流程时别把这步挪到后面:它对不上时说的话与①②③都不一样,
+    // 而且它的去路是"重跑产生它的那一步",不是"接着审"。
+    // (例外「状态里一条底账都没有时不对账」写在 `content_mismatches` 里 ——
+    //  门与体检共用那一处判断,免得两边各写一份、迟早分叉。)
+    let stale = crate::materials::content_mismatches(opened)?;
+    if !stale.is_empty() {
+        let lines: Vec<String> = stale.iter().map(|s| format!("  - {s}")).collect();
+        bail!(
+            "**材料不是工具写出去的那一份了**,不能开始写总结。\n\
+             \n\
+             {}\n\
+             \n\
+             门数的'还有哪些没核验'是从这几份文件里数的 —— 行被拿掉了,活就看不见了,\n\
+             所以开口之前先跟**内容底账**对一遍(底账记在状态里,改不动)。\n\
+             \n\
+             **两条路,选一条:**\n\
+             ① 重跑产生它的那一步,把工具算出来的那份找回来:\n\
+               `preprocess`(转录与截图;它会报出作废了几条旧结论)、\n\
+               `find_supplement_candidates`(补图候选,要显式带上 `rebuild`)。\n\
+             ② 让用户确认这份改动是他要的,然后跑一次\n\
+               `vidbrief upgrade <项目目录> --accept-material`\n\
+               —— 那是**显式**把现在这份当成新底账(它会报出重记了哪几份、原来几条现在几条)。\n\
+             \n\
+             在这之前别拿宿主的文件工具去'改回去':改哪一份、改什么,上面已经写清了。",
+            lines.join("\n")
+        );
+    }
+
     let now = state(opened)?;
 
     // ① 活还没干完 —— 让模型接着审
+    //
+    // 报的每一项都要**点出能消掉它的那一步**(M4 第五轮的直接教训:门数着候选,
+    // 而当时没有任何工具能改候选的状态 —— 模型撞三轮过不去,最后自己改文件)。
     if !now.unchecked.is_empty() {
         bail!(
             "校准还没核验完,不能开始写总结。\n\
              \n\
              还没核验的:{}\n\
              \n\
-             接着审。**审过、没问题的段也要报上来**(`apply_corrections` 的 `reviewed`),\
-             不报等于没审 —— 门分不出'看过没问题'和'压根没看',只能当没看。",
+             接着审。三类各有各的入口,别漏:\n\
+             - **截图**:`get_shot` 看过之后用 `record_shot_check` 记结论;\n\
+             - **转录段**:审过、没问题的也要报上来(`apply_corrections` 的 `reviewed`),\
+             不报等于没审 —— 门分不出'看过没问题'和'压根没看';\n\
+             - **补图候选**:每一条都要结论,补或不补都用 `disposition_supplements` 报,\
+             并给一句理由。",
             now.unchecked.describe().unwrap_or_default()
         );
     }
 
     // ② 有结论,但**凭据对不上材料** —— 那也是"活没干完",而且是模型自己修得了的
-    let shots = crate::materials::shots(opened).unwrap_or_default();
-    let transcript = crate::materials::effective_transcript(opened)
-        .ok()
-        .map(|(t, _, _)| t);
+    let shots = crate::materials::shots_optional(opened)?.unwrap_or_default();
+    let transcript = crate::materials::effective_transcript_optional(opened)?.map(|(t, _, _)| t);
     let bad = bad_evidence(opened, &shots, transcript.as_ref());
     if !bad.is_empty() {
         let lines: Vec<String> = bad
@@ -459,7 +498,7 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
         // 已经有用户拍板(或模型在授权下自己拍的板)覆盖着这一批 → 放行。
         // 判据是内容摘要对得上:那之后材料没再动过,这一批还是当初那一批。
         let signed = opened
-            .project()
+            .state()
             .review
             .calibrate
             .as_ref()
@@ -485,10 +524,15 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
              等人拍板:{}\n\
              {since}\
              \n\
-             去问用户,然后把他的决定**落到那些条目上**(截图用 `record_shot_check` 重写结论,\
-             转录用 `apply_corrections` 改定或去掉存疑标记)。\
-             他要是说'这些我知道,就这样过',把那句话放进 `approve` 的 `note` —— \
-             别把发现改成没发现。",
+             **两条路,选一条:**\n\
+             ① 问过他,把他的话落到条目上 —— 转录用 `apply_corrections` 改定,\
+             截图用 `record_shot_check` 重写结论;他说'先留着 / 我也不确定 / 别管了'也是一句话,\
+             把它放进 `approve` 的 `note`(`approve` 记的是'用户在这一步拍过板',\
+             **包括他决定先这样**)。落定之后接着往下走。\n\
+             ② 保持存疑、就此收手 —— 什么都不动,把这几条在对话里说清,结束这一轮等他。\n\
+             \n\
+             **问过的不要再问一遍。** 材料上没有'问过'的痕迹,只有你手上的对话有 ——\
+             先看一眼自己是不是已经问过、答过了。",
             now.needs_user.describe().unwrap_or_default()
         );
     }
@@ -606,30 +650,16 @@ mod tests {
     use super::*;
     use crate::testkit::Fake;
 
-    /// 给一张图写回结论。
-    ///
-    /// 不走 `record_shot_check`:那要构造一堆上下文,而这里测的是门。
+    /// 一条"看起来像真 agent 写的"看图结论。
     ///
     /// **默认就带一条 `issues`,也默认 `match = true`** —— 真 agent 就是这么写的:
     /// 「画面无任何标题文字,本节标题无法从画面上核实」这类**观察**。
     /// 把它写成默认,是因为"`issues` 非空"恰恰是这段代码最容易被判错的那种输入。
-    fn check_shot(fake: &Fake, id: u32, confidence: vidbrief_project::Confidence) {
-        check_shot_with(fake, id, confidence, true);
-    }
-
-    /// 同上,但可以指定 `match`。`match = false` 是"画面与口播对不上"这种**发现**。
-    fn check_shot_with(
-        fake: &Fake,
-        id: u32,
+    fn a_check(
         confidence: vidbrief_project::Confidence,
         matches: bool,
-    ) {
-        let path = fake.layout().shots_json();
-        let mut shots = vidbrief_project::Shots::load(&path).unwrap();
-        let shot = shots
-            .get_mut(vidbrief_project::ShotId::new(id).unwrap())
-            .unwrap();
-        shot.check = Some(vidbrief_project::ShotCheck {
+    ) -> vidbrief_project::ShotCheck {
+        vidbrief_project::ShotCheck {
             r#match: matches,
             audio_visual_sync: true,
             type_read: "画面内容".into(),
@@ -641,8 +671,32 @@ mod tests {
                 quote: "各位好".into(),
             }),
             checked_at: vidbrief_project::now(),
-        });
-        shots.save(&path).unwrap();
+        }
+    }
+
+    /// 给一张图写回结论。
+    ///
+    /// **写的是状态,而且是手上这个已打开的项目的那一份** —— 门读的就是它。
+    /// (明文那几栏只是投影:拿它造场景,测的就不是门了,而且是绿着骗人的那种。)
+    fn check_shot(
+        opened: &mut crate::project::OpenProject,
+        id: u32,
+        confidence: vidbrief_project::Confidence,
+    ) {
+        check_shot_with(opened, id, confidence, true);
+    }
+
+    /// 同上,但可以指定 `match`。`match = false` 是"画面与口播对不上"这种**发现**。
+    fn check_shot_with(
+        opened: &mut crate::project::OpenProject,
+        id: u32,
+        confidence: vidbrief_project::Confidence,
+        matches: bool,
+    ) {
+        opened
+            .state_mut()
+            .shot_mut(vidbrief_project::ShotId::new(id).unwrap())
+            .check = Some(a_check(confidence, matches));
     }
 
     fn high() -> vidbrief_project::Confidence {
@@ -653,7 +707,7 @@ mod tests {
     }
 
     /// 报告这些转录段审过了。
-    fn review_segments(opened: &crate::project::OpenProject, ids: &[u32]) {
+    fn review_segments(opened: &mut crate::project::OpenProject, ids: &[u32]) {
         crate::conclusions::apply_corrections(opened, &[], ids).unwrap();
     }
 
@@ -701,20 +755,25 @@ mod tests {
     #[test]
     fn finishing_the_work_opens_the_gate_without_anyone_signing() {
         let fake = two_shots("review-autopilot");
-        let opened = fake.open();
+        let mut opened = fake.open();
 
-        check_shot(&fake, 1, high());
-        check_shot(&fake, 2, high());
-        review_segments(&opened, &[1, 2]);
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, high());
+        review_segments(&mut opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("活干完了就该过");
         assert!(
-            opened.project().review.calibrate.is_none(),
+            opened.state().review.calibrate.is_none(),
             "这一档走完,不该留下任何签字"
         );
 
         // 补一张新图 → 它还没被看过 → 门又拦上(而且是"活没干完"那一档)
+        //
+        // 夹具是**直接写文件**的(不走 `extract_shot`),所以这里要把已经核验的那份先落盘、
+        // 再重新打开 —— 真项目里补图走工具,底账与状态是同一趟写进去的。
+        opened.save().unwrap();
         fake.add_shot(3, 9.0, vidbrief_project::ShotOrigin::AgentRequest);
+        let opened = fake.open();
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s003"), "{err}");
         assert!(!err.contains("approve"), "{err}");
@@ -724,11 +783,11 @@ mod tests {
     #[test]
     fn pending_user_items_shut_the_gate_and_are_named() {
         let fake = two_shots("review-needs-user");
-        let opened = fake.open();
+        let mut opened = fake.open();
 
-        check_shot(&fake, 1, high());
-        check_shot(&fake, 2, low()); // 这一张模型自己说没把握
-        review_segments(&opened, &[1, 2]);
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, low()); // 这一张模型自己说没把握
+        review_segments(&mut opened, &[1, 2]);
 
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("等人拍板"), "{err}");
@@ -742,18 +801,18 @@ mod tests {
     #[test]
     fn uncertain_segments_count_as_waiting_for_the_user() {
         let fake = two_shots("review-uncertain");
-        let opened = fake.open();
-        check_shot(&fake, 1, high());
-        check_shot(&fake, 2, high());
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, high());
 
         crate::conclusions::apply_corrections(
-            &opened,
+            &mut opened,
             &[crate::conclusions::CorrectionInput {
                 segment_id: 1,
-                corrected_text: None, // 不改,只标存疑
-                kind: vidbrief_project::CorrectionType::Uncertain,
-                note: Some("元祖 → 元组?".into()),
-                reason: "同音,没把握".into(),
+                conclusion: vidbrief_project::Conclusion::Uncertain {
+                    note: "元祖 → 元组?".into(),
+                    reason: "同音,没把握".into(),
+                },
             }],
             &[2],
         )
@@ -771,9 +830,9 @@ mod tests {
     fn a_waiver_covers_only_the_batch_that_was_pending() {
         let fake = two_shots("review-waiver");
         let mut opened = fake.open();
-        check_shot(&fake, 1, low());
-        check_shot(&fake, 2, high());
-        review_segments(&opened, &[1, 2]);
+        check_shot(&mut opened, 1, low());
+        check_shot(&mut opened, 2, high());
+        review_segments(&mut opened, &[1, 2]);
 
         assert!(gate_calibrate(&opened).is_err(), "先得真被挡住");
 
@@ -781,7 +840,7 @@ mod tests {
         gate_calibrate(&opened).expect("拍板了,这一批就放过");
 
         // 又冒出来一条要拍板的
-        check_shot(&fake, 2, low());
+        check_shot(&mut opened, 2, low());
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s002"), "新冒出来的那条要点出来:{err}");
         assert!(
@@ -798,18 +857,10 @@ mod tests {
     #[test]
     fn dropped_shots_do_not_need_checking() {
         let fake = two_shots("review-dropped");
-        {
-            let path = fake.layout().shots_json();
-            let mut shots = vidbrief_project::Shots::load(&path).unwrap();
-            shots
-                .get_mut(vidbrief_project::ShotId::new(2).unwrap())
-                .unwrap()
-                .status = vidbrief_project::ShotStatus::Drop;
-            shots.save(&path).unwrap();
-        }
-        let opened = fake.open();
-        check_shot(&fake, 1, high());
-        review_segments(&opened, &[1, 2]);
+        fake.set_shot_status(2, vidbrief_project::ShotStatus::Drop);
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+        review_segments(&mut opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("判了 drop 的图不该挡着");
     }
@@ -830,40 +881,22 @@ mod tests {
     #[test]
     fn findings_do_not_make_a_shot_need_the_user() {
         let fake = two_shots("review-findings");
-        let opened = fake.open();
+        let mut opened = fake.open();
         // 满满一条 issues,而且判了 match=false —— 都是有话要说,不是定不了
-        check_shot_with(&fake, 1, high(), false);
-        check_shot_with(&fake, 2, high(), false);
-        review_segments(&opened, &[1, 2]);
+        check_shot_with(&mut opened, 1, high(), false);
+        check_shot_with(&mut opened, 2, high(), false);
+        review_segments(&mut opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("模型说它有把握,门就该放行 —— 哪怕它记了一堆发现");
 
         // 反过来:模型自己说没把握,哪怕一句 issues 都没有,也要等人
         let fake2 = two_shots("review-undecided");
-        {
-            let path = fake2.layout().shots_json();
-            let mut shots = vidbrief_project::Shots::load(&path).unwrap();
-            shots
-                .get_mut(vidbrief_project::ShotId::new(1).unwrap())
-                .unwrap()
-                .check = Some(vidbrief_project::ShotCheck {
-                r#match: true,
-                audio_visual_sync: true,
-                type_read: "画面内容".into(),
-                neighbor_text: None,
-                issues: Vec::new(),
-                confidence: low(),
-                evidence: Some(vidbrief_project::Evidence {
-                    segment: 1,
-                    quote: "各位好".into(),
-                }),
-                checked_at: vidbrief_project::now(),
-            });
-            shots.save(&path).unwrap();
-        }
-        let opened2 = fake2.open();
-        check_shot(&fake2, 2, high());
-        review_segments(&opened2, &[1, 2]);
+        let mut one = a_check(low(), true);
+        one.issues.clear(); // 一句 issues 都没有,只是它自己说没把握
+        fake2.set_shot_check(1, Some(one));
+        let mut opened2 = fake2.open();
+        check_shot(&mut opened2, 2, high());
+        review_segments(&mut opened2, &[1, 2]);
 
         let err = gate_calibrate(&opened2).unwrap_err().to_string();
         assert!(err.contains("等人拍板"), "{err}");
@@ -877,54 +910,55 @@ mod tests {
     #[test]
     fn evidence_is_checked_against_the_material() {
         let fake = two_shots("review-evidence");
-        let opened = fake.open();
-        check_shot(&fake, 1, high());
-        check_shot(&fake, 2, high());
-        review_segments(&opened, &[1, 2]);
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, high());
+        review_segments(&mut opened, &[1, 2]);
 
         gate_calibrate(&opened).expect("凭据对得上就该过");
 
-        let set_evidence = |ev: Option<vidbrief_project::Evidence>| {
-            let path = fake.layout().shots_json();
-            let mut shots = vidbrief_project::Shots::load(&path).unwrap();
-            shots
-                .get_mut(vidbrief_project::ShotId::new(1).unwrap())
-                .unwrap()
-                .check
-                .as_mut()
-                .unwrap()
-                .evidence = ev;
-            shots.save(&path).unwrap();
-        };
+        fn set_evidence(opened: &mut crate::project::OpenProject, ev: Option<vidbrief_project::Evidence>) {
+            let mut check = a_check(high(), true);
+            check.evidence = ev;
+            opened.state_mut().shot_mut(vidbrief_project::ShotId::FIRST).check = Some(check);
+        }
 
         // ① 没凭据
-        set_evidence(None);
+        set_evidence(&mut opened, None);
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s001"), "{err}");
         assert!(err.contains("没有凭据"), "{err}");
 
         // ② 引的那句话,材料里没有 —— 也就是"编的"
-        set_evidence(Some(vidbrief_project::Evidence {
-            segment: 1,
-            quote: "画面右上角写着 Python 列表".into(),
-        }));
+        set_evidence(
+            &mut opened,
+            Some(vidbrief_project::Evidence {
+                segment: 1,
+                quote: "画面右上角写着 Python 列表".into(),
+            }),
+        );
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("不是这么写的"), "要说清哪里对不上:{err}");
 
         // ③ 材料后来被改过 —— 结论是照着旧文下的,该重看
-        set_evidence(Some(vidbrief_project::Evidence {
-            segment: 2,
-            quote: "接着讲".into(),
-        }));
+        set_evidence(
+            &mut opened,
+            Some(vidbrief_project::Evidence {
+                segment: 2,
+                quote: "接着讲".into(),
+            }),
+        );
         crate::conclusions::apply_corrections(
-            &opened,
+            &mut opened,
             &[crate::conclusions::CorrectionInput {
-                segment_id: 2,
-                corrected_text: Some("接下来继续讲".into()),
-                kind: vidbrief_project::CorrectionType::Other,
-                note: None,
-                reason: "测试".into(),
-            }],
+                    segment_id: 2,
+                    conclusion: vidbrief_project::Conclusion::Corrected {
+                        text: "接下来继续讲".into(),
+                        kind: vidbrief_project::CorrectionType::Other,
+                        note: String::new(),
+                        reason: "测试".into(),
+                    },
+                }],
             &[],
         )
         .unwrap();
@@ -933,10 +967,13 @@ mod tests {
         assert!(err.contains("不是这么写的"), "{err}");
 
         // 把凭据改对,又放行
-        set_evidence(Some(vidbrief_project::Evidence {
-            segment: 1,
-            quote: "各位好".into(),
-        }));
+        set_evidence(
+            &mut opened,
+            Some(vidbrief_project::Evidence {
+                segment: 1,
+                quote: "各位好".into(),
+            }),
+        );
         gate_calibrate(&opened).expect("凭据补对了就该过");
     }
 
@@ -952,6 +989,221 @@ mod tests {
         assert_eq!(a.note, None, "空说明等于没说明");
     }
 
+    /// **改一个字也发现得了,而且门要把两条去路都点出来。**
+    ///
+    /// 底账按**内容**算(hash 的是段号/时刻/正文),所以:
+    /// - 改正文 → 对不上 → 拦;
+    /// - 换个缩进、重排键序 → 对得上 → 不拦(那是同一份内容换个写法)。
+    #[test]
+    fn editing_the_material_text_is_caught_and_the_ways_out_are_named() {
+        let fake = two_shots("review-content-edit");
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, high());
+        review_segments(&mut opened, &[1, 2]);
+        gate_calibrate(&opened).expect("先确认它是干净的");
+
+        // ① 重排格式(同一个内容换个写法)—— **不该**被当成"材料变了"
+        let mut shots = vidbrief_project::Shots::load(&fake.layout().shots_json()).unwrap();
+        shots.sort_by_time();
+        shots.save(&fake.layout().shots_json()).unwrap();
+        assert!(
+            crate::materials::content_mismatches(&opened).unwrap().is_empty(),
+            "缩进/键序变了不算材料变了"
+        );
+
+        // ② 改正文一个字 —— 该被发现
+        let path = fake.layout().transcript();
+        let mut t = vidbrief_project::Transcript::load(&path).unwrap();
+        t.segments[0].text = "各位好,我们今天讲列表".into();
+        t.save(&path).unwrap();
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("不是工具写出去的那一份"), "{err}");
+        assert!(err.contains("transcript.json"), "得说清是哪一份:{err}");
+        assert!(err.contains("322 条") || err.contains("2 条"), "得说清几条:{err}");
+        // 两条去路都要写出来 —— 没有出路的规则不许进门的话术
+        assert!(err.contains("preprocess"), "{err}");
+        assert!(err.contains("find_supplement_candidates"), "{err}");
+        assert!(err.contains("--accept-material"), "{err}");
+    }
+
+    /// 工具自己写回去一次,底账就跟着更新 —— 拦完了总得能走过去。
+    #[test]
+    fn a_tool_write_refreshes_the_ledger() {
+        let fake = two_shots("review-ledger-refresh");
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+        check_shot(&mut opened, 2, high());
+        review_segments(&mut opened, &[1, 2]);
+
+        // 手改一份材料 → 拦
+        let path = fake.layout().transcript();
+        let mut t = vidbrief_project::Transcript::load(&path).unwrap();
+        t.segments[0].text = "改过的正文".into();
+        t.save(&path).unwrap();
+        assert!(gate_calibrate(&opened).is_err());
+
+        // 走工具给这一段下个结论(工具写的是状态,不动原文)—— 底账没变,还是拦
+        crate::conclusions::apply_corrections(
+            &mut opened,
+            &[crate::conclusions::CorrectionInput {
+                segment_id: 2,
+                conclusion: vidbrief_project::Conclusion::Kept {
+                    note: "原句通顺".into(),
+                    reason: "上下文".into(),
+                },
+            }],
+            &[],
+        )
+        .unwrap();
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("不是工具写出去的那一份"), "{err}");
+
+        // **恢复原文** → 底账又对上了(改动写成结论,原文不动 —— 这才是正路)
+        t.segments[0].text = "各位好".into();
+        t.save(&path).unwrap();
+        gate_calibrate(&opened).expect("原文回来了,底账就对上了");
+    }
+
+    /// **手改明文投影,门照旧拦着。**
+    ///
+    /// 这是"状态改走非明文"要买的那件事:模型手里有宿主给的文件工具,
+    /// 明文材料谁都能写 —— 而判据不能是能随手写的东西。
+    ///
+    /// 这条测试**不碰状态文件**,只改 `shots.json` 里那几栏:门读的是状态,
+    /// 所以它连看都不看那几栏一眼。反过来也验一遍:读材料那条路
+    /// (`materials::shots`)同样以状态为准,免得模型改完再读回来自己骗自己。
+    #[test]
+    fn editing_the_plaintext_projection_does_not_open_the_gate() {
+        let fake = two_shots("review-forged-plaintext");
+        let opened = fake.open();
+
+        // 明文里把两张图都写成"看过了、很有把握"
+        let path = fake.layout().shots_json();
+        let mut shots = vidbrief_project::Shots::load(&path).unwrap();
+        for shot in &mut shots.shots {
+            shot.check = Some(a_check(high(), true));
+        }
+        shots.save(&path).unwrap();
+
+        // 门照旧拦:状态里一张都没核验过
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("还没核验完"), "{err}");
+        assert!(err.contains("s001"), "{err}");
+
+        // 读材料那条路也不认那几栏
+        let read_back = crate::materials::shots(&opened).unwrap();
+        assert!(
+            read_back.shots.iter().all(|s| s.check.is_none()),
+            "明文那几栏只是投影,读回来也得以状态为准"
+        );
+        // 而且这不算"材料变了":底账算的是**内容**(哪张图、哪一刻、存在哪),不含结论
+        assert!(
+            crate::materials::content_mismatches(&opened).unwrap().is_empty(),
+            "改投影里的结论,不该被当成材料被人换过"
+        );
+    }
+
+    /// **把明文的行拿掉,就把活藏起来了。** —— 这条现在**必须红**,它记录的是一个真实的洞。
+    ///
+    /// 门的第①条数的"还没核验的转录段"是从**明文那份文件里**数出来的:
+    /// 文件里没有的段,它当然看不见。于是模型不用审 322 段 ——
+    /// 把没审的段从 `transcript.json` 里拿掉,门就以为活干完了。
+    ///
+    /// 用户问的那句「门控不放过,它改了不还得改回去吗」:**改**是这样(改多了得改回去),
+    /// **拿掉**不是 —— 删掉了行,门反而看不见那部分活。这条测试就是把这句话钉死。
+    #[test]
+    fn removing_rows_from_the_plaintext_must_not_hide_work() {
+        // 一个没有截图的项目:把"转录"这一档单独隔离出来看
+        let fake = Fake::new("review-deleted-rows")
+            .with_transcript(&[(0.0, 2.0, "各位好"), (2.0, 4.0, "接着讲")])
+            .with_curve(10);
+        let opened = fake.open();
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("seg 1"), "本来该拦在这两段上:{err}");
+
+        // 把转录**整份拿掉** —— 门不该因此就当"没有段落要核验"
+        std::fs::remove_file(fake.layout().transcript()).unwrap();
+        let opened = fake.open();
+        match gate_calibrate(&opened) {
+            Ok(()) => panic!("转录被整份拿掉了,门却放行了 —— 活被藏起来了"),
+            Err(e) => {
+                assert!(
+                    e.to_string().contains("转录"),
+                    "拦住了,但没说清是转录这一档:{e}"
+                );
+            }
+        }
+    }
+
+    /// **门和体检必须说同一件事。** —— 这是"规则一多就左脚拌右脚"的探针。
+    ///
+    /// 规则多了以后,最容易出的不是"某条规则错了",而是**两条规则各说各的**:
+    /// 体检说没事、门却拦着(用户拿到的是一句没法照做的话),或者反过来。
+    ///
+    /// 这一条把几种场面摆一排,对每一个分别问门、问 `vidbrief status`,
+    /// 断言"内容底账"这一条两边说法**一致**:门因它拦 ⟺ 体检把它列出来。
+    /// 将来谁把判据改成两份,这条就会红。
+    #[test]
+    fn the_gate_and_the_status_view_agree_about_the_ledger() {
+        /// 门是不是因为**底账**拦的(而不是①②③)。
+        fn gate_blocked_on_ledger(opened: &crate::project::OpenProject) -> bool {
+            match gate_calibrate(opened) {
+                Ok(()) => false,
+                Err(e) => e.to_string().contains("不是工具写出去的那一份"),
+            }
+        }
+        fn status_lists_it(fake: &Fake) -> bool {
+            !crate::inspect::scan_materials(fake.layout()).content_stale.is_empty()
+        }
+
+        let checked = |tag: &str| {
+            let fake = two_shots(tag);
+            let mut opened = fake.open();
+            check_shot(&mut opened, 1, high());
+            check_shot(&mut opened, 2, high());
+            review_segments(&mut opened, &[1, 2]);
+            (fake, opened)
+        };
+
+        // ① 干净的:谁都不该说话
+        let (fake, opened) = checked("agree-clean");
+        assert!(!gate_blocked_on_ledger(&opened));
+        assert!(!status_lists_it(&fake));
+
+        // ② 转录正文被改:两边都得说
+        let (fake, opened) = checked("agree-text-edited");
+        let mut t = vidbrief_project::Transcript::load(&fake.layout().transcript()).unwrap();
+        t.segments[0].text = "手改".into();
+        t.save(&fake.layout().transcript()).unwrap();
+        assert!(gate_blocked_on_ledger(&opened), "门该因底账拦");
+        assert!(status_lists_it(&fake), "体检也该列出来");
+
+        // ③ 截图清单被改(`t` 是内容):
+        let (fake, opened) = checked("agree-shots-edited");
+        let mut shots = vidbrief_project::Shots::load(&fake.layout().shots_json()).unwrap();
+        shots.shots[0].t = 9.5;
+        shots.save(&fake.layout().shots_json()).unwrap();
+        assert!(gate_blocked_on_ledger(&opened), "门该因底账拦");
+        assert!(status_lists_it(&fake), "体检也该列出来");
+
+        // ④ 材料**整份不在**了(底账里记着它有):
+        let (fake, opened) = checked("agree-gone");
+        std::fs::remove_file(fake.layout().transcript()).unwrap();
+        assert!(gate_blocked_on_ledger(&opened), "拿掉整份更要拦");
+        assert!(status_lists_it(&fake), "体检也该列出来");
+
+        // ⑤ **一条底账都没有**(刚建的项目 / 状态刚重起):两边都不该说话 ——
+        //    那是"还没记过账",交给第①条按"还没核验"拦
+        let (fake, mut opened) = checked("agree-no-ledger");
+        opened.state_mut().content.clear();
+        opened.save().unwrap();
+        assert!(!gate_blocked_on_ledger(&opened), "没底账不是'材料被换了'");
+        assert!(!status_lists_it(&fake), "体检也不该列出它");
+    }
+
     /// 空项目:材料本来就是空的,三态全是 0 —— 门直接放行。
     ///
     /// 这条曾经翻过车:第一版拿"摘要是不是空表"当"有没有摘要",于是空项目
@@ -965,5 +1217,136 @@ mod tests {
 
     fn describe(s: &ReviewState) -> String {
         format!("{:?}", s.unchecked)
+    }
+
+    /// **读不动 ≠ 没有。** 候选清单在、但读不动时,门必须拦住 —— 而且要说清怎么自救。
+    ///
+    /// 这条是 M4 第五轮实测换来的:那次模型手写了一份清单(状态值全不合法),
+    /// `load().ok()` 把它当成了"没有候选",门数出来 0 条、一路放行。
+    /// **门不是被骗了,是它的输入被清空了。**
+    #[test]
+    fn an_unreadable_supplement_list_blocks_instead_of_passing() {
+        let fake = Fake::new("review-broken-supplement");
+        std::fs::write(fake.layout().supplement_requests(), b"{ not json").unwrap();
+        let opened = fake.open();
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("supplement_requests.json"), "{err}");
+        assert!(err.contains("读不动"), "{err}");
+        // 报的每一项都要有一步能做掉它 —— 这里就是"重算一份"
+        assert!(err.contains("find_supplement_candidates"), "{err}");
+        // 而且不许说成"没有候选"
+        assert!(!err.contains("还没有核验的:补图候选 0"), "{err}");
+    }
+
+    /// 截图清单读不动:同样按"还没校准"拦,不许当"一张图都没有"。
+    #[test]
+    fn an_unreadable_shot_list_blocks_instead_of_passing() {
+        let fake = Fake::new("review-broken-shots");
+        std::fs::write(fake.layout().shots_json(), b"[ broken").unwrap();
+        let opened = fake.open();
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("shots.json"), "{err}");
+        assert!(err.contains("读不动"), "{err}");
+    }
+
+    /// **状态读不动 → 整个项目打不开,而且要把去路说出来。**
+    ///
+    /// 状态是每一件工具都要用的东西(谁审过、哪张图看过、哪一步拍过板都在里面):
+    /// 让它半路才发现,报错就会零散在十几个地方,每个说法还不一样。
+    /// 所以报在**打开项目**这一步,而且这句话必须点名怎么自救。
+    #[test]
+    fn an_unreadable_state_stops_everything_with_a_way_out() {
+        let fake = Fake::new("review-broken-state").with_transcript(&[(0.0, 1.0, "各位好")]);
+        std::fs::write(fake.layout().state_file(), b"not ours").unwrap();
+
+        let err = crate::project::OpenProject::from_layout(fake.layout().clone())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("状态文件读不动"), "{err}");
+        assert!(err.contains("upgrade"), "得说清怎么自救:{err}");
+        assert!(!err.contains("删"), "不许出现『删』:{err}");
+    }
+
+    /// **状态文件不在 → 按"什么都还没核验"算(拦),不许按"没有待办"算(放行)。**
+    ///
+    /// 这是那次事故的方向问题:读不到时门要往**保守**那头倒。
+    /// 拿不到任何便宜 —— 这正是它敢不报错的原因。
+    #[test]
+    fn a_missing_state_file_reads_as_nothing_verified() {
+        let fake = two_shots("review-no-state");
+        std::fs::remove_file(fake.layout().state_file()).unwrap();
+        let opened = fake.open();
+        assert!(
+            opened.state_note().is_some_and(|n| n.contains("状态文件")),
+            "状态不在要说出来:{:?}",
+            opened.state_note()
+        );
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("还没核验完"), "该按'都还没核验'拦:{err}");
+        assert!(err.contains("s001"), "{err}");
+    }
+
+    /// 反向:**文件不在**照旧不是错误 —— 没跑过前处理的项目不该被这道门卡住。
+    ///
+    /// 两个方向都要钉:混成一件才是那次事故的根。
+    #[test]
+    fn a_missing_file_is_still_just_an_empty_project() {
+        let fake = Fake::new("review-missing-files");
+        let opened = fake.open();
+        assert!(!fake.layout().shots_json().exists());
+        assert!(!fake.layout().supplement_requests().exists());
+        let s = state(&opened).unwrap();
+        assert!(s.unchecked.is_empty() && s.needs_user.is_empty());
+    }
+
+    /// **门报的每一项,都要点出能消掉它的那一步。** 没有出路的规则不许进门的话术。
+    ///
+    /// 这条是拿一次死循环换来的:M4 第五轮门数着 298 条候选,而当时**没有任何工具
+    /// 能改候选的状态** —— 模型撞了三轮过不去,最后自己动手改文件(值还写错了),
+    /// 门跟着瞎掉、一路放行。
+    #[test]
+    fn every_gate_rule_names_the_step_that_clears_it() {
+        let fake =
+            Fake::new("review-gate-words").with_transcript(&[(0.0, 2.0, "大家看一下这张图")]);
+        let opened = fake.open();
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        for tool in [
+            "record_shot_check",
+            "apply_corrections",
+            "disposition_supplements",
+        ] {
+            assert!(err.contains(tool), "门的话里没点出 `{tool}`:{err}");
+        }
+    }
+
+    /// ③ 等人拍板那一条:**两个出口都要说出来**,而且不许同一件事问两遍。
+    #[test]
+    fn the_waiting_rule_names_both_exits() {
+        let fake = Fake::new("review-two-exits").with_transcript(&[(0.0, 2.0, "这个叫元祖")]);
+        let mut opened = fake.open();
+
+        {
+            let entry = opened.state_mut().segment_mut(1);
+            entry.set_conclusion(Some(vidbrief_project::Conclusion::Uncertain {
+                note: "元祖 疑为 元组".into(),
+                reason: "系列名".into(),
+            }));
+            entry.checked_at = Some(vidbrief_project::now());
+        }
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("apply_corrections"), "{err}");
+        assert!(err.contains("approve"), "{err}");
+        assert!(
+            err.contains("收手"),
+            "第二个出口(保持存疑、就此收手)没说出来:{err}"
+        );
+        assert!(err.contains("不要再问一遍"), "{err}");
+
+        // 出口②:他说"我不确定,先保留"也是拍板 —— 记下来门就该开
+        approve(&mut opened, Some("用户说他也不确定,先保留".into())).unwrap();
+        gate_calibrate(&opened).expect("记下他的拍板,门就该开");
     }
 }

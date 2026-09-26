@@ -43,6 +43,14 @@ pub fn write_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// 同 [`write_atomic`],但写入已序列化好的文本(用于 `.md`、`.html` 等)。
 pub fn write_atomic_str(path: &Path, text: &str) -> Result<()> {
+    write_bytes_atomic(path, text.as_bytes())
+}
+
+/// 原子写**任意字节**(用于 `state.bin` 这种非明文文件)。
+///
+/// 文本那两条最终都走到这里 —— "先写同目录临时文件、`sync_all`、再 rename"那套动作
+/// 全仓只此一份,免得哪天只改了一处。
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("路径没有父目录,无法写入:{}", path.display()))?;
@@ -62,7 +70,7 @@ pub fn write_atomic_str(path: &Path, text: &str) -> Result<()> {
     let write_result = (|| -> Result<()> {
         let mut file = fs::File::create(&tmp)
             .with_context(|| format!("创建临时文件失败:{}", tmp.display()))?;
-        file.write_all(text.as_bytes())
+        file.write_all(bytes)
             .with_context(|| format!("写入失败:{}", tmp.display()))?;
         file.sync_all()
             .with_context(|| format!("刷盘失败:{}", tmp.display()))?;

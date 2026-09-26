@@ -94,15 +94,33 @@ pub struct CorrectionBrief {
 }
 
 /// 读齐一个项目的全部材料,组装成视图数据。
+///
+/// # 结论那一半来自状态,不来自明文
+///
+/// `shots.json` / `transcript.fixed.json` 里那几栏是**投影**(见
+/// [`vidbrief_project::state`]):谁都能手改,所以这里不拿它当判据 ——
+/// 读得到状态就以状态为准,读不到才退回投影(视图是"看一眼"的东西,
+/// 状态坏了也得能画出来;真话由 `vidbrief status` 说)。
 pub fn collect(layout: &Layout, timeline_rel: &str) -> Result<TimelineData> {
     let project = Project::load(&layout.project_json()).context("读 project.json 失败")?;
     let meta = VideoMeta::load(&layout.video_meta()).context("读 video.meta.json 失败")?;
     let curve = ChangeCurve::load(&layout.change_curve())
         .context("读 change_curve.json 失败 —— 先跑 `vidbrief preprocess`")?;
     let regions = DenseRegions::load(&layout.dense_regions()).context("读 dense_regions.json 失败")?;
-    let shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
+    let mut shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
     // 还没有转录是**正常状态**(源视频可能没音轨),不该让视图渲染不出来
-    let transcript = Transcript::load(&layout.transcript()).ok();
+    let mut transcript = Transcript::load(&layout.transcript()).ok();
+
+    match vidbrief_project::ProjectState::read_file(&layout.state_file()) {
+        Ok(Some(state)) => {
+            state.apply_to_shots(&mut shots);
+            if let Some(t) = transcript.as_mut() {
+                state.apply_to_transcript(t);
+            }
+        }
+        // 状态不在 / 读不动:退回明文投影(它至少是上一次写出去的样子)
+        Ok(None) | Err(_) => {}
+    }
 
     Ok(TimelineData {
         project: ProjectBrief {
@@ -170,14 +188,194 @@ pub fn collect(layout: &Layout, timeline_rel: &str) -> Result<TimelineData> {
                         end: s.end,
                         text: s.effective_text().to_string(),
                         corrected: s.is_corrected(),
-                        correction: s.correction.as_ref().map(|c| CorrectionBrief {
-                            note: c.note.clone(),
-                            reason: c.reason.clone(),
+                        correction: s.conclusion.as_ref().map(|c| CorrectionBrief {
+                            note: c.note().to_string(),
+                            reason: c.reason().to_string(),
                         }),
                     })
                     .collect()
             })
             .unwrap_or_default(),
+    })
+}
+
+// ── 校准对照表(DESIGN §9.3)─────────────────────────────────────────
+
+/// 校准对照表要的全部数据。**与时间线同一条规矩:一份自包含的数据,打开就能看。**
+///
+/// 这一页要替人回答联调提出的四个问题(`docs/devlog/PLAN.md` 近期待办):
+///
+/// | 问题 | 这一页怎么答 |
+/// |------|-------------|
+/// | 哪些图是空的 | 缩略图按时刻并排,空的肉眼即见;弃用标记与理由是 agent 写下的 |
+/// | 哪几张是同一张幻灯片 | 同上 —— 并排的小图,重复一眼可见;agent 的弃用理由也在这 |
+/// | 哪几段转录被动过 | 每段的结论(改了/决定不改/存疑未改)+ 原文与现读法并排 |
+/// | 这个结论是哪一轮写的 | 每条结论带 `checked_at`;页尾**原样内嵌**校准日志,轮次时间段在日志里 |
+///
+/// 不做的事:**不解析日志**(它是 agent 的自由文本,工具不赌它的写法),
+/// 也不算"哪两张图像"(那是判断,判断归 agent;工具负责让人一眼能判)。
+#[derive(Debug, Serialize)]
+pub struct CalibrationData {
+    pub project: ProjectBrief,
+    /// 渲染时刻(给人读)。
+    pub generated_at: String,
+    /// 已完成的校准轮数。**`None` = 状态文件不在或读不动** ——
+    /// 那时结论栏来自明文投影(谁都能改),页面会把这句话亮出来。
+    pub rounds: Option<u32>,
+    pub shots: Vec<CalibShot>,
+    pub segments: Vec<CalibSegment>,
+    /// 校准日志原文(还没写过则为 `None`)。
+    pub log: Option<String>,
+    /// 指向时间线视图的相对链接(那页有视频回跳)。
+    pub timeline_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CalibShot {
+    pub id: String,
+    pub t: f64,
+    /// 图片的相对 URL。
+    pub url: String,
+    pub origin: String,
+    pub status: String,
+    pub reason: Option<String>,
+    /// 弃用的图也留着结论 —— 第四轮联调里 agent 就给重复图补了 check 说明。
+    pub check: Option<CalibCheck>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CalibCheck {
+    pub r#match: bool,
+    pub audio_visual_sync: bool,
+    pub type_read: String,
+    /// 下结论时对照的 ±6s 转录(留档的那一份)。
+    pub neighbor_text: Option<String>,
+    pub issues: Vec<String>,
+    pub confidence: String,
+    pub evidence: Option<EvidenceBrief>,
+    /// 这条结论**是哪一刻写下的**(被后轮改写时,这里跟着变;旧结论在校准日志里)。
+    pub checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EvidenceBrief {
+    pub segment: u32,
+    pub quote: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CalibSegment {
+    pub id: u32,
+    pub start: f64,
+    pub end: f64,
+    /// ASR 原文(**永不就地改写**)。
+    pub text: String,
+    /// 现在的读法(改过 = 改后的整句)。
+    pub effective: String,
+    /// `unchecked` / `checked` / `needs_user` —— 与审核门同一个口径([`Segment::review`])。
+    pub state: String,
+    pub conclusion: Option<ConclusionBrief>,
+    pub checked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConclusionBrief {
+    /// 「改了」/「决定不改」/「存疑未改」。
+    pub label: &'static str,
+    pub kind: Option<String>,
+    pub note: String,
+    pub reason: String,
+}
+
+/// 组装校准对照表的数据。读法与 [`collect`] 同一条规矩:
+/// **结论以状态为准,状态读不到才退回明文投影**(那时 `rounds` 是 `None`,页面会明说)。
+pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<CalibrationData> {
+    let project = Project::load(&layout.project_json()).context("读 project.json 失败")?;
+    // 时长只是页头一行字;meta 还没跑出来时不该让整个视图渲不出来
+    let duration = VideoMeta::load(&layout.video_meta()).map(|m| m.duration).unwrap_or(0.0);
+    let mut shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
+    let mut transcript = Transcript::load(&layout.transcript()).ok();
+
+    let rounds = match vidbrief_project::ProjectState::read_file(&layout.state_file()) {
+        Ok(Some(state)) => {
+            state.apply_to_shots(&mut shots);
+            if let Some(t) = transcript.as_mut() {
+                state.apply_to_transcript(t);
+            }
+            Some(state.progress.calibrate.rounds)
+        }
+        Ok(None) | Err(_) => None,
+    };
+
+    let log = match std::fs::read_to_string(layout.calibration_log()) {
+        Ok(text) if !text.trim().is_empty() => Some(text),
+        _ => None,
+    };
+
+    Ok(CalibrationData {
+        project: ProjectBrief {
+            id: project.id.to_string(),
+            name: project.name.clone(),
+            duration,
+        },
+        generated_at: vidbrief_project::now().to_string(),
+        rounds,
+        shots: shots
+            .shots
+            .iter()
+            .map(|s| {
+                Ok(CalibShot {
+                    id: s.id.to_string(),
+                    t: s.t,
+                    url: relative_url(view_rel, s.file.as_str())?,
+                    origin: snake(&format!("{:?}", s.origin)),
+                    status: snake(&format!("{:?}", s.status)),
+                    reason: s.reason.clone(),
+                    check: s.check.as_ref().map(|c| CalibCheck {
+                        r#match: c.r#match,
+                        audio_visual_sync: c.audio_visual_sync,
+                        type_read: c.type_read.clone(),
+                        neighbor_text: c.neighbor_text.clone(),
+                        issues: c.issues.clone(),
+                        confidence: snake(&format!("{:?}", c.confidence)),
+                        evidence: c.evidence.as_ref().map(|e| EvidenceBrief {
+                            segment: e.segment,
+                            quote: e.quote.clone(),
+                        }),
+                        checked_at: c.checked_at.to_string(),
+                    }),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        segments: transcript
+            .map(|t| {
+                t.segments
+                    .iter()
+                    .map(|s| CalibSegment {
+                        id: s.id,
+                        start: s.start,
+                        end: s.end,
+                        text: s.text.clone(),
+                        effective: s.effective_text().to_string(),
+                        state: match s.review() {
+                            vidbrief_project::SegmentReview::Unchecked => "unchecked",
+                            vidbrief_project::SegmentReview::Checked => "checked",
+                            vidbrief_project::SegmentReview::NeedsUser => "needs_user",
+                        }
+                        .to_string(),
+                        conclusion: s.conclusion.as_ref().map(|c| ConclusionBrief {
+                            label: c.label(),
+                            kind: c.kind().map(|k| snake(&format!("{k:?}"))),
+                            note: c.note().to_string(),
+                            reason: c.reason().to_string(),
+                        }),
+                        checked_at: s.checked_at.map(|at| at.to_string()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        log,
+        timeline_url: relative_url(view_rel, vidbrief_project::layout::PREPROCESS_TIMELINE_FILE)?,
     })
 }
 

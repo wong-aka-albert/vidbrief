@@ -3,13 +3,30 @@
 //!
 //! 设计见 `docs/DESIGN.md` §6.1 —— **工具只搬运与保存,不判断对错**。
 //! 这一层的全部职责就是:把 agent 需要看的东西准确地、不多不少地递给它。
+//!
+//! # 读的是"内容 + 状态",写的时候再拆开
+//!
+//! 明文材料(`shots.json` / `transcript.fixed.json` / `supplement_requests.json`)里那几栏
+//! **状态**(留用还是弃用、看图结论、核验戳、候选处置)**只是投影**:谁都能手改,
+//! 所以工具不拿它当判据。真正的家在 `state.bin`(见 [`vidbrief_project::state`])。
+//!
+//! 于是这一层只做两件事:
+//!
+//! - **读**:读明文里的内容,再把状态盖上去(交给 `ProjectState::apply_to_*`),交给调用方;
+//! - **写**:调用方改完那份合并过的对象再交回来(见 [`save_shots`] / [`save_supplements`] /
+//!   [`save_transcript_projection`])—— 内容进明文、状态进 `state.bin`,**同出一源**,
+//!   所以不会各说各话。
+//!
+//! "明文文件 = 状态的投影"这条不变式因此只有一个落点。哪天有人手改了明文,
+//! 门照样读状态(骗不过去),而 `vidbrief status` 会把对不上的地方列出来给人看。
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use vidbrief_project::{
-    ChangeCurve, Correction, DenseRegions, RelPath, Segment, Shot, ShotId, Shots, Transcript,
+    ChangeCurve, DenseRegions, RelPath, Segment, Shot, ShotId, Shots, SupplementRequests,
+    Transcript,
 };
 
 use crate::inspect::ShotCounts;
@@ -17,10 +34,184 @@ use crate::project::OpenProject;
 
 // ── 截图 ─────────────────────────────────────────────────────────────
 
-/// 读截图清单。
+/// 读截图清单(**内容 + 状态**)。
 pub fn shots(opened: &OpenProject) -> Result<Shots> {
-    Shots::load(&opened.layout().shots_json())
+    shots_optional(opened)?
         .with_context(|| "读取 shots.json 失败 —— 步 1 可能还没跑完(`vidbrief preprocess`)".to_string())
+}
+
+/// 读截图清单,**允许它还不存在**(给门和盘点用)。
+///
+/// 三态,不是两态:**不在** → `Ok(None)`;**在、读得动** → `Ok(Some)`;**在、读不动** → `Err`。
+///
+/// 为什么非要分三态(M4 第五轮实测):以前写的是 `shots(opened).unwrap_or_default()`,
+/// 读不动就拿一份空清单顶上。而门在"没有截图"和"看不清截图清单"上要做的判断正好相反 ——
+/// 前者没什么可拦的,**后者必须拦**。那次一份读不动的材料因此被当成"什么都没有",
+/// 门数出来 0 条未核验项,一路放行。**把"看不懂"和"没有"混成一件事,门就瞎了。**
+pub fn shots_optional(opened: &OpenProject) -> Result<Option<Shots>> {
+    let path = opened.layout().shots_json();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let mut shots = Shots::load(&path).with_context(|| {
+        format!(
+            "读取 {} 失败 —— 这份截图清单读不动(被改过或坏了)。\
+             它不是'没有截图':按'还没校准'处理。\
+             重新跑一次 `preprocess` 会照当前视频重算一份。",
+            path.display()
+        )
+    })?;
+    opened.state().apply_to_shots(&mut shots);
+    Ok(Some(shots))
+}
+
+/// 读**补图候选清单**,允许它还不存在(给门和盘点用)。三态同上。
+///
+/// 读不动时的出路:重新跑一次 `find_supplement_candidates` ——
+/// 它会照当前转录与截图重算一份(代价是**已做过的处置会跟着重来**,因为读不动的东西没法沿用)。
+pub fn supplements(opened: &OpenProject) -> Result<Option<SupplementRequests>> {
+    let path = opened.layout().supplement_requests();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let list = SupplementRequests::load(&path).with_context(|| {
+        format!(
+            "读取 {} 失败 —— 这份补图候选清单读不动(被改过或坏了)。\
+             它不是'没有候选':按'还没审过'处理。\
+             重新跑一次 `find_supplement_candidates` 会照当前材料重算一份。",
+            path.display()
+        )
+    })?;
+    Ok(Some(list))
+}
+
+// ── 落盘:内容进明文,状态进 state.bin ────────────────────────────────
+
+/// 把一份截图清单落盘。
+///
+/// 三件事,缺一不可:
+/// 1. **状态**从这份对象里收进 `state.bin`(它才是有判据的那一份);
+/// 2. **内容**写进 `shots.json` —— 连同那几栏一起写出去,当**投影**给人看;
+/// 3. 状态文件存盘。
+///
+/// 因为两边同出一源,投影与状态天然一致;哪天有人手改了明文,下一次写就把它盖回去
+/// (对不上的那些由 `ProjectState::mismatches` 报给人看)。
+pub fn save_shots(opened: &mut OpenProject, shots: &Shots) -> Result<()> {
+    opened.state_mut().absorb_shots(shots);
+    let path = opened.layout().shots_json();
+    shots
+        .save(&path)
+        .with_context(|| format!("写入 {} 失败", path.display()))?;
+    // 记下**内容**的底账:门的第①条是从明文里数数的,数出来的东西得有个对照
+    //(不然"把没审的行拿掉"就能把活藏起来,见 `ProjectState::content`)
+    let print = vidbrief_project::shots_print(shots);
+    opened
+        .state_mut()
+        .note_content(vidbrief_project::layout::SHOTS_FILE, print);
+    opened.save()
+}
+
+/// 把一份补图候选清单落盘(规则同 [`save_shots`])。
+pub fn save_supplements(opened: &mut OpenProject, list: &SupplementRequests) -> Result<()> {
+    opened.state_mut().absorb_supplements(list);
+    let path = opened.layout().supplement_requests();
+    list.save(&path)
+        .with_context(|| format!("写入 {} 失败", path.display()))?;
+    let print = vidbrief_project::supplements_print(list);
+    opened
+        .state_mut()
+        .note_content(vidbrief_project::layout::SUPPLEMENT_REQUESTS_FILE, print);
+    opened.save()
+}
+
+/// 记下**原始转录**的内容底账。
+///
+/// 单独一个函数,是因为原始转录不是工具"写"出来的 —— 它是 `preprocess` 里
+/// `vidbrief-asr` 直接落的盘(那一层不认识状态)。所以由调用方在它写完之后叫一声。
+pub fn note_transcript_content(opened: &mut OpenProject, transcript: &Transcript) -> Result<()> {
+    let print = vidbrief_project::transcript_print(transcript);
+    opened
+        .state_mut()
+        .note_content(vidbrief_project::layout::TRANSCRIPT_FILE, print);
+    opened.save()
+}
+
+/// 三份材料的内容底账**现在**是什么样 —— **门与体检共用这一处判断**。
+///
+/// 返回"跟底账对不上"的那些说法,空 = 都对得上。
+/// 每份材料都按**当前内容**重算一遍指纹 —— 算的是内容(hash 的是段号/时刻/正文),
+/// 不是文件字节,所以换个缩进、改一栏状态都不会误报。
+///
+/// # 一条例外:**状态里一条底账都没有**时,什么都不算对不上
+///
+/// 那是"**还没记过账**"(刚建的项目、状态刚重起),不是"材料被人换了"。
+/// 那种场面交给门的第①条按"还没核验"拦 —— 它说的话(接着去审)才是这时候该做的。
+///
+/// # 为什么只有这一处
+///
+/// 门(`review::gate_calibrate`)和体检(`inspect::scan_materials`)都要问这个问题。
+/// 各写一份的话迟早分叉,而分叉出来的那一种最难查:
+/// 「**体检说没事、门却拦着**」(或者反过来)—— 用户看到的是一句无法照做的话。
+/// 所以判据只写在这儿,两边都调它;下面还有一个"手上已经有材料"的版本,
+/// 给不想再读一遍文件的调用方。
+pub fn content_mismatches(opened: &OpenProject) -> Result<Vec<String>> {
+    let transcript = effective_transcript_optional(opened)?.map(|(t, _, _)| t);
+    let shots = shots_optional(opened)?;
+    let supplements = supplements(opened)?;
+    Ok(content_mismatches_of(
+        opened.state(),
+        transcript.as_ref(),
+        shots.as_ref(),
+        supplements.as_ref(),
+    ))
+}
+
+/// 同 [`content_mismatches`],但材料由调用方递进来(它手上本来就有,不必再读一遍文件)。
+///
+/// 递**合并过**的那一份也没关系:指纹算的是内容,而状态那几栏不在里面。
+pub fn content_mismatches_of(
+    state: &vidbrief_project::ProjectState,
+    transcript: Option<&Transcript>,
+    shots: Option<&Shots>,
+    supplements: Option<&SupplementRequests>,
+) -> Vec<String> {
+    if state.content.is_empty() {
+        return Vec::new();
+    }
+    let rows: [(&str, Option<vidbrief_project::ContentPrint>); 3] = [
+        (
+            vidbrief_project::layout::TRANSCRIPT_FILE,
+            transcript.map(vidbrief_project::transcript_print),
+        ),
+        (
+            vidbrief_project::layout::SHOTS_FILE,
+            shots.map(vidbrief_project::shots_print),
+        ),
+        (
+            vidbrief_project::layout::SUPPLEMENT_REQUESTS_FILE,
+            supplements.map(vidbrief_project::supplements_print),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (rel, now) in rows {
+        if let Some(line) = state.content_stale(rel, now) {
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// 把转录的**投影**(`transcript.fixed.json`)写出去。
+///
+/// 结论本身在状态里;这里写的是一份**给人读的全文**:原文 + 当前结论 ——
+/// 核对纠错、看视图都不用先解状态文件。
+///
+/// `merged` 必须是**原文叠上状态之后**的那一份(调用方手上就有)。
+pub fn save_transcript_projection(opened: &OpenProject, merged: &Transcript) -> Result<()> {
+    let path = opened.layout().transcript_fixed();
+    merged
+        .save(&path)
+        .with_context(|| format!("写入 {} 失败", path.display()))
 }
 
 /// 截图分档计数(留用 / 未校准 / 待裁决)。
@@ -125,21 +316,45 @@ fn missing_shot_hint(shots: &Shots, want: ShotId) -> String {
 /// 所以"agent 该看哪一份"是个必须有人回答的问题。散在各处回答,迟早有一处答错。
 /// 返回的第二个值是"这份来自哪个文件",第三个是"是不是纠错稿"。
 pub fn effective_transcript(opened: &OpenProject) -> Result<(Transcript, PathBuf, bool)> {
-    let layout = opened.layout();
-    let fixed = layout.transcript_fixed();
-    if fixed.is_file() {
-        let t = Transcript::load(&fixed)
-            .with_context(|| format!("读取 {} 失败", fixed.display()))?;
-        return Ok((t, fixed, true));
+    match effective_transcript_optional(opened)? {
+        Some(v) => Ok(v),
+        None => {
+            let raw = opened.layout().transcript();
+            anyhow::bail!(
+                "读取 {} 失败 —— 步 1 可能还没做转录(源视频没有音轨时会跳过)",
+                raw.display()
+            )
+        }
     }
+}
+
+/// 同 [`effective_transcript`],但**允许项目还没有转录**。三态同 [`shots_optional`]。
+///
+/// # 纠错稿不再从文件里读
+///
+/// 从前这里读的是 `02_calibrate/transcript.fixed.json`;现在**结论在状态里**
+/// (`state.bin`),那份文件退回"给人读的投影" —— 于是这里读的是**原文 + 状态**,
+/// 现叠一份出来。
+///
+/// 为什么非改不可:纠错稿是"这一段审过了、那段改了"的唯一载体,而那是门的判据 ——
+/// 一份明文、谁都能手写的文件当判据,门就是纸糊的。
+///
+/// 返回的第二个值是**内容来自哪个文件**(永远是原文那一份),
+/// 第三个是"这一份里带没带结论",让读的人知道它不是原文。
+pub fn effective_transcript_optional(
+    opened: &OpenProject,
+) -> Result<Option<(Transcript, PathBuf, bool)>> {
+    let layout = opened.layout();
     let raw = layout.transcript();
-    let t = Transcript::load(&raw).with_context(|| {
-        format!(
-            "读取 {} 失败 —— 步 1 可能还没做转录(源视频没有音轨时会跳过)",
-            raw.display()
-        )
-    })?;
-    Ok((t, raw, false))
+    if !raw.is_file() {
+        return Ok(None);
+    }
+    let mut t = Transcript::load(&raw)
+        .with_context(|| format!("读取 {} 失败 —— 转录取不出来(被改过或坏了)", raw.display()))?;
+    opened.state().apply_to_transcript(&mut t);
+    let concluded = t.stats().touched() > 0
+        || opened.state().segments.values().any(|s| s.checked_at.is_some());
+    Ok(Some((t, raw, concluded)))
 }
 
 /// 一段转录的**取用视图**。
@@ -161,26 +376,42 @@ pub struct SegmentView {
     pub id: u32,
     pub start: f64,
     pub end: f64,
-    /// 当前有效的文本。
+    /// 当前有效的文本(有改动就是改后的那一版)。
     pub text: String,
-    /// 这一段**被真的改过**吗(区别于"存疑但没改")。
-    pub corrected: bool,
-    /// 存疑但没改 —— 留着让用户裁决。
-    pub uncertain: bool,
-    /// 改动的性质与说明;没动过就是 `null`。
-    pub correction: Option<Correction>,
+    /// 对这一段下的结论:`corrected` 改了 / `kept` 决定保留原句 /
+    /// `uncertain` 存疑留给人 / `null` 没话说(也可能还没看过)。
+    ///
+    /// **一个字段说清四种状态**,不给"改没改""存没存疑"各开一个布尔 ——
+    /// 两个字段能表达同一件事时,迟早填成两样。
+    pub outcome: Option<&'static str>,
+    /// 改动内容 / 为什么这么定。
+    pub note: Option<String>,
+    /// 判断依据。
+    pub reason: Option<String>,
 }
 
 impl SegmentView {
     fn of(seg: &Segment) -> Self {
+        let (outcome, note, reason) = match &seg.conclusion {
+            Some(c) => (
+                Some(match c {
+                    vidbrief_project::Conclusion::Corrected { .. } => "corrected",
+                    vidbrief_project::Conclusion::Kept { .. } => "kept",
+                    vidbrief_project::Conclusion::Uncertain { .. } => "uncertain",
+                }),
+                Some(c.note().to_string()),
+                Some(c.reason().to_string()),
+            ),
+            None => (None, None, None),
+        };
         Self {
             id: seg.id,
             start: seg.start,
             end: seg.end,
             text: seg.effective_text().to_string(),
-            corrected: seg.is_corrected(),
-            uncertain: seg.is_uncertain(),
-            correction: seg.correction.clone(),
+            outcome,
+            note,
+            reason,
         }
     }
 }
@@ -366,25 +597,30 @@ mod tests {
     fn fixed_transcript_wins_over_the_raw_one() {
         let fake = Fake::new("materials-fixed")
             .with_transcript(&[(0.0, 2.0, "派森列表")]);
-        let opened = fake.open();
+        let mut opened = fake.open();
 
         let before = transcript(&opened, None).unwrap();
-        assert!(!before.corrected);
+        assert!(before.segments[0].outcome.is_none());
         assert_eq!(before.segments[0].text, "派森列表");
-        assert!(!before.segments[0].corrected);
+        assert!(before.segments[0].outcome.is_none());
 
-        // 写一份纠错稿进去,再读就该拿到纠错后的文本
-        let mut fixed = Transcript::load(&opened.layout().transcript()).unwrap();
-        fixed.segments[0].corrected_text = Some("Python 列表".into());
-        fixed.save(&opened.layout().transcript_fixed()).unwrap();
+        // 下一段结论进**状态**,再读就该拿到纠错后的文本
+        opened.state_mut().segment_mut(1).set_conclusion(Some(
+            vidbrief_project::Conclusion::Corrected {
+                text: "Python 列表".into(),
+                kind: vidbrief_project::CorrectionType::Terminology,
+                note: "派森 → Python".into(),
+                reason: "画面标题".into(),
+            },
+        ));
 
         let after = transcript(&opened, None).unwrap();
-        assert!(after.corrected);
+        assert_eq!(after.segments[0].outcome, Some("corrected"));
         // **不用调 `effective_text`** —— 视图里 `text` 就是当前有效的那一份。
         //
         // 这条断言以前写的是 `segments[0].effective_text()`:它绿着,却挡不住
         // "调用方忘了调"这个真问题(M4 联调就是这么栽的)。现在规矩在类型里。
         assert_eq!(after.segments[0].text, "Python 列表");
-        assert!(after.segments[0].corrected, "该标出这一段被动过");
+        assert_eq!(after.segments[0].outcome, Some("corrected"), "该标出这一段被动过");
     }
 }

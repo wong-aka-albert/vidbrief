@@ -9,7 +9,7 @@
 //! | 模板 | 依赖 | 状态 |
 //! |------|------|------|
 //! | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ 已就绪 |
-//! | P2 `fix_transcript` | apply_corrections / **render_calibration_table** | ⏳ 等 M4 的对照表视图 |
+//! | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ 已就绪 |
 //! | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ 已就绪 |
 //! | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ 已就绪 |
 //! | P5 `build_report` | **build_report** | ⏳ 等 M6 的报告渲染器 |
@@ -71,6 +71,37 @@ impl VidbriefServer {
         ))
     }
 
+    /// 逐段核对转录,把听错的改对
+    #[prompt(name = "fix_transcript", description = "逐段核对转录:同音错字/术语纠错,对照表给用户过目")]
+    async fn fix_transcript(
+        &self,
+        Parameters(args): Parameters<ProjectArg>,
+    ) -> Result<Vec<PromptMessage>, ErrorData> {
+        let project_id = args.project_id;
+        user_says(format!(
+            "你是转录校对助手。项目:`{project_id}`。这份视频的转录可能有语音识别错误\n\
+             (同音错字、专有名词听错 —— 实测「Python」→「派森」、「达摩院」→「打墨院」),\n\
+             请你逐段核对,**把错的改对**。\n\
+             \n\
+             1. 调用 `get_transcript` 读全量转录;用 `list_shots` / `get_shot` 看截图 ——\n\
+                **画面上的文字是纠错的第一依据**(截图里常直接写着正确写法,如「Python 列表」),\n\
+                上下文语义次之;用户若给了术语表,再拿它对照。\n\
+             2. 用 `apply_corrections` 逐条写回,每条附 `reason`(写清依据:画面文字 / 上下文 / 术语表)。\n\
+                - 只改明确的识别错误:**不润色、不改语序**,数字/单位/时间保留原样。\n\
+                - 没把握的标 `uncertain`,**不要臆造**一个看起来像的写法 —— 那些留给用户裁决。\n\
+                - **审过、没问题的段一并放进 `reviewed`**:不报等于没审,\n\
+                  工具分不出「看过没问题」和「压根没看」;有没审的段,写总结时会被门挡住。\n\
+             3. 写完调用 `render_calibration_table`,把返回的 url 给用户 —— 那一页能看到\n\
+                每段的原文/改后/依据,以及还没核验的部分。\n\
+             4. 把这一轮写进校准日志(`write_note` 到 `02_calibrate/calibration_log.md`,\n\
+                mode `append`,带 `count_round`):第一行写 `## 第 N 轮(日期 时间段)`,\n\
+                下面列这轮改了哪几段、依据是什么。**每轮都要写** —— 对照表把这份日志原样\n\
+                嵌在末尾,用户就靠它分清每条结论是哪一轮写的;同一处被后轮改写时,\n\
+                旧结论只在这份日志里。\n\
+             5. **停下来**等用户看过对照表;他说哪里不对,那就是下一轮 —— 不要自己接着写总结。"
+        ))
+    }
+
     /// 找算法漏掉的画面,需要就补图
     #[prompt(name = "find_missing_shots", description = "列出可能缺图的位置,逐条判断后补截")]
     async fn find_missing_shots(
@@ -84,9 +115,13 @@ impl VidbriefServer {
              调用 `find_supplement_candidates` 取回候选补图请求 —— 算法挑的是\n\
              「语音里提到了画面上的东西、但那个时刻附近没有截图」的位置。\n\
              \n\
-             **候选不等于结论**:用户说「看这里」不代表真有个图值得看。逐条判断,\n\
-             确实需要补图的才调用 `extract_shot(t, reason)`(`reason` 要写清为什么补)。\n\
-             判断依据:那个时刻画面上真的会有可看的东西吗?\n\
+             **候选不等于结论**:用户说「看这里」不代表真有个图值得看。\n\
+             **每一条都要有结论**,用 `disposition_supplements` 一次报一批:\n\
+             要补的报 `need_shot`(工具去抽帧;那一刻附近已经有图就沿用,不重复抽),\n\
+             不用补的报 `no_shot` —— 两种都要写一句理由。\n\
+             `need_shot` 的图补完用 `get_shot` 看一眼,再核结论(`record_shot_check`)。\n\
+             \n\
+             剩下没结论的候选会被审核门挡住(它数的就是这个数),所以别留下没表态的。\n\
              \n\
              补完后调用 `render_timeline` 刷新,并把新增的图逐张给用户过一眼。"
         ))
@@ -134,7 +169,7 @@ mod tests {
     #[test]
     fn every_prompt_only_names_tools_that_exist() {
         let names = VidbriefServer::new().tool_names_for_test();
-        let cases: [(&str, &[&str]); 3] = [
+        let cases: [(&str, &[&str]); 4] = [
             (
                 "calibrate_shots",
                 &[
@@ -144,6 +179,17 @@ mod tests {
                     "update_shot",
                     "apply_corrections",
                     "render_timeline",
+                ],
+            ),
+            (
+                "fix_transcript",
+                &[
+                    "get_transcript",
+                    "list_shots",
+                    "get_shot",
+                    "apply_corrections",
+                    "render_calibration_table",
+                    "write_note",
                 ],
             ),
             (
@@ -179,13 +225,18 @@ mod tests {
     #[test]
     fn prompts_waiting_on_later_milestones_are_not_registered() {
         let registered = router();
-        for name in ["fix_transcript", "build_report"] {
+        for name in ["build_report"] {
             assert!(
                 !registered.map.contains_key(name),
-                "{name} 依赖的工具还没做出来(M4 / M6),不该现在就放出来"
+                "{name} 依赖的工具还没做出来(M6),不该现在就放出来"
             );
         }
-        for name in ["calibrate_shots", "find_missing_shots", "summarize_video"] {
+        for name in [
+            "calibrate_shots",
+            "fix_transcript",
+            "find_missing_shots",
+            "summarize_video",
+        ] {
             assert!(registered.map.contains_key(name), "缺提示模板 {name}");
         }
     }

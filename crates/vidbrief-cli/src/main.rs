@@ -23,11 +23,109 @@ Commands:
   preprocess <project>      步 1:差帧图 / 密集区 / 截图 / 转录
   status <project>          查看项目状态与健康检查
   approve <project>         记下「校准这一步用户看过了」—— 打开通往步 3 的门
+  correct <project> -j F    把转录结论写回纠错稿(apply_corrections)
+  shot-check <project> -j F 记一张图的看图结论(record_shot_check)
+  supplements <project> -j F 处置一批补图候选(disposition_supplements)
+  summary <project> -m F    写总结(write_summary,过校准的门)
+  report <project> -m F     写报告(write_report_md)
+  upgrade <project>         把项目对齐到当前版本(旧格式 / 状态文件读不动时用)
   ui <project>              渲染时间线视图 + 起本地服务 + 打开浏览器
   mcp [--stdio]             启动 MCP 服务(stdio 传输,供 agent 接入)
   help                      显示本条用法
 
 Run `vidbrief <command> -h` for the options of a command.
+";
+
+const CORRECT_USAGE: &str = "\
+vidbrief correct —— 把转录结论写回纠错稿(apply_corrections 的命令行版)
+
+Usage: vidbrief correct <project> --json <FILE|->
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -j, --json <FILE|->      输入(`-` = 从 stdin 读)。形状与 MCP 工具 apply_corrections
+                           的入参一致(少了 project_id):
+                           {\"corrections\":[{\"segment_id\":1,\"outcome\":\"corrected\",
+                             \"text\":\"改后的整句\",\"type\":\"terminology\",
+                             \"note\":\"派森 → Python\",\"reason\":\"画面文字\"}],
+                            \"reviewed\":[2,3,4]}
+
+说明:
+  outcome 三种:corrected(改了,必须给 text)/ kept(决定保留原句)/ uncertain(定不了,留给人)。
+  **改成跟原文一字不差会被拒收** —— 要保留原句就用 kept。
+  reviewed 是「审过、没问题」的段 id;不报等于没审,审核门会拦。
+  走的是和 MCP 工具同一套代码、同一把锁、同一个门。
+";
+
+const SHOT_CHECK_USAGE: &str = "\
+vidbrief shot-check —— 记一张图的看图结论(record_shot_check 的命令行版)
+
+Usage: vidbrief shot-check <project> --json <FILE|->
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -j, --json <FILE|->      输入(`-` = 从 stdin 读)。形状与 MCP 工具一致:
+                           {\"shot_id\":\"s007\",\"match\":true,\"audio_visual_sync\":true,
+                            \"type_read\":\"从画面读到的内容\",\"issues\":[],
+                            \"confidence\":\"high\",\"evidence_quote\":\"照抄的转录原文\"}
+
+说明:
+  evidence_quote 要**照抄**一句转录原文(落在一段之内)。工具拿它去材料里搜:
+  搜不到就拒收,搜得到就连段号一起记下 —— 它是这条结论唯一的凭据。
+";
+
+const SUPPLEMENTS_USAGE: &str = "\
+vidbrief supplements —— 处置一批补图候选(disposition_supplements 的命令行版)
+
+Usage: vidbrief supplements <project> --json <FILE|->
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -j, --json <FILE|->      输入(`-` = 从 stdin 读)。形状与 MCP 工具一致:
+                           {\"items\":[{\"id\":1,\"decision\":\"no_shot\",
+                             \"note\":\"旁边就有图,判定半径太紧\"},
+                            {\"id\":126,\"decision\":\"need_shot\",\"note\":\"这一段缺图\"}]}
+
+说明:
+  decision 两种:need_shot(工具去抽帧;那一刻附近已有留用的图就沿用)/ no_shot。
+  **每条都要给理由**,门数的是「还有几条没有结论」。
+";
+
+const SUMMARY_USAGE: &str = "\
+vidbrief summary —— 写总结(write_summary 的命令行版)
+
+Usage: vidbrief summary <project> --md <FILE|->
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -m, --md <FILE|->        Markdown 正文(`-` = 从 stdin 读)
+
+说明:
+  **这一步要过校准的门**:还有没核验的、或者有等用户拍板的,会被挡住并说清是哪些。
+  门和 MCP 那边是同一道。
+";
+
+const REPORT_USAGE: &str = "\
+vidbrief report —— 写报告(write_report_md 的命令行版)
+
+Usage: vidbrief report <project> --md <FILE|->
+
+Arguments:
+  <project>                项目:项目目录的路径,或 projects/ 下的项目名
+
+Options:
+  -m, --md <FILE|->        Markdown 正文(`-` = 从 stdin 读)
+
+说明:
+  report.md 是这一步的实体;图表化 HTML 与导出是另一件事(M6)。
 ";
 
 const APPROVE_USAGE: &str = "\
@@ -40,13 +138,45 @@ Arguments:
 
 Options:
   -n, --note <TEXT>        带着未处理项通过时的说明(用户的原话最好)。
-                           该处理的都处理完了就别给;给了会原样存进 project.json,事后能查
+                           该处理的都处理完了就别给;给了会原样存进项目状态,事后能查
 
 说明:
   校准(步 2)通往总结(步 3)有一道门:没被确认过、或者确认之后材料又变过,
   写总结会被挡住。这个命令就是开门那一下。
   服务端会记下**确认当时的材料状态**;之后你再改任何东西,这次确认就作废,
   得重新看一遍再确认。
+";
+
+const UPGRADE_USAGE: &str = "\
+vidbrief upgrade —— 把项目对齐到当前版本(状态照材料重新起一份)
+
+Usage: vidbrief upgrade <project> [options]
+
+Arguments:
+  <project>                项目目录,或 projects/ 下的项目名
+
+Options:
+      --fresh              什么都不收,起一份**空**状态:已有的核验记录清零,材料原样保留
+      --accept-material    把**现在这份**材料当成新底账(连跟底账对不上的那些也重记)。
+                           只有在你知道材料为什么变了、并且认了它的时候才用
+  -h, --help               显示本条用法
+
+说明:
+  两种情况用得上它:
+
+  ① **旧格式(v1)的项目** —— 进度、核验戳、看图结论、拍板记录当年写在明文里,
+     现在要收进 state.bin(非明文)。老项目直接打开会报「旧格式」,跑一次这个就行。
+  ② **状态文件不见了 / 读不动** —— 照明文材料里还读得到的那部分重新起一份。
+
+  材料(转录、截图、候选、总结、报告)**一个字节都不动**。
+  收回来的东西会一条条报出来,免得你不知道自己那几轮活还在不在。
+
+  它是**最保守**的那条路:读得到什么就收什么,读不到的就是「还没核验」——
+  拿它绕门是绕不过去的,只会让门拦得更死。
+
+  另有一个内容底账(见 docs/DESIGN.md §4.10):材料**内容**的手改会被门拦下,
+  而门数是「还有哪些没核验」的,所以拿掉行、活就看不见了 —— 底账挡的就是这个。
+  默认**不换**对不上的底账;认了现在这份才加 `--accept-material`。
 ";
 
 const INIT_USAGE: &str = "\
@@ -130,11 +260,13 @@ Arguments:
   <project>                项目目录,或 projects/ 下的项目名
 
 Options:
+      --view <name>        渲染哪一页:timeline(默认,四层共轴时间线 + 视频回跳)
+                           或 calibrate(校准对照表:图 + 转录 + 结论 + 校准日志)
       --no-open            只起服务并打印 URL,不打开浏览器
   -h, --help               显示本条用法
 
 说明:
-  - 渲染 01_preprocess/timeline.html(四层共轴时间线 + 视频回跳)
+  - 渲染 01_preprocess/timeline.html(--view calibrate 时是 02_calibrate/calibrate.html)
   - 起一个绑在 127.0.0.1 的静态服务把项目目录发布出去 —— **必须有它浏览器才能 seek**
     (`file://` 打开时对本地媒体有跨域限制,时间轴点了不跳)
   - 端口由操作系统分配,不会和别的东西撞车;只监听回环地址,局域网访问不到
@@ -169,6 +301,12 @@ fn main() -> ExitCode {
         "status" => cmd_status(rest),
         "preprocess" => cmd_preprocess(rest),
         "approve" => cmd_approve(rest),
+        "upgrade" => cmd_upgrade(rest),
+        "correct" => cmd_correct(rest),
+        "shot-check" => cmd_shot_check(rest),
+        "supplements" => cmd_supplements(rest),
+        "summary" => cmd_summary(rest),
+        "report" => cmd_report(rest),
         "ui" => cmd_ui(rest),
         "mcp" => cmd_mcp(rest),
         "help" | "--help" | "-h" => {
@@ -418,7 +556,416 @@ fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
 
 /// `vidbrief approve` —— 记下"这一步用户看过了",打开步 2 通往步 3 的门。
 ///
+// ── 写操作的命令行孪生入口 ────────────────────────────────────────────
+//
+// 为什么要有这几条:MCP 是**一条**通往写操作的路,而它会断(第五轮实测:
+// agent 把自己的工具进程一起关掉了,之后写报告、记结论全都没路可走,
+// 它只好手写文件、手改进度)。每个写动作都该有一条不经过 MCP 的入口 ——
+// 走的是**同一套 `ops` 代码、同一把锁、同一个门**,不是"另一条捷径"。
+//
+// 输入统一从文件或 stdin 读(`--json -` / `--md -`),因为结论的正文往往很长,
+// 塞进命令行参数既别扭又有长度上限。
+
+/// 读一份输入:`<文件>` 或 `-`(stdin)。
+fn read_input(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).context("读 stdin 失败")?;
+        return Ok(buf);
+    }
+    std::fs::read_to_string(path).with_context(|| format!("读 {path} 失败"))
+}
+
+/// 从 `--json` / `--md` 这类选项里取"从哪读",并读进来。
+fn take_input(args: &[String], cmd: &str, flag: &str) -> Result<String> {
+    let mut value: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = split_option(&args[i]);
+        if key == flag || (flag == "--json" && key == "-j") || (flag == "--md" && key == "-m") {
+            value = Some(take_value(args, &mut i, inline, flag)?);
+        }
+        i += 1;
+    }
+    let path = value.with_context(|| {
+        format!("用法:vidbrief {cmd} <项目> {flag} <文件|->(见 `vidbrief {cmd} -h`)")
+    })?;
+    read_input(&path)
+}
+
+/// 项目名:去掉选项之后的那个位置参数。
+fn positional_project(args: &[String], cmd: &str, flag: &str) -> Result<String> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = split_option(&args[i]);
+        if key == flag || (flag == "--json" && key == "-j") || (flag == "--md" && key == "-m") {
+            take_value(args, &mut i, inline, flag)?;
+        } else if is_option(&args[i]) {
+            bail!("{cmd} 不认识参数 `{}`(见 `vidbrief {cmd} -h`)", args[i]);
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+    one_positional(&positional, cmd, "项目")
+}
+
+/// `vidbrief correct` —— 把转录结论写回(`apply_corrections`)。
+fn cmd_correct(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{CORRECT_USAGE}");
+        return Ok(());
+    }
+    let name = positional_project(args, "correct", "--json")?;
+    let raw = take_input(args, "correct", "--json")?;
+    let body: CorrectBody = serde_json::from_str(&raw).context("--json 解析失败")?;
+
+    let mut items = Vec::with_capacity(body.corrections.len());
+    for c in body.corrections {
+        let segment_id = c.segment_id;
+        let conclusion = c.into_conclusion()?;
+        items.push(vidbrief_ops::CorrectionInput {
+            segment_id,
+            conclusion,
+        });
+    }
+
+    let (id, outcome) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let outcome = vidbrief_ops::apply_corrections(opened, &items, &body.reviewed)?;
+        Ok((opened.id().to_string(), outcome))
+    })?;
+
+    println!("项目     {id}");
+    println!("本次写入 {} 条", outcome.applied);
+    println!(
+        "全稿     {} 段:改了 {} 段 / 决定不改 {} 段 / 存疑未改 {} 段 / 合计动过 {} 段",
+        outcome.total_segments,
+        outcome.corrected,
+        outcome.kept,
+        outcome.uncertain,
+        outcome.corrected + outcome.kept + outcome.uncertain
+    );
+    println!("核验过   {} 段", outcome.reviewed);
+    println!("纠错稿   {}", outcome.fixed_path.display());
+    println!("对照表   {}", outcome.diff_path.display());
+    Ok(())
+}
+
+/// `vidbrief shot-check` —— 记一张图的看图结论(`record_shot_check`)。
+fn cmd_shot_check(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{SHOT_CHECK_USAGE}");
+        return Ok(());
+    }
+    let name = positional_project(args, "shot-check", "--json")?;
+    let raw = take_input(args, "shot-check", "--json")?;
+    let body: ShotCheckBody = serde_json::from_str(&raw).context("--json 解析失败")?;
+    let shot_id = parse_shot_id(&body.shot_id)?;
+
+    let (id, check) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let input = vidbrief_ops::ShotCheckInput {
+            r#match: body.r#match,
+            audio_visual_sync: body.audio_visual_sync,
+            type_read: body.type_read.clone(),
+            issues: body.issues.clone(),
+            confidence: parse_confidence(&body.confidence),
+            neighbor_text: body.neighbor_text.clone(),
+            evidence_quote: body.evidence_quote.clone(),
+        };
+        let check = vidbrief_ops::record_shot_check(opened, shot_id.clone(), &input)?;
+        Ok((opened.id().to_string(), check))
+    })?;
+
+    println!("项目     {id}");
+    println!("截图     {}", body.shot_id);
+    println!(
+        "凭据     {}",
+        match &check.evidence {
+            Some(e) => format!("seg {}「{}」", e.segment, e.quote),
+            None => "(没给 —— 门会要求补上)".to_string(),
+        }
+    );
+    println!("记于     {}", check.checked_at.format("%Y-%m-%d %H:%M:%S"));
+    Ok(())
+}
+
+/// `vidbrief supplements` —— 处置一批补图候选(`disposition_supplements`)。
+fn cmd_supplements(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{SUPPLEMENTS_USAGE}");
+        return Ok(());
+    }
+    let name = positional_project(args, "supplements", "--json")?;
+    let raw = take_input(args, "supplements", "--json")?;
+    let body: SupplementsBody = serde_json::from_str(&raw).context("--json 解析失败")?;
+
+    let mut items = Vec::with_capacity(body.items.len());
+    for it in body.items {
+        let decision = match it.decision.as_str() {
+            "need_shot" => vidbrief_ops::SupplementDecisionKind::NeedShot,
+            "no_shot" => vidbrief_ops::SupplementDecisionKind::NoShot,
+            other => bail!(
+                "候选 #{} 的 decision 只能是 `need_shot` / `no_shot`,收到 `{other}`",
+                it.id
+            ),
+        };
+        items.push(vidbrief_ops::SupplementDecision {
+            id: it.id,
+            decision,
+            note: it.note,
+            t: it.t,
+        });
+    }
+
+    let (id, outcome) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let outcome = vidbrief_ops::disposition_supplements(opened, &items)?;
+        Ok((opened.id().to_string(), outcome))
+    })?;
+
+    println!("项目     {id}");
+    println!("处置     {} 条,还剩 {} 条没结论", outcome.handled, outcome.pending_left);
+    if !outcome.extracted.is_empty() {
+        println!("新抽     {}", outcome.extracted.join("、"));
+    }
+    if !outcome.reused.is_empty() {
+        println!("沿用     {}", outcome.reused.join("、"));
+    }
+    if !outcome.rejected.is_empty() {
+        let ids: Vec<String> = outcome.rejected.iter().map(|i| format!("#{i}")).collect();
+        println!("不用补   {}", ids.join("、"));
+    }
+    Ok(())
+}
+
+/// `vidbrief summary` —— 写总结(`write_summary`,**过步 2 的门**)。
+fn cmd_summary(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{SUMMARY_USAGE}");
+        return Ok(());
+    }
+    let name = positional_project(args, "summary", "--md")?;
+    let md = take_input(args, "summary", "--md")?;
+
+    let (id, path) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let path = vidbrief_ops::write_summary(opened, &md)?;
+        Ok((opened.id().to_string(), path))
+    })?;
+    println!("项目     {id}");
+    println!("已写入   {}", path.display());
+    Ok(())
+}
+
+/// `vidbrief report` —— 写报告(`write_report_md`)。
+fn cmd_report(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{REPORT_USAGE}");
+        return Ok(());
+    }
+    let name = positional_project(args, "report", "--md")?;
+    let md = take_input(args, "report", "--md")?;
+
+    let (id, path) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        if let Some(reason) = lock_note {
+            eprintln!("警告:{reason}");
+        }
+        let path = vidbrief_ops::write_report_md(opened, &md)?;
+        Ok((opened.id().to_string(), path))
+    })?;
+    println!("项目     {id}");
+    println!("已写入   {}", path.display());
+    Ok(())
+}
+
+// ── 这几条命令的输入形状 ─────────────────────────────────────────────
+//
+// 形状和 MCP 工具的入参一致(少了 `project_id`,项目是位置参数)——
+// 同一份 JSON,两条路都吃得下,agent 换路时不用重学。
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorrectBody {
+    #[serde(default)]
+    corrections: Vec<CorrectItem>,
+    #[serde(default)]
+    reviewed: Vec<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorrectItem {
+    segment_id: u32,
+    outcome: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    reason: String,
+}
+
+impl CorrectItem {
+    fn into_conclusion(self) -> Result<vidbrief_project::Conclusion> {
+        use vidbrief_project::{Conclusion, CorrectionType};
+        let kind = match self.kind.as_deref() {
+            None => CorrectionType::Other,
+            Some("homophone") => CorrectionType::Homophone,
+            Some("terminology") => CorrectionType::Terminology,
+            Some("number") => CorrectionType::Number,
+            Some("other") => CorrectionType::Other,
+            Some(other) => bail!(
+                "第 {} 段的 `type` 只能是 homophone / terminology / number / other,收到 `{other}`",
+                self.segment_id
+            ),
+        };
+        Ok(match self.outcome.as_str() {
+            "corrected" => {
+                let Some(text) = self.text.filter(|t| !t.trim().is_empty()) else {
+                    bail!(
+                        "第 {} 段 `outcome = corrected` 却没给 `text` —— 要保留原句就用 `kept`",
+                        self.segment_id
+                    );
+                };
+                Conclusion::Corrected {
+                    text,
+                    kind,
+                    note: self.note.unwrap_or_default(),
+                    reason: self.reason,
+                }
+            }
+            "kept" => Conclusion::Kept {
+                note: self.note.unwrap_or_default(),
+                reason: self.reason,
+            },
+            "uncertain" => Conclusion::Uncertain {
+                note: self.note.unwrap_or_default(),
+                reason: self.reason,
+            },
+            other => bail!(
+                "第 {} 段的 `outcome` 只能是 corrected / kept / uncertain,收到 `{other}`",
+                self.segment_id
+            ),
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShotCheckBody {
+    shot_id: String,
+    r#match: bool,
+    audio_visual_sync: bool,
+    type_read: String,
+    #[serde(default)]
+    issues: Vec<String>,
+    confidence: String,
+    #[serde(default)]
+    neighbor_text: Option<String>,
+    #[serde(default)]
+    evidence_quote: Option<String>,
+}
+
+/// `high` / `medium` / 其它(读作 `low`)。
+fn parse_confidence(raw: &str) -> vidbrief_project::Confidence {
+    match raw {
+        "high" => vidbrief_project::Confidence::High,
+        "medium" => vidbrief_project::Confidence::Medium,
+        _ => vidbrief_project::Confidence::Low,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupplementsBody {
+    items: Vec<SupplementItem>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupplementItem {
+    id: u32,
+    decision: String,
+    note: String,
+    #[serde(default)]
+    t: Option<f64>,
+}
+
+/// 截图 id:`s007` 或 `7`。
+fn parse_shot_id(raw: &str) -> Result<vidbrief_project::ShotId> {
+    let digits = raw.strip_prefix('s').unwrap_or(raw);
+    let n: u32 = digits
+        .parse()
+        .with_context(|| format!("截图 id 不合法:`{raw}`(形如 s007 或 7)"))?;
+    vidbrief_project::ShotId::new(n).map_err(Into::into)
+}
+
 /// 这个命令是**人**跑的,所以它本身就是"人签的字" —— 不需要谁来转达。
+fn cmd_upgrade(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{UPGRADE_USAGE}");
+        return Ok(());
+    }
+    let mut opts = vidbrief_ops::UpgradeOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--fresh" => opts.fresh = true,
+            "--accept-material" => opts.accept_material = true,
+            other => positional.push(other.to_string()),
+        }
+    }
+    let name = one_positional(&positional, "upgrade", "项目")?;
+
+    let outcome = vidbrief_ops::upgrade(&name, &opts)?;
+
+    println!("项目     {}", outcome.project_id);
+    println!(
+        "版本     {} → {}",
+        outcome.from_version,
+        vidbrief_project::SCHEMA_VERSION
+    );
+    println!("修订号   {}", outcome.rev);
+    if outcome.note.is_none() {
+        println!("收回来");
+        println!("  看图结论   {} 张截图", outcome.shot_checks);
+        println!("  转录核验   {} 段", outcome.segments);
+        println!("  候选处置   {} 条", outcome.supplements);
+        println!(
+            "  用户拍板   {}",
+            if outcome.approval { "有,搬过来了" } else { "无" }
+        );
+        if outcome.progress_moved {
+            println!("  四步进度   从旧文件里搬过来了");
+        }
+    }
+    if !outcome.content.is_empty() {
+        println!("内容底账");
+        for line in &outcome.content {
+            println!("  {line}");
+        }
+    }
+    if let Some(note) = &outcome.note {
+        println!();
+        println!("{note}");
+    }
+    println!();
+    println!("材料一个字节都没动。接着跑 `vidbrief status {}` 看看现在是什么样。", name);
+    Ok(())
+}
+
 fn cmd_approve(args: &[String]) -> Result<()> {
     if wants_help(args) {
         print!("{APPROVE_USAGE}");
@@ -467,7 +1014,7 @@ fn cmd_approve(args: &[String]) -> Result<()> {
 
     // 把"还欠着什么"摆在眼前 —— 门开是开了,但用户该知道自己是带着什么过的
     if c.unchecked > 0 || c.needing_review > 0 || c.supplement_pending > 0 || c.uncertain > 0 {
-        println!("注意:上面这些还没处理完,你确认的是「就这样往下走」—— 理由已经记进 project.json。");
+        println!("注意:上面这些还没处理完,你确认的是「就这样往下走」—— 理由已经记进项目状态。");
     }
     println!("门开了,可以写总结了。**之后任何一次改动都会让这次确认作废。**");
     Ok(())
@@ -625,7 +1172,16 @@ fn cmd_status(args: &[String]) -> Result<()> {
     println!("  名称   {}", project.name);
     println!("  目录   {}", display_dir(&report.dir));
     println!("  建立   {}", project.created_at);
-    println!("  格式   schema v{} / rev {}", project.schema_version, project.rev);
+    // **报读到的那一版**(不是本工具认的那一版):旧项目要如实说自己是旧项目
+    let version_note = if report.schema_version == vidbrief_project::SCHEMA_VERSION {
+        String::new()
+    } else {
+        format!("(本工具认 v{})", vidbrief_project::SCHEMA_VERSION)
+    };
+    println!(
+        "  格式   schema v{} / rev {}{version_note}",
+        report.schema_version, report.rev
+    );
     if let Some(glossary) = &project.glossary {
         println!("  术语表 {} 条", glossary.len());
     }
@@ -662,7 +1218,7 @@ fn cmd_status(args: &[String]) -> Result<()> {
 
     println!();
     println!("进度");
-    let p = &project.progress;
+    let p = &report.progress;
     println!(
         "  ① 前处理   {}",
         step_text(p.preprocess.done, p.preprocess.at.map(|t| t.to_string()))
@@ -715,7 +1271,7 @@ fn print_materials(m: &vidbrief_ops::Materials) {
         None => println!("  截图     —"),
     }
     println!("  转录     {} 段", count(m.transcript_segments));
-    if let Some(fixed) = m.corrected_segments {
+    if let Some(fixed) = m.concluded_segments {
         println!("  纠错     {fixed} 段有标记");
     }
     if let Some(total) = m.supplement_total {
@@ -728,6 +1284,31 @@ fn print_materials(m: &vidbrief_ops::Materials) {
         "  视图     {}",
         if m.timeline_html { "已渲染" } else { "—" }
     );
+
+    // 状态文件那两栏:**读不动要说出来**,不能让它混在"一切正常"里
+    if let Some(note) = &m.state_note {
+        println!();
+        println!("⚠️ 状态");
+        for line in note.lines() {
+            println!("  {line}");
+        }
+    }
+    if !m.content_stale.is_empty() {
+        println!();
+        println!("✗ 材料内容跟底账对不上的地方({} 处)", m.content_stale.len());
+        for line in m.content_stale.iter().take(8) {
+            println!("  {line}");
+        }
+        println!("  (门会为此拦下来 —— 门的『还有哪些没核验』是从这几份文件里数的)");
+    }
+    if !m.projection_stale.is_empty() {
+        println!();
+        println!("⚠️ 明文材料与状态对不上的地方({} 处)", m.projection_stale.len());
+        for line in m.projection_stale.iter().take(5) {
+            println!("  {line}");
+        }
+        println!("  (明文那几栏只是投影,门读的是状态,所以骗不过去;下一次写这份材料的工具调用会把它盖回去)");
+    }
 }
 
 fn step_text(done: bool, at: Option<String>) -> String {
@@ -754,22 +1335,34 @@ fn cmd_ui(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let mut open_browser = true;
-    let positional: Vec<String> = args
-        .iter()
-        .filter(|arg| {
-            if arg.as_str() == "--no-open" {
-                open_browser = false;
-                false
-            } else {
-                true
+    let mut view = "timeline";
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-open" => open_browser = false,
+            "--view" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    bail!("--view 后面要跟视图名(timeline / calibrate)");
+                };
+                view = match v.as_str() {
+                    "timeline" => "timeline",
+                    "calibrate" => "calibrate",
+                    other => bail!("不认识视图 `{other}` —— 可选:timeline(默认)/ calibrate"),
+                };
             }
-        })
-        .cloned()
-        .collect();
+            other => positional.push(other.to_string()),
+        }
+        i += 1;
+    }
     let name = one_positional(&positional, "ui", "项目")?;
 
     let opened = OpenProject::open(&name)?;
-    let (path, url) = vidbrief_ops::serve_and_open(&opened, open_browser)?;
+    let (path, url) = match view {
+        "calibrate" => vidbrief_ops::serve_and_open_table(&opened, open_browser)?,
+        _ => vidbrief_ops::serve_and_open(&opened, open_browser)?,
+    };
 
     println!("视图     {}", path.display());
     println!("服务     {url}");
@@ -777,7 +1370,10 @@ fn cmd_ui(args: &[String]) -> Result<()> {
         println!("         (--no-open:请手动打开上面的地址)");
     }
     println!();
-    println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。");
+    match view {
+        "calibrate" => println!("顶部可按「还没核验 / 没把握 / 已弃用 / 有结论」筛选;点缩略图看大图。"),
+        _ => println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。"),
+    }
 
     // 服务是后台线程,主线程不能立刻退出 —— 否则服务跟着进程一起没了
     println!();

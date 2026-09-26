@@ -39,6 +39,7 @@ pub mod regions;
 pub mod relpath;
 pub mod shots;
 pub mod source;
+pub mod state;
 pub mod supplement;
 pub mod transcript;
 
@@ -52,8 +53,8 @@ pub use layout::Layout;
 pub use lock::{LockGuard, acquire};
 pub use meta::VideoMeta;
 pub use project::{
-    Approval, CalibrateProgress, MaterialDigests, Progress, Project, Review, ReviewCounts,
-    SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
+    Approval, CalibrateProgress, LegacyStateV1, MaterialDigests, Progress, Project, Review,
+    ReviewCounts, SCHEMA_VERSION, SchemaVersion, SourceRef, StepProgress,
 };
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
@@ -62,9 +63,14 @@ pub use source::{
     Materialized, Placement, SourceLink, materialize, plan, same_file, sha256_of, simplify_path,
     video_rel_for, volume_of,
 };
+pub use state::{
+    ContentPrint, ProjectState, SegmentState, ShotState, StateFormatError, SupplementState, frame,
+    shots_print, supplements_print, transcript_print, unframe,
+};
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
-pub use transcript::{Correction, CorrectionType, Segment, SegmentReview, Transcript};
-
+pub use transcript::{
+    Conclusion, CorrectionType, Segment, SegmentReview, SegmentStats, Transcript,
+};
 /// 当前时刻,带本地 UTC 偏移(如 `2026-09-24T21:00:00+08:00`)。
 ///
 /// 全项目所有"墙上时钟"字段都经由此函数产生,保证格式一致。

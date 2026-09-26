@@ -86,11 +86,16 @@ fn prompts_and_resources_are_advertised() {
         .iter()
         .map(|p| p["name"].as_str().unwrap_or_default().to_string())
         .collect();
-    for expected in ["calibrate_shots", "find_missing_shots", "summarize_video"] {
+    for expected in [
+        "calibrate_shots",
+        "fix_transcript",
+        "find_missing_shots",
+        "summarize_video",
+    ] {
         assert!(names.iter().any(|n| n == expected), "缺提示模板 {expected}:{names:?}");
     }
-    // 还没做出来的那两个不许出现(它们引用的工具尚不存在)
-    for absent in ["fix_transcript", "build_report"] {
+    // 还没做出来的那个不许出现(它引用的工具尚不存在)
+    for absent in ["build_report"] {
         assert!(!names.iter().any(|n| n == absent), "{absent} 不该放出来:{names:?}");
     }
 
@@ -213,7 +218,7 @@ fn create_preprocess_look_and_write_back() {
     // ⑥ 状态里应当看得到进度与材料
     let status = client.call_tool("get_project", json!({"project_id": "e2e"}));
     let status: Value = serde_json::from_str(&first_text(&status)).unwrap();
-    assert!(status["project"]["progress"]["preprocess"]["done"].as_bool().unwrap());
+    assert!(status["progress"]["preprocess"]["done"].as_bool().unwrap());
     assert_eq!(status["materials"]["shots"]["total"].as_u64().unwrap(), shots);
 
     // ⑦ 刷新视图(不弹浏览器),拿到给用户点的地址

@@ -1,7 +1,7 @@
 # 视频图文总结 MCP — 从零设计
 
-> 版本:v0.9(M3 完成:MCP stdio 服务 + A–F 组工具 + 提示模板 P1/P3/P4)
-> 状态:M0–M3 已实现,下一步 M4
+> 版本:v0.11(M4 收口:`render_calibration_table` 对照表视图 + 提示模板 P2,§9.3、§10.4)
+> 状态:M0–M4 已实现,M5 待开(步 3 总结的自主探索联调)
 > 关联:./BRD.md(需求对话)、./RESEARCH.md(技术核实与实测记录)、./WHISPER_SETUP.md(转录环境与实测)、[./schema/](./schema/)(**项目材料格式的唯一权威**)与 [./devlog/](./devlog/)(开发过程记录)
 
 ---
@@ -112,7 +112,9 @@ preprocess()          [供] get_shot()           [供] search_transcript()  buil
 
 ```
 projects/<project-name>/
-├── project.json                 # 元数据 + 各步进度标记(§4.2)
+├── project.json                 # 项目**身份**:它是谁、从哪来、叫什么(§4.2)
+├── state.bin                    # 项目**状态**:进度/核验戳/看图结论/拍板记录(§4.10)
+│                                #   —— 二进制,带格式版本与 sha256;**非明文**
 ├── project.lock                 # 写锁:0 字节的哨兵,"锁拿不拿得到"才是判据(§4.7)
 ├── source/
 │   ├── video.<ext>              # 源视频:硬链接 / 软链接 / 复制(§4.8)
@@ -135,6 +137,7 @@ projects/<project-name>/
 │   ├── cross_validate.md        # 图文交叉印证的矛盾点清单
 │   ├── shots_extra/             # 补图产出
 │   ├── timeline.html            # 校准后时间线视图(可重渲染)
+│   ├── calibrate.html           # 校准对照表:图 + 转录 + 结论一屏看完(§9.3)
 │   └── calibration_log.md       # 迭代轨迹
 │
 ├── 03_summary/
@@ -149,7 +152,12 @@ projects/<project-name>/
     └── assets/
 ```
 
-> 所有"校准结论"文件(`transcript.fixed.json`、`shots.json` 的 `check` 字段、`supplement_requests.json` 的 `status`)**由 agent 通过工具写入**,不是工具自己算出来的。
+> 所有"校准结论"**由 agent 通过工具写入**,不是工具自己算出来的。
+>
+> ⚠️ **但它们的家不在这些明文文件里**(v0.10 起):`transcript.fixed.json`、
+> `shots.json` 的 `check`/`status`、`supplement_requests.json` 的 `status`,
+> 都是**状态的投影** —— 工具写出来给人读、给视图画,判据在 `state.bin`(§4.10)。
+> **判据不能是随手能写的东西。**
 
 **路径规则**:项目内所有路径都是**项目根相对路径**,用 `/` 分隔(如 `01_preprocess/shots/s007_0479.0.jpg`)。
 禁止绝对路径、盘符、反斜杠与 `..` —— 项目必须能整体搬走。Rust 侧由 `RelPath` 类型强制(构造即校验)。
@@ -158,12 +166,11 @@ projects/<project-name>/
 但截图清单本身(§4.6)已经有 `check` 字段 —— 同一件事两处落点必然不同步。
 M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威。
 
-### 4.2 项目进度标记(`project.json`)
+### 4.2 项目身份(`project.json`)
 
 ```jsonc
 {
-  "schema_version": 1,           // 该项目下所有 JSON 的格式版本;不符直接报错,不做静默兼容
-  "rev": 7,                      // 乐观并发修订号:每次成功写入 +1(§4.7)
+  "schema_version": 2,           // 该项目下所有 JSON 的格式版本;不符直接报错,不做静默兼容
   "id": "demo",              // 同时是目录名;ASCII 小写/数字/-/_
   "name": "第一讲 开场",        // 人类可读名,可含中文
   "created_at": "2026-09-24T21:00:00+08:00",
@@ -172,25 +179,30 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
     "original": "D:/videos/第一讲.mp4",  // 原始绝对路径,纯信息性,不用于访问文件
     "link": "hardlink"           // hardlink | symlink | copy(§4.8)
   },
-  "glossary": null,              // 术语表,默认 null(关闭)
-  "progress": {
-    "preprocess": { "done": true,  "at": "..." },
-    "calibrate":  { "rounds": 3, "last_at": "..." },   // 迭代轮数,不设"通过/未通过"
-    "summarize":  { "done": true,  "at": "..." },
-    "report":     { "done": true,  "at": "..." }
-  }
+  "glossary": null               // 术语表,默认 null(关闭)
 }
 ```
 
-> **有审核门,但门记在 `review` 里,不在这里。** `progress` 只记"做过什么";
-> "用户看过并点头了"是另一件事(见 §4.2.1)。两者分开,是因为一个项目可以
-> 四步都 `done` 却一次都没被人确认过 —— M4 联调实测就是这样:
-> **一张图都没校准的项目照样能写总结、把步 3 标成完成。**
->
+**这里只装身份。** 进度、核验戳、看图结论、拍板记录都是**状态**,住 `state.bin`(§4.10);
+`rev` 也跟着走了 —— "改过几次"是状态,不是身份。
+
+> **为什么搬走**(v0.10,devlog [260925-30] 第 2 条):这个文件明文、谁都能改,
+> 而模型手里就拿着宿主给的文件工具。M4 第五轮真 agent 实测:它把 `report.done`
+> 改成 `true`、`at` 编成了**未来时刻**(当时 19:54,写的是 19:58)——
+> 而那几栏正是"这一步做完了没有"的判据。**明文状态 = 门是纸糊的。**
+
 > **时长不在这里**:`duration` 归 `source/video.meta.json` 独家所有。
 > 一个数字两个落点迟早会不一致,宁可让 `list_projects` 多读一个文件。
 
+> **旧项目(v1)**:`project.json` 里还带着 `rev`/`progress`/`review` 三个字段,
+> 按新结构读会被 `deny_unknown_fields` 拒掉 —— 那正是想要的信号。
+> 跑一次 `vidbrief upgrade <项目>` 把它们收进 `state.bin`、把身份改写成 v2;
+> **材料一个字节都不动**(§4.10)。
+
 #### 4.2.1 用户确认(`review`,审核门)
+
+> 这一段现在住在 **`state.bin`** 里(§4.10),不在 `project.json` 里 —— 它是**判据**,
+> 而判据不能是明文可改的。字段形状没变,下面这份 JSONC 只是把它写出来给人看。
 
 ```jsonc
 "review": {
@@ -223,7 +235,7 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 
 | 算什么 | 不算什么 |
 |--------|----------|
-| 转录段**读起来是什么**(改过用改后的)、是不是标着存疑 | `correction` 的理由与说明(那是笔记,不是材料) |
+| 转录段**读起来是什么**(改过用改后的)、是不是标着存疑 | `conclusion` 的理由与说明(那是笔记,不是材料) |
 | 截图留用/丢弃 + 看图结论(匹配 / 同步 / 画面读到什么 / 问题 / 把握) | `checked_at`(同样的结论重记一遍不算改) |
 | 补图候选处理到哪一步 | 接受/拒绝的理由 |
 
@@ -285,10 +297,14 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 
 ### 4.5 转录 `transcript.json` / `transcript.fixed.json`
 
+> **v0.10 起**:`conclusion` / `checked_at` 这两栏的**判据在 `state.bin`**(§4.10);
+> `transcript.fixed.json` 退回**投影** —— 它是"原文 + 当前结论"给人读的一份全文,
+> 工具不再从它里面读结论(读它就是拿明文当判据)。
+
 两个文件**共用同一 schema 与同一 Rust 类型**:
 
-- `01_preprocess/transcript.json` —— 步 1 产出,**原始**。`corrected_text` 与 `correction` **恒为 `null`**。
-- `02_calibrate/transcript.fixed.json` —— 步 2 产出,**全量副本** + 填充纠错结论。
+- `01_preprocess/transcript.json` —— 步 1 产出,**原始**。`conclusion` **恒为 `null`**。
+- `02_calibrate/transcript.fixed.json` —— 步 2 产出,**全量副本** + 填结论。
 
 ```jsonc
 {
@@ -299,32 +315,55 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
   "generated_at": "...",         // fixed 沿用此值,不因纠错而更新
   "segments": [
     { "id": 12, "start": 479.0, "end": 484.0,
-      "text": "这是国内派森教程的第一小节",              // ASR 原文,永不就地改写
-      "corrected_text": "这是国内 Python 教程的第一小节",     // agent 写入
-      "correction": { "type": "terminology", "note": "派森 → Python",
-                      "reason": "截图 s001 画面文字为「Python 列表」" },
-      "checked_at": "2026-09-24T21:20:00+08:00" }           // 模型核验过这一段
+      "text": "这是国内派森教程的第一小节",          // ASR 原文,永不就地改写
+      "conclusion": {                                   // 四选一的结论,见下
+        "outcome": "corrected",
+        "text": "这是国内 Python 教程的第一小节",         // 改后的整句就在结论里面
+        "type": "terminology",
+        "note": "派森 → Python",
+        "reason": "截图 s008 画面文字为「Python 列表」"
+      },
+      "checked_at": "2026-09-24T21:20:00+08:00" }       // 模型核验过这一段
   ]
 }
 ```
 
-- `correction.type` ∈ `homophone`(同音错字)| `terminology`(术语/专有名词)| `number`(数字/单位/时间)| `uncertain`(存疑未改)| `other`。
-- **`type: "uncertain"` 时 `corrected_text` 必须保持 `null`** —— 存疑不等于可以臆造,
-  疑似写法只写在 `note` 里,留给用户在审查节点裁决。
+#### 结论是**四选一**,不是一个可以在旁边另填的字段
 
-#### 每一段的三种核验状态
+| `outcome` | 含义 | 带什么 |
+|-----------|------|--------|
+| `corrected` | 改了 | `text`(改后的整句)+ `type` + `note` + `reason` |
+| `kept` | 看过,**决定保留原句** | `note` + `reason` |
+| `uncertain` | 看过但定不了,**留给用户裁决** | `note`(疑似写法)+ `reason` |
+| (字段为 `null`) | 看过、没话说 | — |
+
+**为什么要做成互斥的枚举,而不是"文本一栏 + 结论一栏"两个自由字段**:
+两个字段各填各的,就能拼出"结论说要改、改后的文本栏空着"这种组合 —— 而**数数的时候没法算它**。
+M4 第五轮实测的对照表表头就是这么来的:「改过 27 段、存疑未改 0 段、合计动过 40 段」,
+27+0≠40,那 13 段"有结论、正文没动"一个桶都没进。
+现在**改了的话新文本就在结论里**,"说要改"和"改成什么"没法各说各话。
+`type` 也只剩错的性质(`homophone` / `terminology` / `number` / `other`)——
+"存疑"是一种结论,不是一种错。
+
+#### 每一段的五种状态(计数口径只有一处)
 
 | 状态 | 怎么读 | 谁定得了 |
 |------|--------|---------|
-| **还没核验** | `checked_at` 为 `null` 且不是 `uncertain` | 模型(接着审) |
-| **已核验** | `checked_at` 非空 | — |
-| **要用户拍板** | `correction.type == "uncertain"` | 人 |
+| **还没核验** | `checked_at` 为 `null` 且 `conclusion` 为 `null` | 模型(接着审) |
+| **看过、没话说** | `checked_at` 非空、`conclusion` 为 `null` | — |
+| **改了** | `conclusion.outcome == "corrected"` | — |
+| **决定不改** | `conclusion.outcome == "kept"` | — |
+| **要用户拍板** | `conclusion.outcome == "uncertain"` | 人 |
+
+**五类互斥且穷尽,加起来等于总段数** —— 口径收在 `Transcript::stats()` 一处,
+对照表、报告、视图都读它(`docs/schema/README.md` 同款说明)。写成断言钉在测试里,
+免得将来又冒出一个"27+0≠40"。
 
 **为什么要逐段记,而不是整份一个"审完了"的标记**:审核门要拦的是"**跳过了某一段**"。
 整份记一个标记,跳了 300 段也看不出来 —— 那门等于没设。
 
-`checked_at` 与 `correction` 分工:`correction` 记"**确实有话说**"(改了哪儿 / 哪儿没把握),
-`checked_at` 记"**我看过这一段了**"。**审过、没问题的那一段,`correction` 是 `null`** ——
+`checked_at` 与 `conclusion` 分工:`conclusion` 记"**确实有话说**"(改了哪儿 / 哪儿没把握 /
+决定不改),`checked_at` 记"**我看过这一段了**"。**审过、没问题的那一段,`conclusion` 是 `null`** ——
 这正是它以前和"从没审过"分不开的原因。
 
 用时间戳不用布尔,是因为顺带答了"这个结论是哪一轮审的"(视图与报告都要回答这个问题)。
@@ -333,6 +372,9 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 > 用户也就无法核对纠错是否合理。原始产出永远是只读证据。
 
 ### 4.6 截图清单 `shots.json`
+
+> **v0.10 起**:`status` / `check` / `reason` 这三栏的**判据在 `state.bin`**(§4.10);
+> 文件里它们只是投影。读了图得出的结论,现在落的是状态。
 
 ```jsonc
 {
@@ -506,6 +548,114 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 
 > 算法只负责**列候选**(指代性表达 + 时间距离),**要不要补由 agent 判断** ——
 > 用户说"看这里"不代表真有个图要看。`status` 的初值恒为 `pending`。
+>
+> `status` / `shot_id` / `note` 是**状态的投影**(§4.10):工具写出来给人看,
+> 判据在 `state.bin`。第五轮实测那次事故就出在这三栏上 —— 模型手写了整份文件
+> (280 条 `reviewed_no_shot` + 18 条 `supplemented`,**两种值都不是合法枚举**),
+> 而当时门读的就是这份明文,于是它瞎了、一路放行。
+
+### 4.10 项目状态(`state.bin`)—— **非明文**
+
+项目里唯一一个不是 JSON 的文件,装的是**推不出来的东西**:
+
+| 装 | 不装 |
+|----|------|
+| `rev`(修订号)、`progress`(四步进度) | 报告在不在(看文件在不在) |
+| `review`(用户确认 / 审核门,§4.2.1) | 转录原文(在 `transcript.json`) |
+| 每张截图的 `status` / `reason` / `check`(看图结论) | 图是哪一帧、存在哪(在 `shots.json`) |
+| 每段转录的 `conclusion` / `checked_at`(结论与核验戳) | 候选为什么被列出来(算法算的,在明文里) |
+| 每条补图候选的 `status` / `shot_id` / `note`(处置) | |
+
+#### 文件格式
+
+```
+偏移  长度  内容
+0     9     magic "VDBFSTATE"
+9     4     payload 格式版本(u32 LE;结构一改就 +1)
+13    8     payload 长度(u64 LE)
+21    32    payload 的 sha256
+53    N     payload(bincode 编码)
+```
+
+**不加密。** 加密要密钥,而密钥无论放项目里还是放工具里,模型都读得到(工具就在它手上跑),
+挡不住执意作弊,却多出一个"密钥丢了状态读不回来"的失败模式。
+这里要的不是保密,是**改不动、坏了看得出来**:手写改不动这一坨二进制;
+改了校验和对不上,工具当场报错,而不是把改过的内容当成真的接着往下走。
+
+**版本不匹配也报错**,不做静默兼容 —— 和 `project.json` 的 `schema_version` 同一个道理:
+"读到不认识的状态却继续跑"比"读不出来"危险得多。
+
+#### 读不动的三态(这条是第五轮事故的全部差别)
+
+| 情况 | 行为 |
+|------|------|
+| **不在** | 按**空状态**算(什么都还没核验 → 门全拦),但 `status` / `get_project` 要把这件事说出来 |
+| **在、读得动** | 正常 |
+| **在、读不动** | **报错**。每一件工具都拒绝开工,报错里点名去路(`vidbrief upgrade <项目>`) |
+
+为什么"不在"不报错、而"读不动"报错:**"不在"推不出"被人拿掉了"** ——
+新项目、手搓的项目目录都长这样,而且按空状态算是**最保守**的那头(拿不到任何便宜);
+"读不动"则意味着**不知道谁审过什么**,只能按"都还没核验"算,而那正是要拦的方向。
+两者都往保守那头倒 —— 这是那次事故唯一有效的教训:
+`load().ok()` 把一份读不动的材料当成"没有",门数出 0 条、一路放行。
+
+#### 内容底账:门的第①条是从文件里数数的
+
+门的第①条数的是"**还有哪些没核验**",而它是从明文文件里数出来的 ——
+**文件里没有的行,它当然看不见**。于是模型不必审 322 段:
+把没审的那些从 `transcript.json` 里拿掉,门就以为活干完了。
+
+> 用户当时问的是「门控不放过,它改了不还得改回去吗」——**改**是这样(改多了得改回去),
+> **拿掉**不是:删掉了行,门反而看不见那部分活。这条是被一个专门的测试钉住的
+> (`removing_rows_from_the_plaintext_must_not_hide_work`,先红后绿)。
+
+所以状态里给三份材料各记一份**内容底账**(`ContentPrint`:几条 + 内容的 sha256):
+
+| 记什么 | 不记什么 |
+|--------|----------|
+| 转录:段号 / 区间 / 正文 + 时长与模型 | 结论、核验戳(那是状态) |
+| 截图:哪一张 / 哪一刻 / 存在哪 / 从哪来 | 留用还是弃用、看图结论 |
+| 候选:候选号 / 时刻 / 指向哪一段 / 那段原文 / 触发原因 | 处置结论与理由 |
+
+**按内容算,不按文件字节算**:换个缩进、重排键序不算材料变了(那是同一份内容换个写法),
+改一栏**投影**状态也不算(那本来就允许人手改)。
+
+门开口之前先对一遍;对不上就拦,并且点名两条去路:
+
+```bash
+vidbrief preprocess <项目>                          # ① 重跑产生它的那一步,把工具算的那份找回来
+vidbrief upgrade <项目> --accept-material           # ② 显式认下现在这份(会报出重记了哪几份、原来几条现在几条)
+```
+
+**底账默认不换**:材料被人改过时,不显式说 `--accept-material`,`upgrade` 只会把话说清楚
+(`底账没动 —— 它跟现在这份对不上(底账 322 条,现在 22 条);要认现在这份,加 --accept-material`)。
+不然底账就成了摆设 —— 而它挡的正是"把没审的行拿掉"这件事。
+
+`vidbrief status` 会把对不上的地方列成 ✗ 行(`materials.content_stale`),并以此定非零退出码。
+
+#### 明文文件退回"投影"
+
+`shots.json` 里那几栏、`transcript.fixed.json`、`supplement_requests.json` 里那几栏,
+**只是上一次写出去的样子**:
+
+- **读**:先读明文里的**内容**,再把状态盖上去(工具、视图都走这条路);
+- **写**:调用方改完那份合并过的对象再交回来,内容进明文、状态进 `state.bin`,**同出一源**;
+- **对不上时**:`vidbrief status` 把它们列出来给人看(`projection_stale`),
+  但**门不看** —— 手改投影骗不过门。
+
+**为什么保留投影**:转录要能直接读、时间线要能画、人要用编辑器翻;而且它是一份
+"上次工具写出去的样子"的留档。但它**不驱动任何判断**。
+
+#### 两条给人和 agent 的出口
+
+```bash
+vidbrief upgrade <项目>           # 旧格式迁过来 / 状态文件不见了读不动时重起一份
+vidbrief upgrade <项目> --fresh   # 什么都不收,状态清零(材料原样保留)
+```
+
+`upgrade` 的产物永远是**最保守**的那一份:读得到什么就收什么,读不到的就是"还没核验"。
+**拿它绕门是绕不过去的** —— "还没核验"只会让门拦得更死。所以就算这条命令行
+模型自己也跑得动,它也不构成一条捷径。
 
 ---
 
@@ -645,13 +795,43 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 用户说"每个节点找我确认",模型自然会在全绿之后仍然停一停;说"全程托管只看结果",
 就一路做下去。**门在这里不该替用户做决定,也不该给他添麻烦。**
 
-每一项的三种状态从哪读(形状见 §4.5 与 §4.2.1):
+#### 门上的每一条规则,以及消掉它的那一步
+
+规则一多,最怕的不是某条错,而是**两条各说各的**(体检说没事、门却拦着),
+或者**拦下来说不出去路**。所以这张表是硬要求:每加一条规则,都要在"去路"那一栏
+写得出一个具体的动作,并在测试里有一条"照做就能过"。
+
+| # | 规则 | 什么时候触发 | 消掉它的那一步 |
+|---|------|--------------|----------------|
+| ⓪ | **材料不是工具写出去的那一份了**(内容底账对不上,§4.10) | 材料被手改 / 被拿掉 / 少了几行 | 重跑产生它的那一步(`preprocess`、`find_supplement_candidates`),或 `vidbrief upgrade --accept-material` |
+| ① | 还没核验(截图 / 转录段 / 补图候选) | 有没审完的 | `record_shot_check` / `apply_corrections` 的 `reviewed` / `disposition_supplements` |
+| ② | 看图结论的**凭据**对不上材料 | 图不在了 / 引的那句话不在材料里 | 重看一眼那张图,给一句**照抄**的 `evidence_quote` |
+| ③ | 有"核验过、要用户拍板"的项 | 模型自己说没把握(`confidence: low`) | 问过用户、把话落到条目上;或 `approve` 记下"他说先这样" |
+
+三条**不拦、只报告**的(它们是给人看的,不是门):
+
+| 规则 | 出现在哪 | 谁能发现 |
+|------|---------|---------|
+| 明文投影与状态对不上(那几栏状态被手改) | `vidbrief status` 的 ⚠️ 行 + `materials.projection_stale` | 门不看它;下一次写这份材料的工具调用会盖回去 |
+| 状态文件不在 / 读不动 | `status` 的 ⚠️/✗ 行 + `materials.state_status` | 读不动时**每件工具都拒绝开工**(§4.10) |
+| 材料文件在、但读不动 | `status` 的 `materials.unreadable` | 工具当场报错并点名重算那一步 |
+
+每一项的三种状态从哪读(形状见 §4.5 与 §4.2.1)。**读的是 `state.bin`(§4.10),
+不是明文材料** —— 明文那几栏只是投影,谁都能改,而判据不能是能随手写的东西:
 
 | 项 | 已核验 | 未核验 | 要用户拍板 |
 |----|--------|--------|-----------|
 | 截图 | `check` 有 | `check` 为 `null` | **模型自己说没把握**(`check.confidence == "low"`) |
-| 转录段 | `checked_at` 非空 | `checked_at` 为空 | `correction.type == uncertain` |
+| 转录段 | `checked_at` 非空 | `checked_at` 为空 | `conclusion.outcome == uncertain` |
 | 补图候选 | 已接受或已拒绝 | 还是 `pending` | ——(要不要补,模型自己定得了) |
+
+状态**读不动**时门按最保守那头算:每件工具都拒绝开工,报错点名
+`vidbrief upgrade <项目>`(见 §4.10)。那次事故的全部差别就在这两个方向之间:
+
+| 遇到 | 按哪头算 | 结果 |
+|------|---------|------|
+| 读不动 → 当成"没有" | 最松 | 门看不见那 298 条候选,**一路放行**(实测事故) |
+| 读不动 → 按"还没核验" | 最保守 | 门拦住,而且说清怎么自救 |
 
 判 `drop` 的截图不用核验 —— 它不进总结,没人关心画面上是什么。
 
@@ -829,7 +1009,7 @@ agent: → approve()        ← **这一步不过,下面写不了**
 
 ### 9.1 形态与"弹出 UI"
 
-- MCP 工具 `render_timeline(project_id, source="preprocess"|"calibrate", out_path?)` → 生成 HTML,**并可顺带启动本地查看服务 + 自动打开默认浏览器**(即"弹出 UI")。
+- MCP 工具 `render_timeline(project_id, open_browser?)` → 生成 HTML,**并顺带启动本地查看服务 + 自动打开默认浏览器**(即"弹出 UI")。`render_calibration_table` 同形态(§9.3)。
 - 这是每一步的"图形化检查界面"。
 - **本地查看服务是什么**:一个绑在 `127.0.0.1` 的极简 HTTP 静态服务,把项目目录当站点发布(`http://127.0.0.1:<port>/<项目 id>/…`),由工具按需拉起。**(已实现,见 `vidbrief-viz::server`)**
   - **为什么需要**:浏览器直接 `file://` 打开 HTML 时,`<video>` 常因跨域/安全限制无法加载本地视频,"拖时间轴→视频回跳"就会失效;走 `http://127.0.0.1` 后,视图/图片/视频同源,`<video>` 的 seek/播放正常。
@@ -854,7 +1034,7 @@ agent: → approve()        ← **这一步不过,下面写不了**
 │    (颜色区分 origin;点击看大图 + agent 校准结论)                     │
 │────────────────────────────────────────────────────────────────────│
 │ ④ 语音转文字   语音转文字      语音转文字        语音转文字          │
-│    (显示 corrected_text;悬停看原文;点击看纠错对照)                   │
+│    (显示改后的文本;悬停看原文;点击看纠错对照)                        │
 ├────────────────────────────────────────────────────────────────────┤
 │ ⑤ [▶ 视频播放器] —— 与时间轴双向联动                                │
 └────────────────────────────────────────────────────────────────────┘
@@ -872,7 +1052,7 @@ agent: → approve()        ← **这一步不过,下面写不了**
 
 | 视图 | 内容 | 步 |
 |------|------|----|
-| 校准对照表 `calibrate.html` | 逐条纠错(原文/修正/理由/是否采纳)+ 截图匹配结论(不匹配高亮) | 2 |
+| 校准对照表 `calibrate.html` | 一屏看完:每张截图的缩略图与结论(图文不符/没把握高亮,弃用带理由)+ 每段转录的原文/现读法/结论(未核验淡显)+ 末尾内嵌校准日志原文。要替人答四个问题(M4 联调提出):**哪些图是空的**(缩略图并排)、**哪几张是同一张幻灯片**(同上)、**哪几段转录被动过**(结论并排)、**结论是哪一轮写的**(每条带写下的时刻,对照日志的轮次时间段) | 2 |
 | 补图清单 | 补图请求 + 已补图 | 2 |
 | 报告预览 | `report.html`(同样含视频回跳) | 4 |
 
@@ -964,7 +1144,7 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 > | 模板 | 依赖 | 状态 |
 > |------|------|------|
 > | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ M3 |
-> | P2 `fix_transcript` | apply_corrections / **render_calibration_table** | ⏳ M4 |
+> | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ M4 |
 > | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ M3 |
 > | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ M3 |
 > | P5 `build_report` | **build_report** | ⏳ M6 |
@@ -1027,11 +1207,23 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 ```bash
 vidbrief init <video> [-n id] [-t title] [-p dir]   # 建项目(已实现)
 vidbrief preprocess <project> [options]             # 步 1:差帧图/密集区/截图/转录(已实现)
-vidbrief ui <project> [--no-open]                   # 时间线视图 + 本地服务(已实现)
 vidbrief status <project> [--verify]                # 状态 + 健康检查(已实现)
+vidbrief upgrade <project> [--fresh]                # 对齐到当前版本 / 重起一份状态(已实现,§4.10)
+vidbrief approve <project> [-n note]                # 记下"这一步用户看过了"(已实现)
+vidbrief correct <project> --json <文件|->          # 转录结论(apply_corrections 的命令行版)
+vidbrief shot-check <project> --json <文件|->       # 看图结论(record_shot_check)
+vidbrief supplements <project> --json <文件|->      # 处置补图候选(disposition_supplements)
+vidbrief summary <project> --md <文件|->            # 写总结(过校准的门)
+vidbrief report <project> --md <文件|->             # 写报告
+vidbrief ui <project> [--no-open]                   # 时间线视图 + 本地服务(已实现)
 vidbrief mcp        [--stdio]                       # 启动 MCP 服务(已实现)
 vidbrief help                                       # 用法
 ```
+
+> **每个写动作都有一条命令行的路**(devlog [260925-34]):走同一套 `ops` 代码、
+> 同一把锁、同一个门 —— 不是另一条捷径。第五轮实测的教训是 MCP 会断
+> (agent 把它自己一起关掉了),而当时**四个写动作一个命令都没有**,
+> 它手上再没有任何能写项目的入口,只能拿宿主给的文件工具直接改文件。
 
 > CLI 从 M3 起**只剩"解析参数 + 打印"** —— 它写的是**派生视图**,不是材料,
 > 所以 `ui` 不取写锁:两个会话同时渲染也不会有坏结果,
@@ -1088,8 +1280,8 @@ vidbrief help                                       # 用法
 
 **约定**:【供】= 把材料给 agent;【存】= 把 agent 的结论落盘;【算】= 纯算法动作。**没有任何工具调用外部模型 API。**
 
-> **实现进度(M3)**:下表除 `build_report` 与 `render_calibration_table` 外**全部已实现**。
-> 那两个被推迟,是因为它们的实质是**渲染器**(报告 HTML / 校准对照表),各自是 M6、M4 的主体,
+> **实现进度**:下表除 `build_report` 外**全部已实现**。
+> `build_report` 被推迟,是因为它的实质是**渲染器**(报告 HTML),是 M6 的主体,
 > 而不是这里的薄包装 —— 详情见 [devlog 260925-06](./devlog/2026-09.md)。
 > `extract_shot` 与 `request_shot` 是**同一个实现的两个名字**(模板里两种说法都会出现,
 > 不必让 agent 记哪一个才对)。
@@ -1120,7 +1312,7 @@ vidbrief help                                       # 用法
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
 | `record_shot_check` | 存 | `project_id, shot_id, {match, audio_visual_sync, type_read, issues, confidence, evidence_quote}` | 更新 `shots.json`。`evidence_quote` 是**照抄**的一句转录原文,工具搜到就记下段号,搜不到拒收(§4.6) |
-| `apply_corrections` | 存 | `project_id, [{segment_id, corrected_text, reason}], [reviewed]` | 更新 `transcript.fixed.json` + `transcript.diff.md`;`reviewed` 是**审过、没问题**的段 id —— 不报等于没审 |
+| `apply_corrections` | 存 | `project_id, [{segment_id, outcome, text?, type?, note?, reason}], [reviewed]` | 更新 `transcript.fixed.json` + `transcript.diff.md`;`outcome` ∈ `corrected`/`kept`/`uncertain`;`reviewed` 是**审过、没问题**的段 id —— 不报等于没审 |
 | `write_note` | 存 | `project_id, path, md, [mode], [count_round]` | 写 `02_calibrate/` 与 `03_summary/` 下的 `.md`(交叉印证、校准日志、笔记)。**有专属工具的文件写不了**:`summary.md` 归 `write_summary`、`transcript.diff.md` 归 `apply_corrections` |
 | `approve` | 存 | `project_id, [note]` | 用户说"这些我知道,就这样过"时记下来,并快照当时的计数与逐条内容摘要 —— 放行**"要用户拍板"那一批**(§6.1.1、§4.2.1)。**不是门的开关**:没核验的它照样拦 |
 | `write_summary` | 存 | `project_id, md` | 落盘 `summary.md`;**先过 `review.calibrate` 那道门** |
@@ -1137,8 +1329,8 @@ vidbrief help                                       # 用法
 ### F. 可视化
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
-| `render_timeline` | 算 | `project_id, source?, out_path?` | `html_path` |
-| `render_calibration_table` | 算 | `project_id` | `html_path` |
+| `render_timeline` | 算 | `project_id, open_browser?` | `html_path, url` |
+| `render_calibration_table` | 算 | `project_id, open_browser?` | `html_path, url`(对照表内容见 §9.3) |
 
 ---
 
@@ -1178,7 +1370,7 @@ agent: → 重写 MD → build_report(html) 重渲染
 | **M1 vidbrief-core + 步1** ✅ | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
 | **M2 时间线视图** ✅ | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
 | **M3 MCP 骨架** ✅ | `vidbrief-mcp` stdio 服务 + A–F 组工具(除两个渲染器)+ 写锁 + P1/P3/P4 | M1,M2 |
-| **M4 步2 循环** 🔄 | `render_calibration_table` 对照表视图 + 提示模板 P2 + 联调(自家客户端那一遍已走通) | M3 |
+| **M4 步2 循环** ✅ | `render_calibration_table` 对照表视图 + 提示模板 P2 + 联调(真 agent 五轮;门的判据三轮定稿) | M3 |
 | **M5 步3 总结** | 自主探索联调 + 提示模板 P4 的实战打磨 | M4 |
 | **M6 步4 报告** | `vidbrief-report` + `build_report` + 提示模板 P5 | M5 |
 | **M7 加固** | 增量重跑、失败重试、批量、性能、进度通知、外挂接口 | 全部 |

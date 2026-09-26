@@ -271,11 +271,13 @@ fn examples_are_mutually_consistent() {
     for (raw, fix) in transcript.segments.iter().zip(&fixed.segments) {
         assert_eq!(raw.id, fix.id);
         assert_eq!(raw.text, fix.text, "段 {} 的原文被改写了 —— 原始转录永不就地修改", raw.id);
-        assert!(raw.correction.is_none(), "原始 transcription 不该带纠错说明(段 {})", raw.id);
-        if fix.correction.as_ref().is_some_and(|c| matches!(c.kind, vidbrief_project::CorrectionType::Uncertain)) {
+        assert!(raw.conclusion.is_none(), "原始转录不该带结论(段 {})", raw.id);
+        // 「说要改」和「改成什么」现在在同一个枚举里,不可能各说各话 ——
+        // 存疑那一种连文本都没有,想臆造也没地方放
+        if let Some(vidbrief_project::Conclusion::Corrected { text, .. }) = &fix.conclusion {
             assert!(
-                fix.corrected_text.is_none(),
-                "段 {} 标为 uncertain 就不能同时改文本 —— 存疑不等于可以臆造",
+                !text.trim().is_empty(),
+                "段 {} 的结论说改了,却没给改后的文本",
                 raw.id
             );
         }
@@ -313,11 +315,18 @@ fn examples_are_mutually_consistent() {
         }
     }
 
-    // 项目进度与文件存在性一致
-    assert!(project.progress.preprocess.done, "示例里已经跑完步 1,progress 应标记完成");
-    assert!(project.progress.preprocess.at.is_some());
-    assert!(project.progress.calibrate.rounds > 0);
-    assert!(!project.progress.summarize.done, "示例还没到总结步");
+    // 状态(进度、核验戳、拍板记录)不在 project.json 里 —— 它有自己的家(state.bin),
+    // 所以这个文件里连字段都不该出现。
+    assert_eq!(project.id.as_ref(), "demo", "身份该在这儿");
+    let project_text = read(&example_path("project.json"));
+    for gone in ["\"rev\"", "\"progress\"", "\"review\""] {
+        assert!(
+            !project_text.contains(gone),
+            "project.json 里不该再有 {gone} —— 状态已经挪进 state.bin"
+        );
+    }
+    // 示例之间自洽那部分由材料文件自己保证:截图指向真实区域、转录段号存在、
+    // 补图请求指向真实截图 —— 那些都不依赖状态。
 }
 
 fn assert_segments_well_formed(t: &Transcript, name: &str) {
@@ -336,8 +345,8 @@ fn writer_output_validates_against_the_schemas() {
     // 示例文件是手写的,只能证明"人能写对";这里证明"工具自己能写对" ——
     // 特别是时间戳这种由代码生成、手写示例覆盖不到的字段。
     use vidbrief_project::{
-        ChangePoint, Confidence, Correction, CorrectionType, ProjectId, Region, RegionParams,
-        RegionReason, RegionStats, RelPath, Segment, ShotCheck, ShotStatus, SourceLink, now,
+        ChangePoint, Confidence, CorrectionType, ProjectId, Region, RegionParams, RegionReason,
+        RegionStats, RelPath, Segment, ShotCheck, ShotStatus, SourceLink, now,
     };
 
     let rel = RelPath::new("source/video.mp4").unwrap();
@@ -376,8 +385,8 @@ fn writer_output_validates_against_the_schemas() {
             start: 0.0,
             end: 2.5,
             text: "各位好".into(),
-            corrected_text: Some("各位好,开始".into()),
-            correction: Some(Correction {
+            conclusion: Some(vidbrief_project::Conclusion::Corrected {
+                text: "各位好,开始".into(),
                 kind: CorrectionType::Homophone,
                 note: "好 → 好,开始".into(),
                 reason: "上下文".into(),
@@ -427,8 +436,6 @@ fn writer_output_validates_against_the_schemas() {
         r"E:\videos\demo.mp4",
         SourceLink::Copy,
     );
-    project.progress.preprocess.mark_done();
-    project.progress.calibrate.bump();
     project.glossary = Some(vec!["样本".into()]);
 
     // 顺便验证时间戳确实没有小数秒 —— 这一条是这次运行真实踩出来的

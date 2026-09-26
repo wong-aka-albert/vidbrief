@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vidbrief 01_preprocess/shots.json",
-  "description": "关键截图清单 + agent 的校准结论。步 1 由工具生成,步 2/3 由 agent 增删改(record_shot_check / extract_shot / update_shot)。设计见 docs/DESIGN.md §4.6、§6.1。",
+  "description": "关键截图清单 + agent 的校准结论。步 1 由工具生成,步 2/3 由 agent 增删改(record_shot_check / extract_shot / update_shot)。设计见 docs/DESIGN.md §4.6、§6.1。⚠️ status / reason / check 三栏**只是投影**:判据在 state.bin(§4.10),手改这里骗不过门,只会被 vidbrief status 记一笔。",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -72,7 +72,7 @@
               "keep",
               "drop"
             ],
-            "description": "是否保留。新生成的图默认 keep"
+            "description": "是否保留(**投影**;判据在 state.bin)。新生成的图默认 keep"
           },
           "reason": {
             "oneOf": [
@@ -84,14 +84,14 @@
                 "minLength": 1
               }
             ],
-            "description": "补图理由(origin 为 agent_request / manual 时应有值)"
+            "description": "补图理由(**投影**;判据在 state.bin)。origin 为 agent_request / manual 时应有值"
           },
           "created_at": {
             "$ref": "#/$defs/timestamp",
             "description": "这张图被加入清单的时间(补图会晚于 generated_at)"
           },
           "check": {
-            "description": "agent 通过 record_shot_check 写入的看图结论;未校准时为 null",
+            "description": "agent 通过 record_shot_check 写入的看图结论;未校准时为 null。**投影**:判据在 state.bin(§4.10)",
             "oneOf": [
               {
                 "type": "null"

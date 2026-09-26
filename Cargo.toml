@@ -25,6 +25,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# 项目状态(state.bin)的载荷编码。选它是因为**位置编码**:字段名不进文件,
+# 手写一份"看起来对"的状态基本不可能(JSON 那种自描述格式反倒好改)。
+# 代价是它不支持内部标签的枚举(deserialize_any),所以 `Conclusion` 在落盘时
+# 换了一套等价表示 —— 见 `vidbrief_project::state` 的 `StoredConclusion`。
+bincode = "1.3"
 # 本地查看服务:极简同步 HTTP(不需要 async 运行时)
 tiny_http = "0.12"
 # 渲染后自动打开默认浏览器

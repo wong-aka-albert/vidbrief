@@ -1,10 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vidbrief transcript.json / transcript.fixed.json",
-  "description": "结构化转录。原始文件 01_preprocess/transcript.json 的 corrected_text 与 correction 恒为 null;02_calibrate/transcript.fixed.json 是填充了纠错结果的全量副本,两者共用本 schema。设计见 docs/DESIGN.md §4.5、§6.2。",
+  "description": "结构化转录。原始文件 01_preprocess/transcript.json 的 conclusion 恒为 null;02_calibrate/transcript.fixed.json 是带结论的全量副本,两者共用本 schema。设计见 docs/DESIGN.md §4.5、§6.2。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["source", "model", "language", "duration", "generated_at", "segments"],
+  "required": [
+    "source",
+    "model",
+    "language",
+    "duration",
+    "generated_at",
+    "segments"
+  ],
   "properties": {
     "source": {
       "$ref": "#/$defs/relpath",
@@ -34,7 +41,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "start", "end", "text", "corrected_text", "correction", "checked_at"],
+        "required": [
+          "id",
+          "start",
+          "end",
+          "text",
+          "conclusion",
+          "checked_at"
+        ],
         "properties": {
           "id": {
             "type": "integer",
@@ -54,28 +68,96 @@
             "minLength": 1,
             "description": "ASR 原始输出,永不就地改写"
           },
-          "corrected_text": {
-            "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }],
-            "description": "agent 修正后的整句文本;未修改或不改时保持 null"
-          },
-          "correction": {
-            "description": "纠错说明。type 为 uncertain 表示存疑但未改,此时 corrected_text 必须为 null",
+          "conclusion": {
+            "description": "对这一段下的结论。null = 没话说(也可能还没看过 —— 看 checked_at)。四种结论互斥且穷尽:corrected 改了 / kept 决定保留原句 / uncertain 存疑留给人 / null 没问题。**「改了」的文本就在它里面**,不给它单开一栏 —— 那样两者能各说各话(实测:结论说要改、文本栏空着,数数时整整一档掉在地上)。⚠️ **投影**:判据在 state.bin(见 docs/DESIGN.md §4.10);原始转录里恒为 null",
             "oneOf": [
-              { "type": "null" },
+              {
+                "type": "null"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["type", "note", "reason"],
+                "required": [
+                  "outcome",
+                  "text",
+                  "type",
+                  "note",
+                  "reason"
+                ],
                 "properties": {
+                  "outcome": {
+                    "const": "corrected",
+                    "description": "改了 —— 新文本就在这条里"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "改后的整句"
+                  },
                   "type": {
                     "type": "string",
-                    "enum": ["homophone", "terminology", "number", "uncertain", "other"],
-                    "description": "homophone=同音错字;terminology=术语/专有名词;number=数字/单位/时间;uncertain=存疑未改;other=其它"
+                    "enum": [
+                      "homophone",
+                      "terminology",
+                      "number",
+                      "other"
+                    ],
+                    "description": "错的性质:homophone=同音错字;terminology=术语/专有名词;number=数字/单位/时间;other=其它"
                   },
                   "note": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "改动内容,如「派森 → Python」;uncertain 时写疑似正确写法"
+                    "description": "改动内容,如「派森 → Python」;kept/uncertain 时写为什么这么定"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "判断依据(画面文字 / 上下文 / 术语表)"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "outcome",
+                  "note",
+                  "reason"
+                ],
+                "properties": {
+                  "outcome": {
+                    "const": "kept",
+                    "description": "看过,决定保留原句"
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "改动内容,如「派森 → Python」;kept/uncertain 时写为什么这么定"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "判断依据(画面文字 / 上下文 / 术语表)"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "outcome",
+                  "note",
+                  "reason"
+                ],
+                "properties": {
+                  "outcome": {
+                    "const": "uncertain",
+                    "description": "看过但定不了,留给用户裁决。疑似写法写在 note 里"
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "改动内容,如「派森 → Python」;kept/uncertain 时写为什么这么定"
                   },
                   "reason": {
                     "type": "string",
@@ -88,10 +170,14 @@
           },
           "checked_at": {
             "oneOf": [
-              { "type": "null" },
-              { "$ref": "#/$defs/timestamp" }
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/$defs/timestamp"
+              }
             ],
-            "description": "模型**核验过这一段**的时刻。null = 还没核验。这是「跳过某一段」唯一看得出来得的地方 —— 整份记一个标记,跳了 300 段也看不出。三种核验结论的读法见 docs/DESIGN.md §4.5"
+            "description": "模型**核验过这一段**的时刻。null = 还没核验。这是「跳过某一段」唯一看得出来得的地方 —— 整份记一个标记,跳了 300 段也看不出。三种核验结论的读法见 docs/DESIGN.md §4.5。⚠️ **投影**:判据在 state.bin(§4.10)"
           }
         }
       }

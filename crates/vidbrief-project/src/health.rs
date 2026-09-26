@@ -156,7 +156,7 @@ mod tests {
         layout.create_dirs().unwrap();
 
         let rel = crate::source::video_rel_for(Path::new("orig.mp4"));
-        let mut project = Project::new(
+        let project = Project::new(
             ProjectId::new("t").unwrap(),
             "t",
             rel.clone(),
@@ -175,7 +175,6 @@ mod tests {
             probed_at: crate::now(),
             prober: "test".into(),
         };
-        project.progress.preprocess.mark_done();
         (root, layout, project, meta)
     }
 

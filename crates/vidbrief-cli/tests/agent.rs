@@ -547,7 +547,7 @@ fn p4_summarize_video_tools_all_answer() {
 
     // 步 3 该被标上了 —— 用户靠这个知道走到哪了
     let status = as_json(&client.tool_text("get_project", json!({"project_id": proj})));
-    assert_eq!(status["project"]["progress"]["summarize"]["done"], true, "{status}");
+    assert_eq!(status["progress"]["summarize"]["done"], true, "{status}");
     assert_eq!(status["materials"]["summary_md"], true);
 }
 
@@ -578,14 +578,16 @@ fn corrections_close_the_loop_and_leave_the_original_alone() {
             "corrections": [
                 {
                     "segment_id": 2,
-                    "corrected_text": "就比方说没有用上元组类型的很多的初学者朋友",
+                    "outcome": "corrected",
+                    "text": "就比方说没有用上元组类型的很多的初学者朋友",
                     "type": "terminology",
                     "note": "元祖 → 元组",
                     "reason": "上下文语义:这是面向学员的系列课",
                 },
                 {
                     "segment_id": 5,
-                    "corrected_text": "这个是负责讲解的张晓明",
+                    "outcome": "corrected",
+                    "text": "这个是负责讲解的张晓明",
                     "type": "terminology",
                     "note": "张小明 → 张晓明",
                     "reason": "画面文字:编辑器上方写着「张晓明」",

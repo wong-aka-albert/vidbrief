@@ -20,8 +20,8 @@ pub mod data;
 pub mod html;
 pub mod server;
 
-pub use data::{TimelineData, relative_url};
-pub use html::{render_timeline, render_timeline_html};
+pub use data::{CalibrationData, TimelineData, relative_url};
+pub use html::{render_calibration_table, render_calibration_table_html, render_timeline, render_timeline_html};
 pub use server::{
     Action, ActionHandler, ensure_running, has_action_handler, mount, set_action_handler, url_for,
 };

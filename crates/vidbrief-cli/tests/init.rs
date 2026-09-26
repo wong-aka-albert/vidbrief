@@ -11,6 +11,13 @@ use std::process::{Command, Output};
 
 use vidbrief_project::{Layout, Project, Shot, VideoMeta};
 
+/// 读项目状态(它现在住在 `state.bin` 里,不在 `project.json`)。
+fn state_of(layout: &Layout) -> vidbrief_project::ProjectState {
+    vidbrief_project::ProjectState::read_file(&layout.state_file())
+        .expect("读状态")
+        .expect("状态文件该在")
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -99,10 +106,12 @@ fn init_builds_the_whole_skeleton() {
     let project = Project::load(&layout.project_json()).expect("project.json 读不回来");
     assert_eq!(project.id.as_ref(), "test-sample");
     assert_eq!(project.name, "test_sample", "未给 --title 时用视频文件名");
-    assert_eq!(project.rev, 1);
     assert!(project.source.path.as_str().starts_with("source/video."));
-    assert!(!project.progress.preprocess.done, "刚建的项目还没跑过步 1");
     assert!(project.glossary.is_none(), "术语表默认关闭");
+    // 状态**建项目时就有了**(空的那一份):"状态不在"因此只剩"被人拿掉了"一种意思
+    let state = state_of(&layout);
+    assert_eq!(state.rev, 1);
+    assert!(!state.progress.preprocess.done, "刚建的项目还没跑过步 1");
 
     let meta = VideoMeta::load(&layout.video_meta()).expect("video.meta.json 读不回来");
     assert_eq!(meta.path, project.source.path, "两份文件记的视频路径必须一致");

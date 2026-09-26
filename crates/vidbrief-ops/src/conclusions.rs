@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use vidbrief_project::{
-    Confidence, Correction, CorrectionType, RelPath, ShotCheck, Shots, Transcript,
+    Conclusion, CorrectionType, Confidence, RelPath, ShotCheck, Transcript,
 };
 
 use crate::project::OpenProject;
@@ -48,12 +48,12 @@ pub struct ShotCheckInput {
 /// 让模型自己报段号的话,它就会报错段号,而那又是一处没法核对的自述:
 /// 我们要的不是"它说引了第几段",是"**它引的那句话真的在材料里**"。
 pub fn record_shot_check(
-    opened: &OpenProject,
+    opened: &mut OpenProject,
     id: vidbrief_project::ShotId,
     input: &ShotCheckInput,
 ) -> Result<ShotCheck> {
-    let path = opened.layout().shots_json();
-    let mut shots = Shots::load(&path).context("读取 shots.json 失败")?;
+    // 读的是"内容 + 状态"合起来的那一份(见 `materials` 的模块文档)
+    let mut shots = crate::materials::shots(opened)?;
     let shot = shots
         .get(id)
         .with_context(|| format!("项目里没有截图 {id}"))?
@@ -120,25 +120,22 @@ pub fn record_shot_check(
         .get_mut(id)
         .expect("上面刚查到过,这里必然还在")
         .check = Some(check.clone());
-    shots.save(&path).context("写入 shots.json 失败")?;
+    // 结论进状态(明文那份跟着重写成投影)—— **只此一条路**,
+    // 手改 `shots.json` 里那几栏骗不过门(见 devlog [260925-30] 第 2 条)
+    crate::materials::save_shots(opened, &shots)?;
     Ok(check)
 }
 
 // ── 转录纠错 ─────────────────────────────────────────────────────────
 
-/// `apply_corrections` 的一条。
+/// `apply_corrections` 的一条结论。
 #[derive(Debug, Clone)]
 pub struct CorrectionInput {
     /// 转录段 id(`transcript.json` 里的序号)。
     pub segment_id: u32,
-    /// 改后的整句。**`None` = 不改**(标存疑或只留个说明)。
-    pub corrected_text: Option<String>,
-    pub kind: CorrectionType,
-    /// 改动内容,如 `派森 → Python`。不给就按前后缀差异自动掐出来;
-    /// `corrected_text` 为 `None` 时**必须给**,否则这条记录没有任何信息量。
-    pub note: Option<String>,
-    /// 判断依据(画面文字 / 上下文 / 术语表)。
-    pub reason: String,
+    /// 结论。**和落盘的那条是同一个类型** —— 工具层不用自己拼,
+    /// 也就拼不出"说要改、改后文本空着"这种自相矛盾的组合。
+    pub conclusion: Conclusion,
 }
 
 /// 纠错的落盘结果。
@@ -152,11 +149,13 @@ pub struct CorrectionOutcome {
     pub total_segments: usize,
     /// 本次写了几条。
     pub applied: usize,
-    /// 全稿里被真改过的段数(**累计**,不是本次)。
-    pub changed: usize,
+    /// 全稿里**改了正文**的段数(累计)。
+    pub corrected: usize,
+    /// 全稿里**决定不改**的段数(累计)。
+    pub kept: usize,
     /// 全稿里"存疑但未改"的段数(累计)。
     pub uncertain: usize,
-    /// 全稿里**核验过**的段数(累计)。含改过的、没动过的、和标了存疑的。
+    /// 全稿里**核验过**的段数(累计)。含改过的、决定不改的、存疑的、和没话说的。
     pub reviewed: usize,
 }
 
@@ -176,14 +175,14 @@ pub struct CorrectionOutcome {
 /// 所以这个列表是"这一段我看过了,不用改",和 `items` 一起提交(它们本来就是
 /// 同一趟活:读完一批 → 挑出有问题的 → 其余照过)。改过的段自动算审过,不用重复列。
 pub fn apply_corrections(
-    opened: &OpenProject,
+    opened: &mut OpenProject,
     items: &[CorrectionInput],
     reviewed: &[u32],
 ) -> Result<CorrectionOutcome> {
     if items.is_empty() && reviewed.is_empty() {
         bail!("没有要写的东西 —— `corrections` 和 `reviewed` 至少给一个");
     }
-    let layout = opened.layout();
+    let layout = opened.layout().clone();
     let raw = Transcript::load(&layout.transcript()).with_context(|| {
         format!(
             "读取原始转录失败:{} —— 步 1 可能还没做转录",
@@ -191,12 +190,10 @@ pub fn apply_corrections(
         )
     })?;
 
-    // 已经有纠错稿就在它上面继续改,不要每次从原文重来(否则上一批的结论会被抹掉)
-    let mut fixed = if layout.transcript_fixed().is_file() {
-        Transcript::load(&layout.transcript_fixed()).context("读取已有的纠错稿失败")?
-    } else {
-        raw.clone()
-    };
+    // 上一批的结论在**状态**里,这里读原文叠一份出来继续改
+    //(以前是读上一份纠错稿,现在那份只是给人看的投影 —— 读它等于拿明文当判据)
+    let mut fixed = raw.clone();
+    opened.state().apply_to_transcript(&mut fixed);
 
     // 先整体校验一遍再动手:半路失败会留下"改了一半"的文件,比整批拒绝更难收拾
     let mut unknown = Vec::new();
@@ -224,23 +221,7 @@ pub fn apply_corrections(
             .position(|s| s.id == item.segment_id)
             .expect("上面刚校验过");
         let original = fixed.segments[index].text.clone();
-        let corrected = item.corrected_text.clone();
-
-        let note = match (&item.note, &corrected) {
-            (Some(note), _) => note.clone(),
-            (None, Some(new)) => changed_span(&original, new),
-            (None, None) => bail!(
-                "第 {} 段标了「不改」却没给 note —— 存疑结论必须写清疑似写法,否则这条记录没有信息量",
-                item.segment_id
-            ),
-        };
-
-        fixed.segments[index].corrected_text = corrected;
-        fixed.segments[index].correction = Some(Correction {
-            kind: item.kind,
-            note,
-            reason: item.reason.clone(),
-        });
+        fixed.segments[index].conclusion = Some(normalize(&item.conclusion, &original, item.segment_id)?);
     }
 
     // "审过"的戳盖在两处:改过的段(改了当然就是审过)+ 调用方点名的那批
@@ -253,10 +234,14 @@ pub fn apply_corrections(
         }
     }
 
-    fixed
-        .save(&layout.transcript_fixed())
-        .context("写入 transcript.fixed.json 失败")?;
+    // 结论进**状态**(`state.bin`);明文那份 `transcript.fixed.json` 退回投影。
+    // 顺序要紧:先收状态再写投影,两者同出一源,不会各说各话。
+    opened.state_mut().absorb_transcript(&fixed);
+    crate::materials::save_transcript_projection(opened, &fixed)?;
+    opened.save()?;
+
     let diff = render_diff(&raw, &fixed);
+    let stats = fixed.stats();
     vidbrief_project::write_atomic_str(&layout.transcript_diff(), &diff)
         .context("写入 transcript.diff.md 失败")?;
 
@@ -265,8 +250,9 @@ pub fn apply_corrections(
         diff_path: layout.transcript_diff(),
         total_segments: fixed.segments.len(),
         applied: items.len(),
-        changed: fixed.segments.iter().filter(|s| s.is_corrected()).count(),
-        uncertain: fixed.segments.iter().filter(|s| s.is_uncertain()).count(),
+        corrected: stats.corrected,
+        kept: stats.kept,
+        uncertain: stats.uncertain,
         reviewed: fixed
             .segments
             .iter()
@@ -275,7 +261,67 @@ pub fn apply_corrections(
     })
 }
 
-/// 掐掉公共前后缀,只留真正改动的那一小段,给 `Correction::note` 用。
+/// 把一条结论校准到可以落盘:补齐能自动补的,挡掉自相矛盾的。
+///
+/// 挡的三样都是实测踩过的坑:
+/// - **"改了"但文本和原文一字不差** —— 那不叫改。想保留原句就用"决定不改"
+///   (第五轮那份对照表里,27 段"改过"里有 11 段的正文一个字没动)。
+/// - **"改了"但文本空着** —— 现在不可能了(文本就在枚举里),但空字符串还能传进来。
+/// - **"不改"却不说为什么** —— 这条记录就没有信息量了。
+fn normalize(
+    conclusion: &Conclusion,
+    original: &str,
+    segment_id: u32,
+) -> Result<Conclusion> {
+    match conclusion {
+        Conclusion::Corrected {
+            text,
+            kind,
+            note,
+            reason,
+        } => {
+            if text.trim().is_empty() {
+                bail!("第 {segment_id} 段说改了,却没给改后的文本(`text`)");
+            }
+            if text == original {
+                bail!(
+                    "第 {segment_id} 段的 `text` 和原文一字不差 —— 那不叫改。\
+                     要保留原句就用 `outcome = kept`(并说清为什么决定不改)"
+                );
+            }
+            let note = match note.trim() {
+                "" => changed_span(original, text),
+                given => given.to_string(),
+            };
+            Ok(Conclusion::Corrected {
+                text: text.clone(),
+                kind: *kind,
+                note,
+                reason: reason.trim().to_string(),
+            })
+        }
+        Conclusion::Kept { note, reason } => {
+            if note.trim().is_empty() {
+                bail!("第 {segment_id} 段决定不改,却没写为什么(`note`)");
+            }
+            Ok(Conclusion::Kept {
+                note: note.trim().to_string(),
+                reason: reason.trim().to_string(),
+            })
+        }
+        Conclusion::Uncertain { note, reason } => {
+            if note.trim().is_empty() {
+                bail!("第 {segment_id} 段标了存疑,却没写疑似写法(`note`)");
+            }
+            Ok(Conclusion::Uncertain {
+                note: note.trim().to_string(),
+                reason: reason.trim().to_string(),
+            })
+        }
+    }
+}
+
+/// 掐掉公共前后缀,只留真正改动的那一小段,给结论的 `note` 用。
 ///
 /// 为什么不用裸切片:中文一个字 3 字节,按字节切会 panic(`AGENTS.md` §1.1)。
 /// 这里先在 `Vec<char>` 上定位,再按字符收集 —— 全程不碰字节下标。
@@ -329,27 +375,27 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
     ));
     out.push_str(&format!("- 生成时间:{}\n", vidbrief_project::now()));
 
-    let changed = fixed.segments.iter().filter(|s| s.is_corrected()).count();
-    let uncertain = fixed.segments.iter().filter(|s| s.is_uncertain()).count();
-    let touched = fixed
-        .segments
-        .iter()
-        .filter(|s| s.correction.is_some())
-        .count();
+    // 数数只有一处口径 —— 见 `Transcript::stats`。这几个数**加起来等于总段数**,
+    // 不会出现"改过 27 + 存疑未改 0 ≠ 合计动过 40"这种事(第五轮实测)。
+    let stats = fixed.stats();
     out.push_str(&format!(
-        "- 全稿 {} 段:改过 {changed} 段,存疑未改 {uncertain} 段,合计动过 {touched} 段\n\n",
-        fixed.segments.len()
+        "- 全稿 {} 段:改了 {} 段,决定不改 {} 段,存疑未改 {} 段,合计动过 {} 段\n\n",
+        stats.total,
+        stats.corrected,
+        stats.kept,
+        stats.uncertain,
+        stats.touched()
     ));
 
-    if touched == 0 {
-        out.push_str("还没有任何纠错。\n");
+    if stats.touched() == 0 {
+        out.push_str("还没有任何结论。\n");
         return out;
     }
 
     out.push_str("| # | 时刻 | 原文 | 改后 | 类型 | 说明 | 依据 |\n");
     out.push_str("|---|------|------|------|------|------|------|\n");
     for seg in &fixed.segments {
-        let Some(correction) = &seg.correction else {
+        let Some(conclusion) = &seg.conclusion else {
             continue;
         };
         let original = raw
@@ -358,9 +404,10 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
             .find(|s| s.id == seg.id)
             .map(|s| s.text.as_str())
             .unwrap_or(&seg.text);
-        let after = match &seg.corrected_text {
-            Some(text) => cell(text),
-            None => "(未改,存疑)".to_string(),
+        let after = match conclusion {
+            Conclusion::Corrected { text, .. } => cell(text),
+            Conclusion::Kept { .. } => "(决定不改,保留原句)".to_string(),
+            Conclusion::Uncertain { .. } => "(存疑未改)".to_string(),
         };
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} |\n",
@@ -368,9 +415,9 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
             clock(seg.start),
             cell(original),
             after,
-            kind_name(correction.kind),
-            cell(&correction.note),
-            cell(&correction.reason),
+            kind_name(conclusion),
+            cell(conclusion.note()),
+            cell(conclusion.reason()),
         ));
     }
     out
@@ -381,13 +428,13 @@ fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
-fn kind_name(kind: CorrectionType) -> &'static str {
-    match kind {
-        CorrectionType::Homophone => "同音字",
-        CorrectionType::Terminology => "术语",
-        CorrectionType::Number => "数字",
-        CorrectionType::Uncertain => "存疑",
-        CorrectionType::Other => "其它",
+fn kind_name(conclusion: &Conclusion) -> &'static str {
+    match conclusion.kind() {
+        Some(CorrectionType::Homophone) => "同音字",
+        Some(CorrectionType::Terminology) => "术语",
+        Some(CorrectionType::Number) => "数字",
+        Some(CorrectionType::Other) => "其它",
+        None => conclusion.label(),
     }
 }
 
@@ -520,7 +567,7 @@ pub fn write_note(
     // "一轮校准"的落点就是 `calibration_log.md`(`docs/DESIGN.md` §6.3),
     // 但**由调用方显式声明**这一次算一轮 —— 写个笔记不等于校准了一轮
     if count_round {
-        opened.project_mut().progress.calibrate.bump();
+        opened.state_mut().progress.calibrate.bump();
         opened.save()?;
     }
 
@@ -536,7 +583,7 @@ pub fn write_summary(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
     crate::review::gate_calibrate(opened)?;
     let path = opened.layout().summary_md();
     vidbrief_project::write_atomic_str(&path, md).context("写入 summary.md 失败")?;
-    opened.project_mut().progress.summarize.mark_done();
+    opened.state_mut().progress.summarize.mark_done();
     opened.save()?;
     Ok(path)
 }
@@ -549,7 +596,7 @@ pub fn write_summary(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
 pub fn write_report_md(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
     let path = opened.layout().report_md();
     vidbrief_project::write_atomic_str(&path, md).context("写入 report.md 失败")?;
-    opened.project_mut().progress.report.mark_done();
+    opened.state_mut().progress.report.mark_done();
     opened.save()?;
     Ok(path)
 }
@@ -587,6 +634,107 @@ mod tests {
         assert_eq!(swapped.matches('…').count(), 2, "{swapped}");
     }
 
+    /// **"改成跟原文一样"不是改。** 想保留原句就用 `kept` —— 这一条挡掉的正是
+    /// 第五轮里那 11 段"结论说要改、正文一个字没动"的空操作。
+    #[test]
+    fn a_no_op_correction_is_refused() {
+        let fake = Fake::new("concl-noop").with_transcript(&[(0.0, 2.0, "派森列表")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "派森列表".into(), // 和原文一字不差
+                    kind: CorrectionType::Other,
+                    note: String::new(),
+                    reason: "测试".into(),
+                },
+            }],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("一字不差"), "{err}");
+        assert!(err.contains("kept"), "要告诉它改用哪个:{err}");
+
+        // 换成"决定不改"就收,而且正文一个字不动
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Kept {
+                    note: "上一轮那处改写是错的".into(),
+                    reason: "原句通顺".into(),
+                },
+            }],
+            &[],
+        )
+        .unwrap();
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.segments[0].effective_text(), "派森列表");
+        assert_eq!(fixed.stats().corrected, 0);
+        assert_eq!(fixed.stats().kept, 1);
+    }
+
+    /// 一份纠错稿里四种结论各来一条,表头的四个数**加起来等于总段数**。
+    #[test]
+    fn the_diff_header_adds_up() {
+        let fake = Fake::new("concl-header").with_transcript(&[
+            (0.0, 2.0, "派森列表"),
+            (2.0, 4.0, "元祖笔记"),
+            (4.0, 6.0, "原句通顺"),
+            (6.0, 8.0, "各位好"),
+        ]);
+        let mut opened = fake.open();
+
+        apply_corrections(
+            &mut opened,
+            &[
+                CorrectionInput {
+                    segment_id: 1,
+                    conclusion: Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "画面文字".into(),
+                    },
+                },
+                CorrectionInput {
+                    segment_id: 2,
+                    conclusion: Conclusion::Kept {
+                        note: "撤销上一轮的改写".into(),
+                        reason: "原句通顺".into(),
+                    },
+                },
+                CorrectionInput {
+                    segment_id: 3,
+                    conclusion: Conclusion::Uncertain {
+                        note: "「原句通顺」疑为「原句通顺,不用改」".into(),
+                        reason: "同音,没把握".into(),
+                    },
+                },
+            ],
+            &[4],
+        )
+        .unwrap();
+
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        let s = fixed.stats();
+        assert_eq!((s.corrected, s.kept, s.uncertain, s.clean, s.unchecked), (1, 1, 1, 1, 0));
+        assert_eq!(s.touched(), 3);
+
+        let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
+        let header = diff.lines().find(|l| l.contains("全稿")).unwrap().to_string();
+        assert!(header.contains("改了 1 段"), "{header}");
+        assert!(header.contains("决定不改 1 段"), "{header}");
+        assert!(header.contains("存疑未改 1 段"), "{header}");
+        assert!(header.contains("合计动过 3 段"), "{header}");
+        // 三个数加起来就是"动过"那个数 —— 第五轮那次 27+0≠40 正是缺了这一条
+        assert!(header.contains("全稿 4 段"), "{header}");
+    }
+
     #[test]
     fn corrections_go_to_the_copy_not_the_original() {
         let fake = Fake::new("concl-corr").with_transcript(&[
@@ -597,21 +745,23 @@ mod tests {
         let _ = &mut opened;
 
         let outcome = apply_corrections(
-            &opened,
+            &mut opened,
             &[
                 CorrectionInput {
                     segment_id: 1,
-                    corrected_text: Some("Python 列表".into()),
-                    kind: CorrectionType::Terminology,
-                    note: None,
-                    reason: "截图画面写着「Python 列表」".into(),
+                    conclusion: Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "截图画面写着「Python 列表」".into(),
+                    },
                 },
                 CorrectionInput {
                     segment_id: 2,
-                    corrected_text: None,
-                    kind: CorrectionType::Uncertain,
-                    note: Some("疑似「元组」".into()),
-                    reason: "上下文在讲培训课程".into(),
+                    conclusion: Conclusion::Uncertain {
+                        note: "疑似「元组」".into(),
+                        reason: "上下文在讲培训课程".into(),
+                    },
                 },
             ],
             &[],
@@ -619,14 +769,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.applied, 2);
-        assert_eq!(outcome.changed, 1);
+        assert_eq!(outcome.corrected, 1);
+        assert_eq!(outcome.kept, 0);
         assert_eq!(outcome.uncertain, 1);
         assert_eq!(outcome.total_segments, 2);
 
         // 原文不动
         let raw = Transcript::load(&fake.layout().transcript()).unwrap();
         assert_eq!(raw.segments[0].text, "派森列表");
-        assert!(raw.segments[0].corrected_text.is_none());
+        assert!(raw.segments[0].conclusion.is_none());
 
         // 副本改了
         let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
@@ -638,41 +789,45 @@ mod tests {
         let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
         assert!(diff.contains("派森列表"), "{diff}");
         assert!(diff.contains("Python 列表"), "{diff}");
-        assert!(diff.contains("(未改,存疑)"), "{diff}");
+        assert!(diff.contains("(存疑未改)"), "{diff}");
         assert!(diff.contains("派森 → Python "), "自动掐出来的改动片段:{diff}");
     }
 
     #[test]
     fn corrections_accumulate_across_calls() {
         let fake = Fake::new("concl-accum").with_transcript(&[(0.0, 2.0, "甲"), (2.0, 4.0, "乙")]);
-        let opened = fake.open();
+        let mut opened = fake.open();
 
         apply_corrections(
-            &opened,
+            &mut opened,
             &[CorrectionInput {
-                segment_id: 1,
-                corrected_text: Some("甲甲".into()),
-                kind: CorrectionType::Other,
-                note: None,
-                reason: "第一次".into(),
-            }],
+                    segment_id: 1,
+                    conclusion: Conclusion::Corrected {
+                        text: "甲甲".into(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "第一次".into(),
+                    },
+                }],
             &[],
         )
         .unwrap();
         let second = apply_corrections(
-            &opened,
+            &mut opened,
             &[CorrectionInput {
-                segment_id: 2,
-                corrected_text: Some("乙乙".into()),
-                kind: CorrectionType::Other,
-                note: None,
-                reason: "第二次".into(),
-            }],
+                    segment_id: 2,
+                    conclusion: Conclusion::Corrected {
+                        text: "乙乙".into(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "第二次".into(),
+                    },
+                }],
             &[],
         )
         .unwrap();
 
-        assert_eq!(second.changed, 2, "第二次不该把第一次的结论抹掉");
+        assert_eq!(second.corrected, 2, "第二次不该把第一次的结论抹掉");
         let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
         assert_eq!(fixed.segments[0].effective_text(), "甲甲");
         assert_eq!(fixed.segments[1].effective_text(), "乙乙");
@@ -681,24 +836,28 @@ mod tests {
     #[test]
     fn unknown_segment_ids_write_nothing() {
         let fake = Fake::new("concl-unknown").with_transcript(&[(0.0, 2.0, "甲")]);
-        let opened = fake.open();
+        let mut opened = fake.open();
 
         let err = apply_corrections(
-            &opened,
+            &mut opened,
             &[
                 CorrectionInput {
                     segment_id: 1,
-                    corrected_text: Some("甲甲".into()),
-                    kind: CorrectionType::Other,
-                    note: None,
-                    reason: "好的那条".into(),
+                    conclusion: Conclusion::Corrected {
+                        text: "甲甲".into(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "好的那条".into(),
+                    },
                 },
                 CorrectionInput {
                     segment_id: 99,
-                    corrected_text: Some("无中生有".into()),
-                    kind: CorrectionType::Other,
-                    note: None,
-                    reason: "坏的那条".into(),
+                    conclusion: Conclusion::Corrected {
+                        text: "无中生有".into(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "坏的那条".into(),
+                    },
                 },
             ],
             &[],
@@ -716,16 +875,16 @@ mod tests {
     #[test]
     fn uncertain_without_note_is_refused() {
         let fake = Fake::new("concl-nonote").with_transcript(&[(0.0, 2.0, "甲")]);
-        let opened = fake.open();
+        let mut opened = fake.open();
         let err = apply_corrections(
-            &opened,
+            &mut opened,
             &[CorrectionInput {
-                segment_id: 1,
-                corrected_text: None,
-                kind: CorrectionType::Uncertain,
-                note: None,
-                reason: "说不上来".into(),
-            }],
+                    segment_id: 1,
+                    conclusion: Conclusion::Uncertain {
+                        note: String::new(),
+                        reason: "说不上来".into(),
+                    },
+                }],
             &[],
         )
         .unwrap_err()
@@ -738,10 +897,10 @@ mod tests {
         let fake = Fake::new("concl-shot")
             .with_transcript(&[(8.0, 12.0, "这里是 Python 列表结构")])
             .with_shot(1, 9.0);
-        let opened = fake.open();
+        let mut opened = fake.open();
 
         let check = record_shot_check(
-            &opened,
+            &mut opened,
             vidbrief_project::ShotId::new(1).unwrap(),
             &ShotCheckInput {
                 r#match: true,
@@ -764,9 +923,13 @@ mod tests {
         );
         assert!(!check.needs_review());
 
-        // 写回磁盘了
-        let shots = Shots::load(&fake.layout().shots_json()).unwrap();
+        // 落进**状态**了(明文那份跟着重写成投影,读回来的也是它)
+        let shots = crate::materials::shots(&opened).unwrap();
         assert!(shots.get(vidbrief_project::ShotId::new(1).unwrap()).unwrap().check.is_some());
+        assert!(
+            fake.state().shot(vidbrief_project::ShotId::new(1).unwrap()).unwrap().check.is_some(),
+            "结论必须在状态里 —— 明文那几栏只是投影"
+        );
     }
 
     #[test]
@@ -886,8 +1049,7 @@ mod tests {
         assert!(text.contains("第 2 轮"), "{text}");
 
         // count_round 才动轮数
-        let project = vidbrief_project::Project::load(&fake.layout().project_json()).unwrap();
-        assert_eq!(project.progress.calibrate.rounds, 2);
+        assert_eq!(fake.state().progress.calibrate.rounds, 2);
     }
 
     #[test]
@@ -902,8 +1064,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let project = vidbrief_project::Project::load(&fake.layout().project_json()).unwrap();
-        assert_eq!(project.progress.calibrate.rounds, 0);
+        assert_eq!(fake.state().progress.calibrate.rounds, 0);
     }
 
     #[test]
@@ -926,7 +1087,7 @@ mod tests {
         // 把活干完 —— 走正经工具写回结论,**不用签字**,门自己就开
         let id = vidbrief_project::ShotId::new(1).unwrap();
         record_shot_check(
-            &opened,
+            &mut opened,
             id,
             &ShotCheckInput {
                 r#match: true,
@@ -940,15 +1101,15 @@ mod tests {
         )
         .unwrap();
         // 转录那一段也报一声"审过了" —— 门分不出"看过没问题"和"压根没看"
-        apply_corrections(&opened, &[], &[1]).unwrap();
+        apply_corrections(&mut opened, &[], &[1]).unwrap();
         let _ = &mut opened;
         write_summary(&mut opened, "# 总结\n").unwrap_or_else(|e| panic!("{e:#}"));
 
         write_report_md(&mut opened, "# 报告\n").unwrap();
 
-        let project = vidbrief_project::Project::load(&fake.layout().project_json()).unwrap();
-        assert!(project.progress.summarize.done);
-        assert!(project.progress.report.done);
+        let state = fake.state();
+        assert!(state.progress.summarize.done);
+        assert!(state.progress.report.done);
         assert!(fake.layout().summary_md().is_file());
         assert!(fake.layout().report_md().is_file());
     }

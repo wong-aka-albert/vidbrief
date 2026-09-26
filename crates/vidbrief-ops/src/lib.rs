@@ -52,21 +52,25 @@ pub use inspect::{
     inspect_opened,
 };
 pub use materials::{
-    SegmentView, ShotDetail, TranscriptView, change_curve, list_regions, shot_detail, shot_counts,
-    shots, transcript, transcript_search,
+    SegmentView, ShotDetail, TranscriptView, change_curve, content_mismatches,
+    content_mismatches_of, list_regions, note_transcript_content, save_shots, save_supplements,
+    save_transcript_projection, shot_detail, shot_counts, shots, shots_optional, supplements,
+    transcript, transcript_search,
 };
 pub use preprocess::{
     AnalysisSummary, PreprocessOptions, PreprocessReport, Stage, TranscriptOutcome, preprocess,
 };
 pub use project::{
-    CreateOptions, Created, Notice, OpenProject, ProjectSummary, create, list_projects, resolve,
+    CreateOptions, Created, Notice, OpenProject, ProjectSummary, UpgradeOptions, UpgradeOutcome,
+    create, list_projects, resolve, upgrade,
 };
 pub use review::{approve, counts as review_counts, gate_calibrate};
 pub use shots::{
-    DEFAULT_SUPPLEMENT_WINDOW, ShotAction, extract_shot, find_supplement_candidates,
+    DEFAULT_SUPPLEMENT_WINDOW, ShotAction, SupplementDecision, SupplementDecisionKind,
+    SupplementOutcome, disposition_supplements, extract_shot, find_supplement_candidates,
     supplement_window, update_shot,
 };
-pub use view::{render_timeline, serve_and_open};
+pub use view::{render_calibration_table, render_timeline, serve_and_open, serve_and_open_table};
 pub use write::with_write;
 
 /// 页面动作的转发 —— **`vidbrief-mcp` 不必直接依赖 `vidbrief-viz`**。

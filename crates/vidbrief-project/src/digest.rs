@@ -39,6 +39,25 @@ pub fn short(parts: &[&str]) -> String {
     out
 }
 
+/// 同上,但取**整个** sha256(64 个十六进制字符)。
+///
+/// 给"这份材料的**内容**是不是工具写的那一份"用(见 [`crate::state::ContentPrint`])。
+/// 这里不图省事取前 4 字节:短摘要撞一次是 2^32 的工作量,对"(模型)特意去凑"
+/// 来说并非不可行 —— 而这一处的判据正是"改没改过"。
+pub fn full(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0x1f]);
+    }
+    let sum = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in sum.iter() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,6 +72,15 @@ mod tests {
     #[test]
     fn field_boundaries_are_part_of_the_digest() {
         assert_ne!(short(&["ab", "c"]), short(&["a", "bc"]));
+    }
+
+    #[test]
+    fn the_full_digest_is_sixty_four_hex_chars_and_separates_fields() {
+        let d = full(&["随便什么中文", "第二段"]);
+        assert_eq!(d.len(), 64, "{d}");
+        assert!(d.chars().all(|c| c.is_ascii_hexdigit()), "{d}");
+        assert_ne!(full(&["ab", "c"]), full(&["a", "bc"]));
+        assert_eq!(full(&["abc"]), full(&["abc"]));
     }
 
     #[test]

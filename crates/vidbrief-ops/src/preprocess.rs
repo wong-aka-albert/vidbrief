@@ -113,6 +113,13 @@ pub struct PreprocessReport {
     pub shots: Option<usize>,
     pub shots_skipped: Vec<SkippedShot>,
     pub transcript: TranscriptOutcome,
+    /// 重算截图时**作废掉**的看图结论条数(`shots: false` 时为 0)。
+    ///
+    /// 为什么必须报出来:步 1 重算的是画面,而"这张图我看过"说的是旧的那些帧 ——
+    /// 结论跟着作废才是诚实的,但**不能静悄悄作废**。人要知道自己那几轮校准白做了。
+    pub shot_checks_cleared: usize,
+    /// 重转录时**作废掉**的核验戳与结论段数(`--no-transcribe` 时为 0)。
+    pub segment_checks_cleared: usize,
     /// 渲染出来的时间线;渲染失败时为 `None`。
     pub timeline: Option<PathBuf>,
     /// 视图为什么没渲染出来。**材料不受影响**(见 §5.3)。
@@ -174,7 +181,7 @@ pub fn preprocess(
     on_progress(Stage::Analyzed(analysis));
 
     let planned = vidbrief_core::plan_shots(&regions, &curve);
-    let (shot_total, skipped) = if opts.shots {
+    let (shot_total, skipped, shot_checks_cleared) = if opts.shots {
         let (shots, skipped) = vidbrief_core::extract_shots(
             &video,
             &layout,
@@ -183,23 +190,35 @@ pub fn preprocess(
             vidbrief_core::ShotQuality::default(),
             &mut |done, total| on_progress(Stage::Shot { done, total }),
         )?;
-        shots
-            .save(&layout.shots_json())
-            .context("写入 shots.json 失败")?;
-        (Some(shots.shots.len()), skipped)
+        // 画面重算了,旧的看图结论说的是旧帧 —— 一并作废
+        //(数目报给调用方,见 `PreprocessReport::shot_checks_cleared`)
+        let cleared = opened.state().shots.len();
+        opened.state_mut().shots.clear();
+        crate::materials::save_shots(opened, &shots)?;
+        (Some(shots.shots.len()), skipped, cleared)
     } else {
-        (None, Vec::new())
+        (None, Vec::new(), 0)
     };
 
     // ── 转录 ─────────────────────────────────────────────────────────
+    let mut segment_checks_cleared = 0;
     let transcript = if opts.transcribe {
         match vidbrief_asr::transcribe_project(&video, &layout, &meta) {
-            Ok(Some(t)) => TranscriptOutcome::Done {
-                segments: t.segments.len(),
-                model: t.model.clone(),
-                language: t.language.clone(),
-                path: layout.transcript(),
-            },
+            Ok(Some(t)) => {
+                // 重新转录 = 换了一份原文:旧结论与核验戳对的是旧文本,
+                // 留着它们就是让门替一份已经换掉的文稿背书
+                segment_checks_cleared = opened.state().segments.len();
+                opened.state_mut().segments.clear();
+                crate::materials::save_transcript_projection(opened, &t)?;
+                // 原文换了 → 内容底账跟着换(门的第①条数的就是这份文件里的段)
+                crate::materials::note_transcript_content(opened, &t)?;
+                TranscriptOutcome::Done {
+                    segments: t.segments.len(),
+                    model: t.model.clone(),
+                    language: t.language.clone(),
+                    path: layout.transcript(),
+                }
+            }
             // 没有音轨是**合法**的空结果,不算失败
             Ok(None) => TranscriptOutcome::NoAudio,
             Err(e) => TranscriptOutcome::Failed {
@@ -212,9 +231,10 @@ pub fn preprocess(
 
     let done = transcript.allows_completion();
     if done {
-        opened.project_mut().progress.preprocess.mark_done();
-        opened.save()?;
+        opened.state_mut().progress.preprocess.mark_done();
     }
+    // 状态(进度 + 上面那两处作废)总要落一次盘
+    opened.save()?;
 
     // ── 视图 ─────────────────────────────────────────────────────────
     //
@@ -236,6 +256,8 @@ pub fn preprocess(
             .map(|(t, reason)| SkippedShot { t, reason })
             .collect(),
         transcript,
+        shot_checks_cleared,
+        segment_checks_cleared,
         timeline,
         timeline_error,
         done,

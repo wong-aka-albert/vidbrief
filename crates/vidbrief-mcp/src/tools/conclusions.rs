@@ -41,7 +41,9 @@ impl From<ConfidenceArg> for Confidence {
     }
 }
 
-/// 纠错类型。
+/// 错的性质 —— **只在 `outcome = corrected` 时有**。
+///
+/// **没有"存疑"这一档**:存疑是一种结论(定不了),不是一种错误的性质。
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CorrectionTypeArg {
@@ -51,9 +53,6 @@ pub enum CorrectionTypeArg {
     Terminology,
     /// 数字 / 单位 / 时间。
     Number,
-    /// **存疑但没改**:怀疑这里有问题却不敢断言。此时 `corrected_text` 必须不给,
-    /// 疑似写法写在 `note` 里,留给用户在审查节点裁决。
-    Uncertain,
     Other,
 }
 
@@ -63,7 +62,6 @@ impl From<CorrectionTypeArg> for CorrectionType {
             CorrectionTypeArg::Homophone => CorrectionType::Homophone,
             CorrectionTypeArg::Terminology => CorrectionType::Terminology,
             CorrectionTypeArg::Number => CorrectionType::Number,
-            CorrectionTypeArg::Uncertain => CorrectionType::Uncertain,
             CorrectionTypeArg::Other => CorrectionType::Other,
         }
     }
@@ -105,18 +103,34 @@ pub struct RecordShotCheckParams {
 pub struct CorrectionItem {
     /// 转录段 id(`transcript.json` 里的序号,从 1 起)。
     pub segment_id: u32,
-    /// 改后的整句。**不改就别给**(标存疑时才这样)。
+    /// 这一段是什么结论:
+    /// `corrected` 改了(要给 `text`)/ `kept` 决定保留原句 / `uncertain` 定不了、留给人。
+    pub outcome: CorrectionOutcomeArg,
+    /// `outcome = corrected` 时必给:改后的整句。
+    /// **它必须和原文不一样** —— 想保留原句就用 `kept`。
     #[serde(default)]
-    pub corrected_text: Option<String>,
-    /// `homophone` 同音字 / `terminology` 术语 / `number` 数字 / `uncertain` 存疑未改 / `other`。
-    #[serde(rename = "type")]
-    pub kind: CorrectionTypeArg,
+    pub text: Option<String>,
+    /// `outcome = corrected` 时给:错的性质(`homophone` / `terminology` / `number` / `other`)。
+    #[serde(default, rename = "type")]
+    pub kind: Option<CorrectionTypeArg>,
     /// 改动内容,如 `派森 → Python`。不给就按前后缀差异自动掐出来;
-    /// `corrected_text` 不给时**必须**给这个,否则这条记录没有信息量。
+    /// `kept` / `uncertain` 时**必须给**,否则这条记录没有信息量。
     #[serde(default)]
     pub note: Option<String>,
     /// 判断依据(画面文字 / 上下文 / 术语表)。**必须写**,这是事后复核的唯一线索。
     pub reason: String,
+}
+
+/// 一条结论是哪一种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionOutcomeArg {
+    /// 改了正文。
+    Corrected,
+    /// 看过,**决定保留原句**。
+    Kept,
+    /// 看过,但定不了 —— 留给用户裁决。
+    Uncertain,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -183,7 +197,7 @@ impl VidbriefServer {
         Parameters(p): Parameters<RecordShotCheckParams>,
     ) -> Result<CallToolResult, CallToolResult> {
         let id = parse_shot_id(&p.shot_id)?;
-        let (opened, slot) = self.open_write(&p.project_id).await?;
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let input = vidbrief_ops::ShotCheckInput {
             r#match: p.r#match,
             audio_visual_sync: p.audio_visual_sync,
@@ -193,7 +207,7 @@ impl VidbriefServer {
             neighbor_text: p.neighbor_text,
             evidence_quote: p.evidence_quote,
         };
-        let check = blocking(move || vidbrief_ops::record_shot_check(&opened, id, &input)).await?;
+        let check = blocking(move || vidbrief_ops::record_shot_check(&mut opened, id, &input)).await?;
         Ok(attach_warning(json(&check)?, slot.warning()))
     }
 
@@ -213,21 +227,43 @@ impl VidbriefServer {
         &self,
         Parameters(p): Parameters<ApplyCorrectionsParams>,
     ) -> Result<CallToolResult, CallToolResult> {
-        let (opened, slot) = self.open_write(&p.project_id).await?;
-        let items: Vec<vidbrief_ops::CorrectionInput> = p
-            .corrections
-            .into_iter()
-            .map(|c| vidbrief_ops::CorrectionInput {
+        let (mut opened, slot) = self.open_write(&p.project_id).await?;
+        let mut items = Vec::with_capacity(p.corrections.len());
+        for c in p.corrections {
+            // 三种结论在这里拼成落盘用的那一个枚举 —— 缺件当场退回去,
+            // 而不是让它带着"说要改、文本空着"往下走
+            let conclusion = match c.outcome {
+                CorrectionOutcomeArg::Corrected => {
+                    let Some(text) = c.text.filter(|t| !t.trim().is_empty()) else {
+                        return Err(failed(format!(
+                            "第 {} 段 `outcome = corrected` 却没给 `text` —— 要保留原句就用 `kept`",
+                            c.segment_id
+                        )));
+                    };
+                    vidbrief_project::Conclusion::Corrected {
+                        text,
+                        kind: c.kind.unwrap_or(CorrectionTypeArg::Other).into(),
+                        note: c.note.unwrap_or_default(),
+                        reason: c.reason,
+                    }
+                }
+                CorrectionOutcomeArg::Kept => vidbrief_project::Conclusion::Kept {
+                    note: c.note.unwrap_or_default(),
+                    reason: c.reason,
+                },
+                CorrectionOutcomeArg::Uncertain => vidbrief_project::Conclusion::Uncertain {
+                    note: c.note.unwrap_or_default(),
+                    reason: c.reason,
+                },
+            };
+            items.push(vidbrief_ops::CorrectionInput {
                 segment_id: c.segment_id,
-                corrected_text: c.corrected_text,
-                kind: c.kind.into(),
-                note: c.note,
-                reason: c.reason,
-            })
-            .collect();
+                conclusion,
+            });
+        }
         let reviewed = p.reviewed;
         let outcome =
-            blocking(move || vidbrief_ops::apply_corrections(&opened, &items, &reviewed)).await?;
+            blocking(move || vidbrief_ops::apply_corrections(&mut opened, &items, &reviewed)).await?;
         Ok(attach_warning(json(&outcome)?, slot.warning()))
     }
 
@@ -297,12 +333,16 @@ impl VidbriefServer {
 
     #[tool(
         description = "记下「**用户拍板了悬着的那一批**」—— 只对'等人拍板'那一类有效。\
+                       `note` 里放**他的原话**(转述也行,别美化)。\
+                       \n\n\
+                       什么算拍板:他说'这些我知道,就这样过'算;\
+                       **他说'先留着 / 我也不确定 / 别管了'也算** —— 那同样是他在这一步做的决定,\
+                       记下来门就开,不必再问一遍。\
                        \n\n\
                        门本身不看签字:它是按**核验状态**判的(还有没核验的就拦着让你接着审;\
-                       有等用户拍板的就拦着让你去问)。所以这个工具是给**后一类**用的:\
-                       用户说'这些我知道,就这样过',把他的话记下来,门才放行那一批。\
+                       有等用户拍板的就拦着让你去问)。所以这个工具是给**后一类**用的。\
                        \n\n\
-                       **不要替用户点头。** 用户没说过'就这样过',就该去问他;\
+                       **不要替用户点头。** 他没说过什么,就该去问他;\
                        他给了具体决定(比如某张图确实有问题要改),那是把决定落到条目上\
                        (`record_shot_check` / `apply_corrections`),不是调这个。",
         annotations(title = "记用户拍板", read_only_hint = false, idempotent_hint = true)
@@ -398,7 +438,6 @@ mod tests {
             (CorrectionTypeArg::Homophone, CorrectionType::Homophone),
             (CorrectionTypeArg::Terminology, CorrectionType::Terminology),
             (CorrectionTypeArg::Number, CorrectionType::Number),
-            (CorrectionTypeArg::Uncertain, CorrectionType::Uncertain),
             (CorrectionTypeArg::Other, CorrectionType::Other),
         ] {
             assert_eq!(

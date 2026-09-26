@@ -1,11 +1,24 @@
-//! `project.json` —— 项目元数据、各步进度标记、用户确认。
+//! `project.json` —— 项目的**身份**:它是谁、从哪来、叫什么。
 //!
 //! 格式见 `docs/schema/project.schema.json` 与 `docs/DESIGN.md` §4.2。
 //!
-//! **两件事要分清**:
-//! - `progress` 记"做过什么",给 `vidbrief status` 和 `list_projects` 展示,**不是门**;
-//! - `review` 记"用户看过并点头了",**是门** —— 校准没被确认过、或者确认之后东西又变了,
-//!   就不许写总结(见 `vidbrief-ops` 的 `review` 模块)。
+//! # 这里面**没有**状态
+//!
+//! 进度、核验戳、看图结论、拍板记录曾经都在这个文件里,现在全挪进了
+//! [`crate::state`] 的 `state.bin`(非明文,见 devlog [260925-30] 第 2 条)。
+//!
+//! 为什么挪:这个文件明文、谁都能改,而模型手里就拿着宿主给的文件工具。
+//! 第五轮联调实测:它把 `report.done` 改成 `true`、`at` 编成了**未来时刻**
+//! (当时 19:54,写的是 19:58)—— 而这几栏正是"这一步做完了没有"的判据。
+//! **明文状态 = 门是纸糊的。**
+//!
+//! 现在这里只剩**推不出来、也不驱动门**的东西:身份、来处、术语表。
+//! 想改进度、想记拍板,都得走工具(`vidbrief-ops`),它们写的是 `state.bin`。
+//!
+//! # 与进度有关的两个词,别再混
+//!
+//! - `progress`(现在在 `state.bin` 里)记"做过什么",给 `vidbrief status` 展示;
+//! - `review`(也在 `state.bin` 里)记"用户看过并点头了",**是门**。
 //!
 //! M0 时这里写的是"进度不是审核门,'通过了没有'纯靠对话"。M4 联调推翻了它:
 //! 两轮跑下来,**"靠对话"等于没有门** —— 一个一张图都没校准的项目照样能写总结、
@@ -14,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -24,7 +37,15 @@ use crate::relpath::RelPath;
 use crate::source::SourceLink;
 
 /// 当前 schema 版本。任一项目文件结构发生不兼容变更时 +1。
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// # v1 → v2:状态挪出明文([260925-30] 第 2 条)
+///
+/// v1 的 `project.json` 里带着 `rev` / `progress` / `review`,现在它们住
+/// `state.bin`(见 [`crate::state`])。这是**不兼容**变更:老文件按新结构读,
+/// 会因为多了三个字段被 `deny_unknown_fields` 拒掉 —— 而那正是我们想要的信号:
+/// 让 [`Project::load_v1`] 接住它,由 `vidbrief upgrade` 显式迁一次,
+/// 而不是在读取时悄悄猜。
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// schema 版本标记。**反序列化即校验**:版本不符直接报错,不做静默兼容。
 ///
@@ -214,13 +235,12 @@ pub struct Review {
 /// `project.json`。
 ///
 /// 字段顺序即为写盘顺序,不要随意调整(测试里与示例文件逐字节比对)。
+///
+/// **这里只装身份** —— 状态在 [`crate::state::ProjectState`] 里(见模块文档)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub schema_version: SchemaVersion,
-    /// 乐观并发修订号(§4.7)。工具每次成功写入本文件时 +1;
-    /// 调用方写回时必须带上读到的值,不匹配说明别人改过了。
-    pub rev: u64,
     pub id: ProjectId,
     /// 人类可读名称,随便写(可含中文)。
     pub name: String,
@@ -229,19 +249,10 @@ pub struct Project {
     /// 术语表;**默认 `None`(关闭)**。需要时由用户提供一份正确写法清单,
     /// 供 agent 在转录纠错时对照(优先级最低,见 §6.2 ②)。
     pub glossary: Option<Vec<String>>,
-    pub progress: Progress,
-    /// 用户对各步的确认 —— **审核门**。
-    ///
-    /// `progress` 记"做过什么",这里记"用户看过并点头了"。两者是两回事:
-    /// 一个项目可以四步都 `done`,却一次都没被人确认过。
-    ///
-    /// 缺省(老项目文件里没有这一段)视作"谁都没确认过"。
-    #[serde(default)]
-    pub review: Review,
 }
 
 impl Project {
-    /// 新建项目(尚未落盘)。`rev` 从 0 起。
+    /// 新建项目(尚未落盘)。
     pub fn new(
         id: ProjectId,
         name: impl Into<String>,
@@ -251,7 +262,6 @@ impl Project {
     ) -> Self {
         Self {
             schema_version: SchemaVersion,
-            rev: 0,
             id,
             name: name.into(),
             created_at: crate::now(),
@@ -261,16 +271,14 @@ impl Project {
                 link,
             },
             glossary: None,
-            progress: Progress::default(),
-            review: Review::default(),
         }
     }
 
-    /// 写盘并把 `rev` +1。
+    /// 写盘。
     ///
-    /// 全项目**只此一处**修改 `rev`,因此修订号永远是单调的写入计数。
-    pub fn save(&mut self, path: &std::path::Path) -> Result<()> {
-        self.rev += 1;
+    /// **不再有 `rev` 这件事了** —— 修订号跟着状态走(`state.bin`),
+    /// 因为"改了几次"是状态,不是身份。
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
         crate::json::write_atomic(path, self)
     }
 
@@ -279,17 +287,74 @@ impl Project {
         crate::json::read(path)
     }
 
-    /// 供乐观并发使用:调用方读到的 `rev` 是否仍是当前值。
-    pub fn check_rev(&self, seen: u64) -> Result<()> {
-        if self.rev != seen {
-            bail!(
-                "项目 {} 已被其它会话修改(期望 rev={seen},实际 rev={})",
-                self.id,
-                self.rev
-            );
+    /// 只看 `schema_version` 这一个字段,用来把话说清楚(不解析整份文件)。
+    ///
+    /// 用途:老项目(版本对不上)与新项目要给的提示**完全不一样** ——
+    /// "换个版本的工具打开"和"这份文件坏了"是两条去路,不能含糊成一句。
+    pub fn peek_version(path: &std::path::Path) -> Result<u32> {
+        #[derive(Deserialize)]
+        struct VersionOnly {
+            schema_version: u32,
         }
-        Ok(())
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("读取失败:{}", path.display()))?;
+        let v: VersionOnly = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("解析 {} 失败:{e}", path.display()))?;
+        Ok(v.schema_version)
     }
+
+    /// 读**旧格式(v1)**的 `project.json` —— 只给 `vidbrief upgrade` 用。
+    ///
+    /// 返回(v1 里那份"身份 + 状态"):身份部分照现在读,`rev`/`progress`/`review`
+    /// 原样交出去,由升级那边收进 `state.bin`。
+    pub fn load_v1(path: &std::path::Path) -> Result<(Self, LegacyStateV1)> {
+        let legacy: ProjectV1 = crate::json::read(path)
+            .with_context(|| format!("按旧格式(v1)读取 {} 失败", path.display()))?;
+        Ok((
+            Self {
+                schema_version: SchemaVersion,
+                id: legacy.id,
+                name: legacy.name,
+                created_at: legacy.created_at,
+                source: legacy.source,
+                glossary: legacy.glossary,
+            },
+            LegacyStateV1 {
+                rev: legacy.rev,
+                progress: legacy.progress,
+                review: legacy.review,
+            },
+        ))
+    }
+}
+
+/// v1 的 `project.json` —— **只用来读,不会再写出去**。
+///
+/// 留着它的理由和 [`crate::transcript`] 里那份老格式读取器一样:
+/// 已经写出来的项目不能因为一次重构就打不开。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectV1 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    rev: u64,
+    id: ProjectId,
+    name: String,
+    created_at: DateTime<FixedOffset>,
+    source: SourceRef,
+    glossary: Option<Vec<String>>,
+    progress: Progress,
+    /// 老文件里可能没有这一段(缺省 = 谁都没确认过),照 v1 当年的默认来。
+    #[serde(default)]
+    review: Review,
+}
+
+/// v1 里**那部分现在归状态的字段**。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LegacyStateV1 {
+    pub rev: u64,
+    pub progress: Progress,
+    pub review: Review,
 }
 
 #[cfg(test)]
@@ -298,16 +363,43 @@ mod tests {
 
     #[test]
     fn schema_version_is_enforced_on_read() {
-        let text = r#"{"schema_version": 2, "rev":0, "id":"a", "name":"a",
+        let text = r#"{"schema_version": 3, "id":"a", "name":"a",
+            "created_at":"2026-09-24T21:00:00+08:00",
+            "source":{"path":"source/video.mp4","original":"x","link":"copy"},
+            "glossary":null}"#;
+        let err = serde_json::from_str::<Project>(text).unwrap_err().to_string();
+        assert!(err.contains("schema_version"), "{err}");
+    }
+
+    /// v1 的 `project.json`(带 `rev` / `progress` / `review`)**读不进新结构** ——
+    /// 这正是升级要接住的信号:让它显式迁一次,而不是读取时悄悄猜。
+    #[test]
+    fn a_v1_file_does_not_sneak_into_the_new_shape() {
+        let text = r#"{"schema_version": 1, "rev":5, "id":"a", "name":"a",
             "created_at":"2026-09-24T21:00:00+08:00",
             "source":{"path":"source/video.mp4","original":"x","link":"copy"},
             "glossary":null,
-            "progress":{"preprocess":{"done":false,"at":null},
-                        "calibrate":{"rounds":0,"last_at":null},
+            "progress":{"preprocess":{"done":true,"at":null},
+                        "calibrate":{"rounds":1,"last_at":null},
                         "summarize":{"done":false,"at":null},
                         "report":{"done":false,"at":null}}}"#;
         let err = serde_json::from_str::<Project>(text).unwrap_err().to_string();
-        assert!(err.contains("schema_version"), "{err}");
+        assert!(err.contains("unknown field") || err.contains("schema_version"), "{err}");
+
+        // 而升级那条路认得它,而且把状态那几栏**原样交出来**
+        let dir = std::env::temp_dir().join(format!("vidbrief-proj-v1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("project.json");
+        std::fs::write(&path, text).unwrap();
+        let (project, legacy) = Project::load_v1(&path).unwrap();
+        assert_eq!(legacy.rev, 5);
+        assert!(legacy.progress.preprocess.done);
+        assert_eq!(legacy.progress.calibrate.rounds, 1);
+        assert_eq!(project.id.as_ref(), "a");
+        assert_eq!(project.schema_version, SchemaVersion, "读完就是当前版本");
+        assert_eq!(Project::peek_version(&path).unwrap(), 1, "原文里的版本仍是 1");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -335,20 +427,22 @@ mod tests {
             "D:/videos/demo.mp4",
             SourceLink::Copy,
         );
-        assert_eq!(p.rev, 0);
         assert_eq!(p.schema_version, SchemaVersion);
-        assert!(!p.progress.preprocess.done);
-        assert_eq!(p.progress.calibrate.rounds, 0);
         assert!(p.glossary.is_none());
+        // 状态那几栏已经不在这个文件里了 —— 想改进度得去 state.bin
+        let text = crate::json::to_pretty_string(&p).unwrap();
+        for gone in ["\"rev\"", "\"progress\"", "\"review\""] {
+            assert!(!text.contains(gone), "project.json 里不该再有 {gone}:{text}");
+        }
     }
 
     #[test]
-    fn save_bumps_rev_and_check_rev_catches_stale() {
+    fn save_round_trips_without_touching_any_counter() {
         let dir = std::env::temp_dir().join(format!("vidbrief-proj-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("project.json");
 
-        let mut p = Project::new(
+        let p = Project::new(
             ProjectId::new("demo").unwrap(),
             "样例",
             RelPath::new("source/video.mp4").unwrap(),
@@ -356,27 +450,9 @@ mod tests {
             SourceLink::Copy,
         );
         p.save(&path).unwrap();
-        assert_eq!(p.rev, 1);
         p.save(&path).unwrap();
-        assert_eq!(p.rev, 2);
-
-        let loaded = Project::load(&path).unwrap();
-        assert_eq!(loaded.rev, 2);
-        assert!(loaded.check_rev(2).is_ok());
-        assert!(loaded.check_rev(1).is_err());
+        assert_eq!(Project::load(&path).unwrap(), p);
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn progress_helpers_set_time() {
-        let mut p = Progress::default();
-        p.preprocess.mark_done();
-        assert!(p.preprocess.done);
-        assert!(p.preprocess.at.is_some());
-        p.calibrate.bump();
-        p.calibrate.bump();
-        assert_eq!(p.calibrate.rounds, 2);
-        assert!(p.calibrate.last_at.is_some());
     }
 }

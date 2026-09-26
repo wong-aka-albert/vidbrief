@@ -1,6 +1,5 @@
 {
-  "schema_version": 1,
-  "rev": 7,
+  "schema_version": 2,
   "id": "demo",
   "name": "24 秒样例",
   "created_at": "2026-09-24T21:00:00+08:00",
@@ -9,47 +8,5 @@
     "original": "D:/videos/demo.mp4",
     "link": "hardlink"
   },
-  "glossary": null,
-  "progress": {
-    "preprocess": {
-      "done": true,
-      "at": "2026-09-24T21:03:11+08:00"
-    },
-    "calibrate": {
-      "rounds": 2,
-      "last_at": "2026-09-24T21:20:00+08:00"
-    },
-    "summarize": {
-      "done": false,
-      "at": null
-    },
-    "report": {
-      "done": false,
-      "at": null
-    }
-  },
-  "review": {
-    "calibrate": {
-      "approved_at": "2026-09-24T21:22:30+08:00",
-      "counts": {
-        "unchecked": 0,
-        "needing_review": 3,
-        "supplement_pending": 0,
-        "uncertain": 2
-      },
-      "digests": {
-        "segments": {
-          "12": "3f2a91c4",
-          "31": "8b07de15"
-        },
-        "shots": {
-          "s001": "c41e77aa",
-          "s002": "0d93b6f2",
-          "s003": "5a6c2048"
-        },
-        "supplements": {}
-      },
-      "note": "用户说:那 3 张我知道,先往下走"
-    }
-  }
+  "glossary": null
 }

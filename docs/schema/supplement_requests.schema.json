@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "vidbrief 02_calibrate/supplement_requests.json",
-  "description": "补图候选:语音提到指代对象但附近没有截图的位置。由 find_supplement_candidates(纯算法)生成,agent 逐条判断后写回 status。设计见 docs/DESIGN.md §6.2 子任务④。",
+  "description": "补图候选:语音提到指代对象但附近没有截图的位置。由 find_supplement_candidates(纯算法)生成,agent 逐条判断后写回 status。设计见 docs/DESIGN.md §6.2 子任务④。⚠️ status / shot_id / note 三栏**只是投影**:判据在 state.bin(§4.10),手改这里骗不过门。",
   "type": "object",
   "additionalProperties": false,
   "required": ["generated_at", "window", "requests"],

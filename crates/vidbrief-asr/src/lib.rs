@@ -98,8 +98,7 @@ pub fn from_srt(text: &str, meta: &VideoMeta, cfg: &Config) -> Result<Transcript
                 end: r.end,
                 text: r.text,
                 // 原始转录**永不就地改写**;这三项留给 agent 在步 2 填
-                corrected_text: None,
-                correction: None,
+                conclusion: None,
                 checked_at: None,
             })
             .collect(),
@@ -186,8 +185,7 @@ mod tests {
         // 原始产出必须是"干净的":纠错字段全空,否则"agent 改了什么"就查不出来了
         assert!(t.is_untouched(), "刚转出来的转录不该带任何纠错标记");
         for seg in &t.segments {
-            assert!(seg.corrected_text.is_none());
-            assert!(seg.correction.is_none());
+            assert!(seg.conclusion.is_none());
             assert_eq!(seg.effective_text(), seg.text);
         }
     }

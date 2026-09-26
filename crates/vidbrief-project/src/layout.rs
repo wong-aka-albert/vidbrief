@@ -15,6 +15,8 @@ pub const PROJECTS_DIR: &str = "projects";
 // ── 项目根 ───────────────────────────────────────────────────────────
 pub const PROJECT_FILE: &str = "project.json";
 pub const LOCK_FILE: &str = "project.lock";
+/// 项目状态(**非明文**):进度、核验戳、看图结论、拍板记录。见 [`crate::state`]。
+pub const STATE_FILE: &str = "state.bin";
 
 // ── source/ ─────────────────────────────────────────────────────────
 pub const SOURCE_DIR: &str = "source";
@@ -40,6 +42,8 @@ pub const CALIBRATION_LOG_FILE: &str = "02_calibrate/calibration_log.md";
 /// 步 2 补图(origin ∈ {agent_request, manual})。
 pub const SHOTS_EXTRA_REL_DIR: &str = "02_calibrate/shots_extra";
 pub const CALIBRATE_TIMELINE_FILE: &str = "02_calibrate/timeline.html";
+/// 校准对照表视图(一屏看完:图 + 转录 + 结论 + 校准日志)。见 `docs/DESIGN.md` §9.3。
+pub const CALIBRATE_TABLE_FILE: &str = "02_calibrate/calibrate.html";
 
 // ── 03_summary/ ─────────────────────────────────────────────────────
 pub const SUMMARY_DIR: &str = "03_summary";
@@ -100,6 +104,9 @@ impl Layout {
     pub fn project_json(&self) -> PathBuf {
         self.root.join(PROJECT_FILE)
     }
+    pub fn state_file(&self) -> PathBuf {
+        self.root.join(STATE_FILE)
+    }
     pub fn lock_file(&self) -> PathBuf {
         self.root.join(LOCK_FILE)
     }
@@ -159,6 +166,9 @@ impl Layout {
     }
     pub fn calibrate_timeline(&self) -> PathBuf {
         self.rel(CALIBRATE_TIMELINE_FILE)
+    }
+    pub fn calibrate_table(&self) -> PathBuf {
+        self.rel(CALIBRATE_TABLE_FILE)
     }
 
     // ── 03_summary/ ─────────────────────────────────────────────────
@@ -287,6 +297,7 @@ mod tests {
             CROSS_VALIDATE_FILE,
             CALIBRATION_LOG_FILE,
             CALIBRATE_TIMELINE_FILE,
+            CALIBRATE_TABLE_FILE,
             AGENT_LOG_FILE,
             SUMMARY_FILE,
             REPORT_MD_FILE,

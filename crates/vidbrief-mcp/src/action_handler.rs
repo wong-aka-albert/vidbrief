@@ -54,7 +54,7 @@ fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Resu
     // (同进程再取会被自己挡住,报错还长得像"被别的会话占着")。
     let guard = state.guard_of(&dir);
 
-    // **必须和工具调用排同一队。** 两条路都会整份读改写 `project.json`
+    // **必须和工具调用排同一队。** 两条路都会读改写项目的状态(`state.bin`)
     // (`approve` 写 `review`,`record_shot_check` 写 `progress`),
     // 不排队就是后写的赢、前一个的改动凭空消失 —— `serialize` 存在的唯一理由。
     //
@@ -91,7 +91,7 @@ fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Resu
         c.supplement_pending,
         c.uncertain,
         if pending > 0 {
-            "你确认的是「就这样往下走」—— 这些还欠着的东西已经记进 project.json。\
+            "你确认的是「就这样往下走」—— 这些还欠着的东西已经记进项目状态。\
              想留一句理由,告诉 agent 或用命令行 `vidbrief approve -n \"…\"`。"
         } else {
             "东西都处理干净了。"
