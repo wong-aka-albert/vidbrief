@@ -1,4 +1,4 @@
-//! §11 的 A–F 组工具,一个模块一组 —— 外加 `guide`(说明书,不属于 A–F,
+//! §11 的 A–G 组工具,一个模块一组 —— 外加 `guide`(说明书,不属于 A–G,
 //! 是「怎么把说明递给没有 prompt 能力的宿主」的那个出口)。
 //!
 //! 每个工具函数都是**薄薄一层**:把 MCP 的 JSON 参数翻译成 `vidbrief-ops` 的调用,
@@ -10,7 +10,9 @@ pub mod guide;
 pub mod materials;
 pub mod preprocess;
 pub mod project;
+pub mod report;
 pub mod shots;
+pub mod skill;
 pub mod view;
 
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -22,11 +24,19 @@ use crate::server::VidbriefServer;
 
 /// 一个项目上的写操作名额。
 ///
-/// **必须持有到操作结束** —— 它保证同一项目上的两个写工具不会交叉执行
-/// (都是"读 JSON → 改 → 原子写",交叉就是后写的赢,前一个的结论凭空消失)。
+/// **必须持有到操作结束** —— 它管两件事:
+///
+/// 1. **排队**:同一项目上的两个写工具不会交叉执行(都是"读 JSON → 改 → 原子写",
+///    交叉就是后写的赢,前一个的结论凭空消失);
+/// 2. **按次持锁**:项目写锁活到这次调用结束就放(`WriteHold` 的 Drop)——
+///    空转的会话不再把项目占死。
+///
+/// `_` 前缀是提醒:**别 drop 早了**。
 pub(crate) struct WriteSlot {
-    /// 名额本身。`_guard` 这个名字是提醒:**别 drop 早了**,持有到函数结束。
+    /// 名额本身。
     _guard: OwnedMutexGuard<()>,
+    /// 这一趟的写锁凭证。
+    _hold: crate::state::WriteHold,
     /// 写锁没锁上时的说明,**只在同一项目第一次写操作时给一次**。
     warning: Option<String>,
 }
@@ -85,18 +95,17 @@ impl VidbriefServer {
     ) -> Result<(OpenProject, WriteSlot), CallToolResult> {
         let state = self.state.clone();
         let id = project_id.to_string();
-        let opened = blocking(move || {
+        // 凭证要和 opened 一起送出这个闭包:它一 drop 就把锁放了
+        let (opened, hold) = blocking(move || {
             let opened = OpenProject::open(&id)?;
-            state.enter_write(&opened).map_err(|e| {
+            let hold = state.enter_write(&opened).map_err(|e| {
                 anyhow::anyhow!(
-                    "{e:#}\n\
-                     \n\
-                     这个项目正被另一个会话编辑。**只读的活不受影响**\
-                     (list_shots / get_shot / get_transcript / render_timeline 都能照用);\
-                     要改材料和结论,请让对方先收工,或让用户关掉那个会话。"
+                    "{e:#}
+                     
+                     这个项目正被另一个会话编辑。**只读的活不受影响**                     (list_shots / get_shot / get_transcript / render_timeline 都能照用);                     要改材料和结论,请让对方先收工,或让用户关掉那个会话。"
                 )
             })?;
-            Ok(opened)
+            Ok((opened, hold))
         })
         .await?;
 
@@ -109,6 +118,7 @@ impl VidbriefServer {
             opened,
             WriteSlot {
                 _guard: slot,
+                _hold: hold,
                 warning,
             },
         ))
@@ -152,6 +162,35 @@ mod tests {
         };
         assert_eq!(text.text, "原样");
         assert_eq!(result.content.len(), 1);
+    }
+
+    /// **`skill/tools.md` 不许过期** —— 它是活的工具表的投影。
+    ///
+    /// 为什么用"比对"而不是"手写一份":手写的清单一定会烂(参数加一个、说明改一句,
+    /// 文档不知道),而模型照着过期的清单调工具只会拿到一堆「missing field」。
+    /// 这里直接拿当前工具表渲染一遍,和文件比对;不一致就把文件重写一遍提交。
+    ///
+    /// 要同步:`VIDBRIEF_REGEN_SKILL=1 cargo test -p vidbrief-mcp skill_tools_index`。
+    #[test]
+    fn skill_tools_index_is_a_projection_of_the_live_tool_table() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skill/tools.md");
+        let rendered = crate::tools::skill::render_tools_index(&VidbriefServer::new().tools_for_test());
+
+        if std::env::var_os("VIDBRIEF_REGEN_SKILL").is_some() {
+            std::fs::write(&path, &rendered).expect("写 skill/tools.md 失败");
+            eprintln!("已按当前工具表重写 {}", path.display());
+            return;
+        }
+
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("读不到 {}:{e}
+先跑一次 VIDBRIEF_REGEN_SKILL=1 cargo test -p vidbrief-mcp", path.display())
+        });
+        assert_eq!(
+            on_disk, rendered,
+            "skill/tools.md 与当前工具表对不上了 ——              `VIDBRIEF_REGEN_SKILL=1 cargo test -p vidbrief-mcp skill_tools_index` 重写它,然后一起提交"
+        );
     }
 
     /// 每个工具名都必须落在 MCP 认的形状里:`[a-zA-Z0-9_-]{1,64}`。

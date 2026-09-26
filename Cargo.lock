@@ -1225,6 +1225,8 @@ dependencies = [
  "vidbrief-mcp",
  "vidbrief-ops",
  "vidbrief-project",
+ "vidbrief-report",
+ "vidbrief-viz",
 ]
 
 [[package]]
@@ -1251,6 +1253,7 @@ dependencies = [
  "tokio",
  "vidbrief-ops",
  "vidbrief-project",
+ "vidbrief-report",
 ]
 
 [[package]]
@@ -1264,6 +1267,7 @@ dependencies = [
  "vidbrief-asr",
  "vidbrief-core",
  "vidbrief-project",
+ "vidbrief-report",
  "vidbrief-viz",
 ]
 
@@ -1285,6 +1289,14 @@ dependencies = [
 [[package]]
 name = "vidbrief-report"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "serde",
+ "serde_json",
+ "vidbrief-project",
+ "vidbrief-viz",
+]
 
 [[package]]
 name = "vidbrief-viz"

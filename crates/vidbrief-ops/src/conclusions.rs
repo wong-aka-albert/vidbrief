@@ -1,8 +1,11 @@
 //! 存结论:D 组工具(`record_shot_check` / `apply_corrections` / `write_note` /
-//! `write_summary` / `write_report_md`)。
+//! `write_summary`)。
 //!
 //! 设计见 `docs/DESIGN.md` §6.1 —— **工具不判断对错,只搬运与保存。**
 //! 这里是"agent 的结论落成文件"的唯一入口。
+//!
+//! 步 4(报告)不在这里:`report.md` / `report.html` 都是**同一份报告数据的投影**,
+//! 落数据、渲染、开页面归 `crate::report`(见 devlog [260926-07] 的"数据为源")。
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -579,24 +582,20 @@ pub fn write_note(
 /// **先过步 2 的门**(`review::gate_calibrate`)。这是 M4 联调之后加的:
 /// 在那之前,一个一张图都没校准的项目可以直接写总结、把步 3 标成完成 ——
 /// "靠对话把关"等于没有把关。
+///
+/// 顺带记下这份总结的**内容底账**([`vidbrief_project::doc_print`]):
+/// 步 3→4 那道门问的就是"出报告之前,这份总结还是工具写出去的那一份吗"
+/// (`crate::review::gate_summarize`)。没这一笔那句话就没法回答 ——
+/// 而它正是 M4 第三轮那次绕门的形状(手写 `summary.md` 把门绕过去)。
 pub fn write_summary(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
     crate::review::gate_calibrate(opened)?;
     let path = opened.layout().summary_md();
     vidbrief_project::write_atomic_str(&path, md).context("写入 summary.md 失败")?;
+    opened.state_mut().note_content(
+        vidbrief_project::layout::SUMMARY_FILE,
+        vidbrief_project::doc_print(md),
+    );
     opened.state_mut().progress.summarize.mark_done();
-    opened.save()?;
-    Ok(path)
-}
-
-/// 写 `04_report/report.md` 并标记步 4 完成。
-///
-/// 只落 Markdown;**图表化 HTML 是 `build_report`**(M6,`vidbrief-report`)。
-/// 这里就把步 4 标成完成,是因为 `report.md` 才是这一稿的实体,
-/// HTML 只是同一稿的另一种渲染 —— 渲染不出来不该让"报告写好了"变成假话。
-pub fn write_report_md(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
-    let path = opened.layout().report_md();
-    vidbrief_project::write_atomic_str(&path, md).context("写入 report.md 失败")?;
-    opened.state_mut().progress.report.mark_done();
     opened.save()?;
     Ok(path)
 }
@@ -1068,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_and_report_mark_their_steps() {
+    fn summary_marks_its_step_and_leaves_a_ledger() {
         let fake = Fake::new("concl-steps")
             .with_transcript(&[(0.0, 2.0, "各位好")])
             .with_curve(5)
@@ -1105,13 +1104,15 @@ mod tests {
         let _ = &mut opened;
         write_summary(&mut opened, "# 总结\n").unwrap_or_else(|e| panic!("{e:#}"));
 
-        write_report_md(&mut opened, "# 报告\n").unwrap();
-
         let state = fake.state();
         assert!(state.progress.summarize.done);
-        assert!(state.progress.report.done);
         assert!(fake.layout().summary_md().is_file());
-        assert!(fake.layout().report_md().is_file());
+        // 底账记的是**这一份正文** —— 步 3→4 那道门就靠它对账
+        assert_eq!(
+            state.content.get(vidbrief_project::layout::SUMMARY_FILE),
+            Some(&vidbrief_project::doc_print("# 总结\n")),
+            "写总结要顺手记下它的内容底账"
+        );
     }
 
     #[test]

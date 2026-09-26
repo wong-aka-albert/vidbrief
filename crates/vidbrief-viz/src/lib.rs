@@ -23,7 +23,9 @@ pub mod server;
 pub use data::{CalibrationData, TimelineData, relative_url};
 pub use html::{render_calibration_table, render_calibration_table_html, render_timeline, render_timeline_html};
 pub use server::{
-    Action, ActionHandler, ensure_running, has_action_handler, mount, set_action_handler, url_for,
+    Action, ActionHandler, ensure_running, has_action_handler, mount, post_control, print_handshake,
+    registry_dir, remove_registry_entry, run_in_this_process, set_action_handler, shutdown, url_for,
+    use_separate_process, watch_parent_on_stdin,
 };
 
 /// 一次到位的"渲染 + 挂载 + 打开浏览器"。

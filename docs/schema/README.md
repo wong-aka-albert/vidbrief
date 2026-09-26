@@ -1,6 +1,7 @@
 # vidbrief JSON Schema(项目材料格式规范)
 
-> **状态**:M0 定稿(v1)。本目录是"项目目录里的每个 JSON 文件长什么样"的**唯一权威**。
+> **状态**:随里程碑扩 —— M0 定稿 v1,M4 加 `project.json` v2(状态搬进 `state.bin`),
+> M6 加 `04_report/report.json`。本目录是"项目目录里的每个 JSON 文件长什么样"的**唯一权威**。
 > 主设计见 [`../DESIGN.md` §4](../DESIGN.md);Rust 侧类型见 `crates/vidbrief-project/`。
 
 本目录同时是:
@@ -106,7 +107,9 @@ vidbrief upgrade <项目>            # 收状态 + 把 project.json 改写成 v2
 | `shots.json` | 工具 | 步 1 建;步 2/3 增删改 | 内容**是**;`status`/`check`/`reason` 只是**投影** |
 | `transcript.fixed.json` | 工具 | 步 2 起每次纠错 | **整份都是投影**(原文 + 当前结论) |
 | `supplement_requests.json` | 工具 | 步 2 | 内容**是**;`status`/`shot_id`/`note` 只是**投影** |
-| `*.md`(summary / report / log) | **agent** | 步 2/3/4 | 产物(用户读的就是它) |
+| `04_report/report.json` | 工具(agent 的判断经 `build_report` 落进来) | 步 4 | **是** —— 报告两个投影(`report.html` / `report.md`)的判据,口味 `style` 也在里面 |
+| `summary.md`、`log` | **agent** | 步 2/3 | 产物(用户读的就是它) |
+| `report.md` | 工具(从 `report.json` 渲染) | 步 4 | **投影** —— 它不再由 agent 手写:手写等于给同一份报告立第二处判据 |
 
 ### `state.bin`(不是 JSON,本目录只交代一句)
 

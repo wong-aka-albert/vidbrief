@@ -383,11 +383,15 @@ pub struct ProjectState {
     /// **材料内容的底账**:项目根相对路径 → 工具最后一次写出去时它长什么样。
     ///
     /// 键是 `layout` 里那几个常量(`01_preprocess/transcript.json` / `…/shots.json` /
-    /// `02_calibrate/supplement_requests.json`)。
+    /// `02_calibrate/supplement_requests.json`),外加 `03_summary/summary.md`。
     ///
-    /// **为什么是这三份**:门的第①条要**数行数**("还有哪些没核验"),数的就是这三份。
+    /// **为什么是这三份材料**:门的第①条要**数行数**("还有哪些没核验"),数的就是这三份。
     /// 别的材料(差帧图、密集区、元数据)没有一条规则去数它们里面的行 ——
     /// 给它们也记一份,只是多一份要维护、会对不上的东西。
+    ///
+    /// **`summary.md` 为什么也进来**:步 3→4 那道门问的是另一个问题 ——
+    /// "出报告之前,那份总结还是工具写出去的那一份吗"。判据同为内容指纹,
+    /// 机制同一套,所以走同一张表(见 [`doc_print`] 与 `review::gate_summarize`)。
     #[serde(default)]
     pub content: BTreeMap<String, ContentPrint>,
 }
@@ -469,6 +473,17 @@ impl ProjectState {
     ///
     /// 修订号从 `project.json` 搬到这里 —— 它记的是"这份状态被改过几次",
     /// 那也是状态,不是身份(见 [`crate::project`] 的模块文档)。
+    /// **只把 `rev` 读出来** —— 乐观并发的检查点用(`OpenProject::save`)。
+    ///
+    /// 状态文件不在时给 0(新项目);读不动时**报错**,而不是猜一个数:
+    /// 猜出来的基准会让"有没有被别人改过"这个问题永远答"没有"。
+    pub fn read_rev(path: &Path) -> Result<u64> {
+        match Self::read_file(path)? {
+            Some(state) => Ok(state.rev),
+            None => Ok(0),
+        }
+    }
+
     pub fn check_rev(&self, seen: u64) -> Result<()> {
         if self.rev != seen {
             bail!(
@@ -758,6 +773,23 @@ pub fn supplements_print(list: &SupplementRequests) -> ContentPrint {
     }
 }
 
+/// 一份**文档**(Markdown)的指纹:正文本身,行数当条数。
+///
+/// 用途只有一个:`summary.md` 守在**步 3→4 那道门**上 —— 门的判据是"出报告之前,
+/// 那份总结还是不是工具写出去的那一份"(`review::gate_summarize`)。
+///
+/// 它与上面三个**同一套机制、同一张表**(`ProjectState::content`),
+/// 只是数的东西不同:那三份数的是"有几行活",这份数的是"这版总结被换过没有"。
+/// 接进来的理由与它们一样:门要拿明文当判据,而明文谁都能改。
+pub fn doc_print(md: &str) -> ContentPrint {
+    // 行尾统一:同一个内容换个换行符不算换了一版(与三份材料"换个缩进不算变"一致)
+    let normalized: Vec<&str> = md.lines().map(str::trim_end).collect();
+    ContentPrint {
+        items: normalized.len(),
+        digest: crate::digest::full(&normalized),
+    }
+}
+
 /// 一条截图状态的人话说法(给体检那一行用)。
 fn describe_shot(state: &ShotState) -> String {
     let mut parts = Vec::new();
@@ -867,7 +899,13 @@ mod tests {
 
         let back = ProjectState::read_file(&path).unwrap().expect("该读得回来");
         assert_eq!(back, state, "每一栏都该原样回来");
-        assert_eq!(back.shot(ShotId::FIRST).unwrap().check, Some(check()));
+        // 比**原来那份里存着的**(不要再 `check()` 造一份:那个 `checked_at` 是"现在" ——
+        // 跨过一次秒边界,这条测试就会莫名其妙地红。本文件其它地方也踩过这个坑)。
+        assert_eq!(
+            back.shot(ShotId::FIRST).unwrap().check,
+            state.shot(ShotId::FIRST).unwrap().check,
+            "看图结论该原样回来"
+        );
         assert_eq!(back.review.calibrate.as_ref().unwrap().counts.uncertain, 3);
 
         std::fs::remove_dir_all(&dir).unwrap();

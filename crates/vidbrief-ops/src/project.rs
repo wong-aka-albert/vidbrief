@@ -57,6 +57,12 @@ pub struct OpenProject {
     /// 而且按空状态算是**最保守**的那头(什么都没核验 → 门全拦),
     /// 拿不到任何便宜。所以工具照常能用,只把这件事报到明面上,由 `status` / `get_project` 说给人听。
     state_note: Option<String>,
+    /// **打开时**读到的 `rev`(状态文件不在/读不动时为 `None`)。
+    ///
+    /// 写回之前拿它当基准比对 —— 见 [`OpenProject::save`] 的乐观并发。
+    /// 没有它的话,`preprocess` 那种"开头读、跑几分钟、最后整份写回"的活
+    /// 会把别人这期间的改动静静抹掉。
+    opened_rev: Option<u64>,
 }
 
 impl OpenProject {
@@ -75,12 +81,19 @@ impl OpenProject {
             )
         })?;
         let (state, state_note) = load_state(&layout)?;
+        // 打开时的 `rev` —— 写回之前拿它当基准比对(乐观并发,见 `save`)
+        let opened_rev = if state_note.is_some() {
+            None
+        } else {
+            Some(state.rev)
+        };
         Ok(Self {
             layout,
             project,
             meta,
             state,
             state_note,
+            opened_rev,
         })
     }
 
@@ -141,9 +154,36 @@ impl OpenProject {
     /// 身份(`project.json`)不在这里写:它只在建项目和升级时变一次
     /// (见 [`Self::save_identity`])。
     pub fn save(&mut self) -> Result<()> {
+        // **乐观并发**:写回之前确认"我读到的那份"还是当前那份。
+        //
+        // 为什么非做不可:`preprocess` 那种活会**开头读状态、跑几分钟、最后整份写回**,
+        // 这期间别的会话改的东西会被静静抹掉 —— 从前是靠会话级写锁粗盖着,
+        // 而锁现在改成按次取放(空转的会话不该把项目占死),那就必须由这里兜住。
+        //
+        // 基准是"打开时读到的 rev";状态文件不在/读不动时没有基准(`None`),不拦 ——
+        // 那种情况下门已经按"什么都还没核验"算了。
+        if let Some(seen) = self.opened_rev {
+            let now = ProjectState::read_rev(&self.layout.state_file()).with_context(|| {
+                format!(
+                    "写回前读一次 {} 失败 —— 状态读不动就没法确认这次写安不安全",
+                    self.layout.state_file().display()
+                )
+            })?;
+            if now != seen {
+                bail!(
+                    "项目状态在你读它之后被**别的会话改过**了(你读到 rev={seen},现在是 rev={now})。
+                     
+                     这次写**没有落盘** —— 落下去会把对方那一段改动抹掉,而它可能是几分钟的活。
+                     重来一遍就行:每个写工具都会重新打开项目,读到的就是最新的那份。"
+                );
+            }
+        }
         self.state
             .save(&self.layout.state_file())
-            .with_context(|| format!("写入 {} 失败", self.layout.state_file().display()))
+            .with_context(|| format!("写入 {} 失败", self.layout.state_file().display()))?;
+        // 刚写出去的这份就是最新的 —— 同一次调用里再存一次不该自己撞自己
+        self.opened_rev = Some(self.state.rev);
+        Ok(())
     }
 
     /// 存回**身份**(`project.json`)。

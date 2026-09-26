@@ -26,10 +26,22 @@ use crate::project::OpenProject;
 /// **库里不打印任何东西** —— 由调用方决定说什么、怎么说(与 `vidbrief-core::pipeline` 同一约定)。
 #[derive(Debug, Clone, Copy)]
 pub enum Stage {
+    /// 开始算差帧图(抽帧 + 逐帧评分,长视频上要几秒到几十秒)。
+    ///
+    /// 与 [`Stage::Analyzed`] 是一对:一个说「开始了」,一个带着结论说「算完了」。
+    /// 分开是因为**中间那段没有任何细粒度进度** —— 只有「开始了」能说明它没卡住。
+    Analyzing,
     /// 差帧图与密集区算完了(在抽帧之前,所以这几行能先出来)
     Analyzed(AnalysisSummary),
     /// 抽帧进度
     Shot { done: usize, total: usize },
+    /// 开始语音转文字。
+    ///
+    /// **这一步没有细粒度进度可报**(whisper 不给机器可读的百分比),但它是最久的一段:
+    /// 不报的话,几分钟里外面看到的和「卡死」没有区别。所以至少报一个「开始了」。
+    Transcribing,
+    /// 材料都落盘了,开始渲染时间线。
+    Rendering,
 }
 
 /// 差帧图与密集区的结论摘要。
@@ -159,8 +171,10 @@ pub fn preprocess(
     };
     let params = RegionParams::default();
 
-    let (curve, regions) = vidbrief_core::analyze(&video, &meta, curve_opts, params)
-        .context("分析差帧图失败")?;
+    let (curve, regions) = {
+        on_progress(Stage::Analyzing);
+        vidbrief_core::analyze(&video, &meta, curve_opts, params).context("分析差帧图失败")?
+    };
     curve
         .save(&layout.change_curve())
         .context("写入 change_curve.json 失败")?;
@@ -203,6 +217,7 @@ pub fn preprocess(
     // ── 转录 ─────────────────────────────────────────────────────────
     let mut segment_checks_cleared = 0;
     let transcript = if opts.transcribe {
+        on_progress(Stage::Transcribing);
         match vidbrief_asr::transcribe_project(&video, &layout, &meta) {
             Ok(Some(t)) => {
                 // 重新转录 = 换了一份原文:旧结论与核验戳对的是旧文本,
@@ -240,6 +255,7 @@ pub fn preprocess(
     //
     // DESIGN §5.3:步 1 完成即产出可视化。**渲染失败不算步 1 失败** ——
     // 材料已经全部落盘,视图只是给人看的界面,没渲染出来可以再跑一次。
+    on_progress(Stage::Rendering);
     let (timeline, timeline_error) = match vidbrief_viz::render_timeline(&layout) {
         Ok(path) => (Some(path), None),
         Err(e) => (None, Some(format!("{e:#}"))),

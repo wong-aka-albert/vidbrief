@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use vidbrief_project::{
-    ChangeCurve, DenseRegions, Project, Shot, ShotOrigin, Shots, SupplementRequests,
+    ChangeCurve, DenseRegions, Project, Report, Shot, ShotOrigin, Shots, SupplementRequests,
     Transcript, VideoMeta,
 };
 
@@ -27,6 +27,7 @@ const CASES: &[(&str, &str)] = &[
     ("transcript.fixed.json", "transcript.schema.json"),
     ("shots.json", "shots.schema.json"),
     ("supplement_requests.json", "supplement_requests.schema.json"),
+    ("report.json", "report.schema.json"),
 ];
 
 /// 仓库根(`crates/vidbrief-project/../..`)。
@@ -127,6 +128,7 @@ fn every_example_matches_its_schema_and_type() {
     anchor::<Transcript>("transcript.fixed.json", "transcript.schema.json");
     anchor::<Shots>("shots.json", "shots.schema.json");
     anchor::<SupplementRequests>("supplement_requests.json", "supplement_requests.schema.json");
+    anchor::<Report>("report.json", "report.schema.json");
 }
 
 #[test]
@@ -313,6 +315,40 @@ fn examples_are_mutually_consistent() {
                 assert!(r.note.is_some(), "请求 {} 被拒绝,必须写理由", r.id);
             }
         }
+    }
+
+    // 报告:知识点的锚点必须真实 —— 引用的截图、转录段、讲者来源都要在
+    let report: Report = serde_json::from_str(&read(&example_path("report.json"))).unwrap();
+    for topic in &report.topics {
+        assert!(topic.t <= meta.duration, "知识点 {} 超出视频时长", topic.id);
+        for sid in &topic.shots {
+            assert!(
+                shots.get(*sid).is_some(),
+                "知识点 {} 指向不存在的截图 {sid}",
+                topic.id
+            );
+        }
+        for seg in &topic.segments {
+            assert!(
+                segment_ids.contains(seg),
+                "知识点 {} 指向不存在的转录段 {seg}",
+                topic.id
+            );
+        }
+        for src in &topic.sources {
+            if let vidbrief_project::TopicSource::Speaker { segment, .. } = src {
+                assert!(
+                    segment_ids.contains(segment),
+                    "知识点 {} 的讲者来源指向不存在的段 {segment}",
+                    topic.id
+                );
+            }
+        }
+        assert!(
+            !topic.sources.is_empty(),
+            "知识点 {} 没有来源 —— 报告里的结论都要能追到出处(讲者原话或外部链接)",
+            topic.id
+        );
     }
 
     // 状态(进度、核验戳、拍板记录)不在 project.json 里 —— 它有自己的家(state.bin),

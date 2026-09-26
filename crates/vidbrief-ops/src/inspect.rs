@@ -155,6 +155,11 @@ pub struct Materials {
     pub cross_validate: bool,
     pub calibration_log: bool,
     pub summary_md: bool,
+    /// 报告的**判据**(`04_report/report.json`)在不在。
+    ///
+    /// M6 联调撞出来的:进度里 ④ 标着完成、而 `04_report/` 下什么都没有 ——
+    /// 那时 agent 只能再花一步去 `glob` 确认。判据/投影分开列,一眼看得出来是哪一份不在。
+    pub report_json: bool,
     pub report_md: bool,
     pub report_html: bool,
     /// **文件在、读不动**的材料(项目根相对路径)。空 = 都读得动。
@@ -306,6 +311,8 @@ pub fn scan_materials(layout: &Layout) -> Materials {
         cross_validate: layout.cross_validate().is_file(),
         calibration_log: layout.calibration_log().is_file(),
         summary_md: layout.summary_md().is_file(),
+        // 报告的**判据**是 report.json;那两份是它的投影,可能单独不在
+        report_json: layout.report_json().is_file(),
         report_md: layout.report_md().is_file(),
         report_html: layout.report_html().is_file(),
         unreadable,

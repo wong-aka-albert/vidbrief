@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vidbrief 报告</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3038; --fg: #d8dee9; --dim: #7b8494;
+    --accent: #4aa3ff; --keep: #3fb950; --warn: #d29922; --bad: #f85149;
+    --hover: #ffffff08; --shadow: 0 10px 34px #000a;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --fg: #1f2328; --dim: #656d76;
+    --accent: #0969da; --keep: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+    --hover: #0000000a; --shadow: 0 10px 34px #00000026;
+  }
+  * { box-sizing: border-box; }
+
+  /* 滚动条:系统默认那根又粗又亮,贴在深色面板边上一眼就是「没管过」。
+     面板内部的滚动(知识点浮层、图文总结抽屉)用细条 + 圆头 + 透明轨道。
+     Chromium 走 ::-webkit-scrollbar;Firefox 没有这个伪元素,只能用标准的
+     thin + 两色 —— 两者会互相顶掉(标准属性一旦生效,Chromium 就忽略
+     ::-webkit-scrollbar),所以用特性查询分开写。 */
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  /* 拇指:5px 宽的圆头(border 3px + background-clip 把两侧留白)。
+     常态压暗(--dim 的六成),鼠标进来才提亮 —— 面板边上那一条要安静,但不能找不到。 */
+  ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--dim) 60%, transparent);
+    border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); background-clip: content-box; }
+
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 13.5px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  header { flex: 0 0 auto; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  /* 这份是按什么口味做的 —— 用户扫一眼就知道该不该说"换个说法"
+     (同一句话也写在 report.md 的头一行,两处一个来源:ReportStyle::describe)。
+     风格是自由文本,可能是整整一句话 —— 标题栏里截断显示,全文挂在 title 上。 */
+  header .chip { font-size: 12px; color: var(--fg); background: var(--hover);
+    border: 1px solid var(--line); border-radius: 999px; padding: 0 9px;
+    max-width: 46ch; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  header .chip[hidden] { display: none; }
+  header .chip.warn { color: var(--warn); border-color: var(--warn); }
+  header .chip.bad { color: var(--bad); border-color: var(--bad); cursor: help; }
+  header .spacer { flex: 1; }
+  button.tool {
+    font: inherit; font-size: 12px; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 9px; cursor: pointer;
+  }
+  button.tool:hover { background: var(--hover); }
+  button.tool:disabled { opacity: .4; cursor: default; }
+
+  /* 主区 + 右侧抽屉并排:抽屉滑出时视频区**自己收缩让位**,不是盖在上面 */
+  .app { display: flex; flex: 1 1 auto; min-height: 0; }
+  .board { position: relative; flex: 1 1 auto; min-width: 0; display: flex;
+    flex-direction: column; }
+  .stage { position: relative; flex: 1 1 auto; min-height: 0; background: #000;
+    display: flex; justify-content: center; align-items: center; }
+  video { max-width: 100%; max-height: 100%; height: 100%; background: #000; }
+
+  /* 浮动层:一条知识点的完整展开(标题/正文/来源)。位置由 JS 对齐到锚点。 */
+  .float {
+    position: absolute; bottom: 74px; left: 50%; transform: translateX(-50%);
+    width: min(460px, 92vw); max-height: 46vh;
+    /* 纵向滚 + 横向**不滚**:横向一旦可滚,竖直滚动条本身占的宽度又会把内容
+       挤出去,于是浮层底下多出一根横向条 —— 又难看又难用。
+       内容不许撑破浮层(见下面的 overflow-wrap)。 */
+    overflow-y: auto; overflow-x: hidden;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+    padding: 10px 15px 12px; z-index: 6;
+  }
+  .float.hidden, .stem.hidden { display: none; }
+  /* 引线:独立元素(放在浮层外面 —— 浮层自己 overflow,伪元素会被裁掉) */
+  .stem { position: absolute; width: 1px; background: var(--accent); opacity: .85;
+    z-index: 5; }
+  .stem::after {
+    content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+    border: 5px solid transparent; border-top-color: var(--accent); opacity: .95;
+  }
+  .float .head { display: flex; align-items: center; gap: 8px; }
+  .float .idx { color: var(--dim); font-size: 12px; }
+  .float .head .spacer { flex: 1; }
+  .float h3 { margin: 6px 0 4px; font-size: 15.5px; }
+  .float h3 .t { color: var(--accent); font-size: 12.5px; margin-left: 8px; }
+  .topic-body p { margin: 7px 0; }
+  .topic-body ul { margin: 7px 0; padding-left: 20px; }
+  .topic-body blockquote { margin: 7px 0; padding: 3px 10px; border-left: 3px solid var(--line);
+    color: var(--dim); }
+  .topic-body table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 12.5px; }
+  .topic-body th, .topic-body td { border: 1px solid var(--line); padding: 3px 7px;
+    text-align: left; vertical-align: top; }
+  .topic-body th { background: var(--hover); }
+  /* 长串(编号区间、链接、没有空格的长中文)不许把表格撑宽:撑宽 = 内容被裁,
+     因为浮层横向不滚。`anywhere` 会连最小内容宽度一起缩,表格才收得回来。 */
+  .topic-body th, .topic-body td, .drawer-body th, .drawer-body td,
+  .topic-body code, .drawer-body code, .sources a, .segs { overflow-wrap: anywhere; }
+  .sources { margin-top: 9px; border-top: 1px dashed var(--line); padding-top: 6px;
+    font-size: 12px; color: var(--dim); }
+  .sources .k { color: var(--warn); }
+  .sources a { color: var(--accent); }
+  .segs { font-size: 12px; color: var(--dim); margin-top: 5px; line-height: 2; }
+  /* 转录段不是一个号码,是**一句话** —— 所以要能点、能看是哪一句:
+     点一下视频跳到那一刻,悬停看原文。 */
+  .seg { display: inline-block; margin: 1px 5px 1px 0; padding: 0 7px; font-size: 11.5px;
+    border: 1px solid var(--line); border-radius: 999px; color: var(--dim);
+    text-decoration: none; cursor: pointer; white-space: nowrap; }
+  .seg:hover { color: var(--fg); border-color: var(--accent); background: var(--hover); }
+  .seg .t { color: var(--accent); margin-left: 5px; }
+  .seg:hover .t { text-decoration: underline; }
+  .seg.missing { cursor: default; opacity: .6; }
+  .seg.missing:hover { color: var(--dim); border-color: var(--line); background: none; }
+  /* 待核验:读的人该回头核一下的点(多半是"画面看不清、但结论靠它"的数字)。
+     它必须在页面上**显眼** —— 静默略过这种数字,结论就少一块而读者不知道。 */
+  .verify { margin-top: 7px; border-top: 1px dashed var(--warn); padding-top: 5px;
+    font-size: 12px; color: var(--warn); }
+  .verify .k { font-weight: 600; }
+  .verify ul { margin: 3px 0 0; padding-left: 18px; }
+  .no-src { color: var(--warn); font-size: 12px; margin-top: 6px; }
+  .empty { color: var(--dim); padding: 4px 0; }
+
+  /* 时间轴:锚点即知识点。
+     轨道高度里**留出数字那一行** —— 数字原先挂在圆点上方 15px,而圆点贴着轨道顶端,
+     于是整排编号压到上面的视频区里去了(实测反馈)。现在条带自己够高:
+     上排编号 → 中排圆点/轴线 → 下排刻度。 */
+  .track-wrap { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line); padding: 8px 14px 20px; }
+  .track { position: relative; height: 34px; margin: 4px 2px 0; }
+  .tick { position: absolute; top: 24px; transform: translateX(-50%); color: var(--dim);
+    font-size: 10.5px; }
+  .tick::before { content: ""; position: absolute; left: 50%; bottom: 14px; width: 1px;
+    height: 6px; background: var(--line); }
+  .bar { position: absolute; left: 0; right: 0; top: 20px; height: 2px; background: var(--line); }
+  .pin { position: absolute; top: 14px; transform: translateX(-50%); cursor: pointer;
+    width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--panel);
+    background: var(--accent); z-index: 2; }
+  .pin:hover, .pin.active { background: var(--keep); }
+  .pin .num { position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; color: var(--dim); }
+  .pin.active .num { color: var(--keep); font-weight: 600; }
+  .playhead { position: absolute; top: 11px; height: 22px; width: 1px; background: var(--accent);
+    display: none; z-index: 3; }
+
+  /* 右侧抽屉:完整图文总结(全局总结 + 知识点列表 + 图)。
+     用宽度过渡让出空间 —— 视频区跟着缩,永远不被遮住。 */
+  .drawer-wrap { flex: 0 0 auto; width: 0; overflow: hidden;
+    transition: width .2s ease; }
+  .drawer-wrap.show { width: min(620px, 62vw); }
+  .drawer { width: min(620px, 62vw); height: 100%; background: var(--panel);
+    border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  .drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+  .drawer-head strong { font-size: 14px; }
+  .drawer-head .spacer { flex: 1; }
+  .drawer-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 20px 40px; }
+  .drawer-body img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px;
+    margin: 8px 0; display: block; }
+  .drawer-body h2, .drawer-body h3 { font-size: 15px; margin: 14px 0 8px; }
+  .drawer-body blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--line);
+    color: var(--dim); }
+  .drawer-body table { border-collapse: collapse; margin: 9px 0; width: 100%; font-size: 12.5px; }
+  .drawer-body th, .drawer-body td { border: 1px solid var(--line); padding: 4px 8px;
+    text-align: left; vertical-align: top; }
+  .drawer-body th { background: var(--hover); }
+  .drawer .sep { margin: 18px 0 4px; padding-top: 12px; border-top: 1px solid var(--line);
+    font-weight: 600; font-size: 14px; }
+  .topic-item { border-top: 1px dashed var(--line); padding: 12px 0 4px; cursor: default; }
+  .topic-item h4 { margin: 0 0 4px; font-size: 14px; }
+  .topic-item h4 .t { color: var(--accent); font-size: 12px; margin-right: 8px;
+    cursor: pointer; text-decoration: underline dotted; }
+  .topic-item.now { background: var(--hover); border-radius: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>报告</h1>
+  <span class="meta" id="meta"></span>
+  <span class="chip" id="style" hidden></span>
+  <span class="chip warn" id="verify" hidden></span>
+  <span class="chip bad" id="stale" hidden></span>
+  <span class="chip" id="single" hidden></span>
+  <span class="spacer"></span>
+  <button class="tool" id="toggleFloat">收起知识点</button>
+  <button class="tool" id="summaryBtn">图文总结</button>
+  <button class="tool" id="theme">切换主题</button>
+</header>
+
+<div class="app">
+<div class="board" id="board">
+  <div class="stage" id="stage">
+    <video id="v" controls preload="metadata" playsinline></video>
+  </div>
+  <!-- ★ 浮动层:挂在时间轴的锚点上(位置由 JS 对齐 + 引线相连) -->
+  <div class="float" id="float"></div>
+  <div class="stem" id="stem"></div>
+  <div class="track-wrap">
+    <div class="track" id="track">
+      <div class="bar"></div>
+      <div class="playhead" id="playhead"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 右侧抽屉:完整图文总结(全局总结 + 知识点列表,这里放图)——
+     并排布局,滑出时视频区让位,不遮盖 -->
+<div class="drawer-wrap" id="drawerWrap">
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <strong>图文总结</strong>
+    <span class="spacer"></span>
+    <button class="tool" id="drawerClose">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <div id="summary"></div>
+    <div class="sep">知识点</div>
+    <div id="topicList"></div>
+  </div>
+</aside>
+</div>
+</div>
+
+<script>
+"use strict";
+const DATA = /*__VIDBRIEF_DATA__*/null;
+
+// ── 极简 markdown ──────────────────────────────────────────────
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function md(src) {
+  const lines = esc(String(src || "")).split(/\r?\n/);
+  let out = "", inList = false, para = [];
+  const flush = () => { if (para.length) { out += "<p>" + para.join(" ") + "</p>"; para = []; } };
+  const endList = () => { if (inList) { out += "</ul>"; inList = false; } };
+  const cells = row => row.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) { flush(); endList(); continue; }
+    let m;
+    if (/^\|.*\|$/.test(line) && i + 1 < lines.length &&
+        /^\|[\s:|-]+\|$/.test(lines[i + 1].trim())) {
+      flush(); endList();
+      out += "<table><thead><tr>" +
+        cells(line).map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+      i += 2;
+      while (i < lines.length && /^\|.*\|$/.test(lines[i].trim())) {
+        out += "<tr>" + cells(lines[i].trim()).map(c => `<td>${c}</td>`).join("") + "</tr>";
+        i++;
+      }
+      i--;
+      out += "</tbody></table>";
+    } else if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
+      flush(); endList();
+      const h = Math.min(m[1].length + 1, 5);
+      out += `<h${h}>${m[2]}</h${h}>`;
+    } else if ((m = line.match(/^&gt;\s?(.*)$/))) {
+      flush(); endList();
+      out += `<blockquote>${m[1]}</blockquote>`;
+    } else if ((m = line.match(/^[-*]\s+(.*)$/))) {
+      flush();
+      if (!inList) { out += "<ul>"; inList = true; }
+      out += `<li>${m[1]}</li>`;
+    } else {
+      if (inList) endList();
+      para.push(line);
+    }
+  }
+  flush(); endList();
+  return out
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+function fmtT(t) {
+  const s = Math.max(0, Math.floor(t));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+const report = DATA.report || { summary: "", topics: [] };
+const topics = (report.topics || []).slice().sort((a, b) => a.t - b.t);
+const shotById = {}; (DATA.shots || []).forEach(s => shotById[s.id] = s);
+const segById = {}; (DATA.segments || []).forEach(s => segById[s.id] = s);
+const lastT = Math.max(...(DATA.segments || []).map(s => s.start),
+                       ...topics.map(t => t.t), 0);
+const duration = lastT + 30;
+
+document.getElementById("meta").textContent =
+  `${report.generated_at || "?"} · ${topics.length} 个知识点`;
+// 口味:标题栏一个小标签(hover 看补充要求)。旧数据没这一栏 → 不显示。
+const verifyCount = topics.reduce((n, t) => n + ((t.verify || []).length), 0);
+// 有几处要核,写在标题栏 —— 交付时那句话里也要报这个数(见 P5)
+const vchip = document.getElementById("verify");
+if (verifyCount) {
+  vchip.textContent = `待核验 ${verifyCount} 处`;
+  vchip.title = "这几处请对着视频核一下(多半是画面看不清、但结论靠它的数字)—— 在知识点浮层与右侧面板里逐条列出。";
+  vchip.hidden = false;
+}
+const styleChip = document.getElementById("style");
+if (DATA.style_text) {
+  styleChip.textContent = DATA.style_text;
+  styleChip.title = "这份报告是按「" + DATA.style_text + "」做的" +
+    ((report.style && report.style.notes) ? ";补充要求:" + report.style.notes : "") +
+    " —— 要换个说法,跟 agent 说一声,它会带着新口味重出一份。";
+  styleChip.hidden = false;
+}
+// 单文件分享版:图内嵌在这个文件里,发给别人也看得到 —— 但**视频带不走**。
+const single = document.getElementById("single");
+if (DATA.self_contained) {
+  single.textContent = "单文件版";
+  single.title = "这一份的图是内嵌的,文件可以单独发给别人。
+" +
+    "视频不在里面(太大)—— 点锚点回跳那一半要本机素材 + 本机服务,别人机器上点不动。";
+  single.hidden = false;
+}
+// 锚点过期:报告引的图 / 段 / 话在当前材料里找不到了(材料在报告之后被改过)。
+// **照渲染不拦** —— 这一页恰恰是发现它的窗口;但读者得知道:
+// 照着页面上的一句"讲者原话"回去核、转录里却没有,他就不知道该信谁了。
+const stale = DATA.stale || [];
+const staleChip = document.getElementById("stale");
+if (stale.length) {
+  staleChip.textContent = `⚠ ${stale.length} 处锚点过期`;
+  staleChip.title = "这份报告引的图 / 段 / 话,在当前材料里找不到了:\n· " +
+    stale.join("\n· ") + "\n\n材料在报告之后被改过(校准改了转录 / 截图被重抽)。" +
+    "要修就让 agent 重出一份(`build_report` 整份替换)。";
+  staleChip.hidden = false;
+}
+document.getElementById("summary").innerHTML = md(report.summary) ||
+  "<p class='empty'>（还没有全局总结）</p>";
+
+// ── 右侧抽屉:完整图文总结 —— 知识点列表(这里放图)────────────────
+const topicList = document.getElementById("topicList");
+// 一个转录段的芯片:`段 14 [0:54]`。**点它跳到视频那一刻**,
+// 悬停给出这一段的原文(截断)—— "段 14 是哪一句"从此答得出来。
+function segChip(id, withLabel) {
+  const seg = segById[id];
+  if (!seg) {
+    return `<span class="seg missing" title="这一段的原文不在材料里(纠正稿可能被换过)">` +
+      `段 ${id}(原文不在材料里)</span>`;
+  }
+  const chars = Array.from(seg.text || "");
+  const short = chars.slice(0, 70).join("") + (chars.length > 70 ? "…" : "");
+  // 讲者那行给「▶ 时刻」(一眼看出能点);关联段列表给「段 N + 时刻」(一眼看出是哪一句)
+  const label = withLabel ? "段 " + id : "▶ " + fmtT(seg.start);
+  const tail = withLabel ? `<span class="t">${fmtT(seg.start)}</span>` : "";
+  return `<a class="seg" href="#" data-start="${seg.start}" ` +
+    `title="${esc("段 " + id + " @ " + fmtT(seg.start) + "「" + short + "」—— 点一下视频跳到这一刻")}">` +
+    `${label}${tail}</a>`;
+}
+
+// 讲者那一行:时间是可点的段芯片(而不是一个干巴巴的 [0:54])
+function speakerLine(src) {
+  return `<div><span class="k">讲者</span> ` + segChip(src.segment, false) +
+    `「${esc(src.quote)}」</div>`;
+}
+
+// 关联转录段:一排芯片(原来的「段 14、段 19」读的人没法查)
+function segsHtml(t) {
+  if (!(t.segments || []).length) return "";
+  return `<div class="segs">关联转录段:${t.segments.map(id => segChip(id, true)).join("")}</div>`;
+}
+
+function sourceHtml(t) {
+  if (!(t.sources || []).length) {
+    return `<div class="no-src">⚠ 这条还没有来源 —— 结论要能追到出处才算数。</div>`;
+  }
+  let html = `<div class="sources">`;
+  for (const src of t.sources) {
+    if (src.kind === "speaker") {
+      html += speakerLine(src);
+    } else if (src.kind === "external") {
+      html += `<div><span class="k">外部</span> ` +
+        `<a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a></div>`;
+    }
+  }
+  return html + `</div>`;
+}
+topics.forEach((t, i) => {
+  const el = document.createElement("article");
+  el.className = "topic-item";
+  el.id = "ti-" + i;
+  let html = `<h4><span class="t" title="跳到这一时刻">${fmtT(t.t)}</span>${esc(t.title)}</h4>`;
+  html += md(t.body);
+  for (const sid of (t.shots || [])) {     // 抽屉里放图:它是图文总结面板
+    const s = shotById[sid];
+    if (s) html += `<img src="${esc(s.url)}" alt="${esc(sid)}" loading="lazy">`;
+  }
+  html += sourceHtml(t);
+  if ((t.verify || []).length) html += verifyHtml(t);
+  html += segsHtml(t);
+  el.innerHTML = html;
+  el.querySelector("h4 .t").addEventListener("click", () => {
+    follow = true; floatShown = true;
+    show(i, { jump: true });
+  });
+  topicList.appendChild(el);
+});
+
+const video = document.getElementById("v");
+if (DATA.video_url) video.src = DATA.video_url;
+
+// 时间轴
+const track = document.getElementById("track");
+for (let t = 0; t <= duration; t += 60) {
+  const el = document.createElement("div");
+  el.className = "tick";
+  el.style.left = (t / duration * 100) + "%";
+  el.textContent = fmtT(t);
+  track.appendChild(el);
+}
+const playhead = document.getElementById("playhead");
+
+// ── 浮动层:把一条知识点**整条**画出来 ─────────────────────────
+const float = document.getElementById("float");
+let current = -1, follow = true, floatShown = true;
+
+function topicHtml(t, i) {
+  let html = `<div class="head"><span class="idx">${i + 1} / ${topics.length}</span>` +
+    `<span class="spacer"></span>` +
+    `<button class="tool" id="prev" ${i === 0 ? "disabled" : ""}>←</button>` +
+    `<button class="tool" id="next" ${i === topics.length - 1 ? "disabled" : ""}>→</button>` +
+    // 关掉这一条就地关:跑到右上角那个按钮去关太远了。圆点还在轴上,点一下又能看。
+    `<button class="tool" id="close" title="收起这条(时间轴上的圆点还在,点一下再看)">✕</button>` +
+    `</div>`;
+  html += `<h3>${esc(t.title)}<span class="t">${fmtT(t.t)}</span></h3>`;
+  html += `<div class="topic-body">${md(t.body)}</div>`;
+  if ((t.sources || []).length) {
+    html += `<div class="sources">`;
+    for (const src of t.sources) {
+      if (src.kind === "speaker") {
+        html += speakerLine(src);
+      } else if (src.kind === "external") {
+        html += `<div><span class="k">外部</span> ` +
+          `<a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a></div>`;
+      }
+    }
+    html += `</div>`;
+  } else {
+    html += `<p class="no-src">⚠ 这条还没有来源 —— 结论要能追到出处才算数。</p>`;
+  }
+  if ((t.verify || []).length) html += verifyHtml(t);
+  html += segsHtml(t);
+  return html;
+}
+
+// 待核验:一条一个 li(读的人照着它回去核)。两处(浮层与抽屉)共用。
+function verifyHtml(t) {
+  const items = (t.verify || []).map(v => `<li>${esc(v)}</li>`).join("");
+  return `<div class="verify"><span class="k">待核验</span> —— 这几处请对着视频核一下:
+    <ul>${items}</ul></div>`;
+}
+
+function placeFloat(t) {
+  // 浮层水平对齐它所属的锚点;贴边时整体让开,但引线始终指着锚点。
+  // 锚点在 .track 里(有内边距),浮层在 .board 里 —— 换到同一个基准再对齐。
+  const board = document.getElementById("board");
+  const track = document.getElementById("track");
+  const br = board.getBoundingClientRect();
+  const tr = track.getBoundingClientRect();
+  const w = br.width || 1;
+  const pct = Math.min(1, Math.max(0, t.t / duration));
+  const anchorX = (tr.left - br.left) + pct * tr.width;
+  const half = Math.min(230, w * 0.46);
+  const x = Math.min(Math.max(anchorX, half + 8), w - half - 8);
+  float.style.left = x + "px";
+
+  // 引线:从浮层底垂直连到锚点中心(等布局落定再量)
+  requestAnimationFrame(() => {
+    const pin = document.querySelector(".pin.active");
+    if (!pin) return;
+    const fr = float.getBoundingClientRect();
+    const pr = pin.getBoundingClientRect();
+    const stem = document.getElementById("stem");
+    stem.classList.toggle("hidden", !floatShown);
+    stem.style.left = (pr.left + pr.width / 2 - br.left) + "px";
+    stem.style.top = (fr.bottom - br.top) + "px";
+    stem.style.height = Math.max(0, pr.top + pr.height / 2 - fr.bottom) + "px";
+  });
+}
+
+function show(idx, { jump = false, lock = false } = {}) {
+  if (idx < 0 || idx >= topics.length) return;
+  if (lock) follow = false;
+  current = idx;
+  const t = topics[idx];
+  float.innerHTML = topicHtml(t, idx);
+  float.scrollTop = 0;
+  setFloatShown(floatShown);
+  placeFloat(t);
+  document.querySelectorAll(".pin").forEach((p, i) => p.classList.toggle("active", i === idx));
+  float.querySelector("#prev").addEventListener("click", () => show(idx - 1, { lock: true }));
+  float.querySelector("#next").addEventListener("click", () => show(idx + 1, { lock: true }));
+  float.querySelector("#close").addEventListener("click", () => setFloatShown(false));
+  if (jump && DATA.video_url) { video.currentTime = t.t; video.play().catch(() => {}); }
+}
+
+topics.forEach((t, i) => {
+  const pin = document.createElement("div");
+  pin.className = "pin";
+  pin.style.left = (t.t / duration * 100) + "%";
+  pin.title = t.title;
+  pin.innerHTML = `<span class="num">${i + 1}</span>`;
+  pin.addEventListener("click", () => { follow = true; floatShown = true; show(i, { jump: true }); });
+  track.appendChild(pin);
+});
+
+function intervalIndex(t) {
+  let idx = 0;
+  for (let i = 0; i < topics.length; i++) if (topics[i].t <= t) idx = i;
+  return idx;
+}
+video.addEventListener("timeupdate", () => {
+  if (!video.duration) return;
+  playhead.style.display = "block";
+  playhead.style.left = (video.currentTime / duration * 100) + "%";
+  if (!follow || !floatShown) return;
+  const idx = intervalIndex(video.currentTime);
+  if (idx !== current) show(idx);
+});
+video.addEventListener("seeked", () => {
+  if (!follow) follow = true;
+  if (floatShown) { const i = intervalIndex(video.currentTime); if (i !== current) show(i); }
+});
+
+if (topics.length) show(0);
+else float.innerHTML = "<p class='empty'>（还没有知识点）</p>";
+
+// 点转录段的芯片 → 视频跳到那一刻。**先停下跟随**:读的人还在看这一条,
+// 让浮层跟着播放头换到别的知识点,等于把他正在读的东西抽走。
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest ? e.target.closest(".seg[data-start]") : null;
+  if (!chip) return;
+  e.preventDefault();
+  follow = false;
+  const at = Number(chip.dataset.start);
+  if (!Number.isFinite(at)) return;
+  video.currentTime = at;                       // follow 已关,seeked 里不会换浮层
+  playhead.style.display = "block";
+  playhead.style.left = (at / duration * 100) + "%";
+  video.play().catch(() => {});
+});
+
+// 窗口尺寸变了,浮层与引线要重新对齐到锚点
+window.addEventListener("resize", () => { if (topics[current]) placeFloat(topics[current]); });
+
+// 收起/展开浮动层。**一处出口**:先把状态改掉,再把三样跟着它的东西同步过去
+// (浮层本身、引线、右上角那个按钮的字)—— 卡片上的 ✕、轴上的圆点、抽屉里点时刻,
+// 都从这儿走,免得某条路径只关了一半。
+function setFloatShown(on) {
+  floatShown = on;
+  float.classList.toggle("hidden", !on);
+  document.getElementById("stem").classList.toggle("hidden", !on);
+  document.getElementById("toggleFloat").textContent = on ? "收起知识点" : "展开知识点";
+}
+document.getElementById("toggleFloat").addEventListener("click", () => setFloatShown(!floatShown));
+
+// 图文总结抽屉(右侧让位展开,不遮视频)/ 主题
+const drawer = document.getElementById("drawerWrap");
+document.getElementById("summaryBtn").addEventListener("click", () => drawer.classList.toggle("show"));
+document.getElementById("drawerClose").addEventListener("click", () => drawer.classList.remove("show"));
+// 跟随播放头时,让抽屉里对应的那一条也亮起来、滚进视野
+const origShow = show;
+show = function (idx, opts) {
+  origShow(idx, opts);
+  document.querySelectorAll(".topic-item").forEach((el, i) => el.classList.toggle("now", i === idx));
+  if (drawer.classList.contains("show")) {
+    const el = document.getElementById("ti-" + idx);
+    if (el && !(opts && opts.lock)) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+};
+if (current >= 0) show(current);   // 初始化时同步一次高亮
+const root = document.documentElement;
+const saved = localStorage.getItem("vidbrief-theme");
+if (saved) root.dataset.theme = saved;
+document.getElementById("theme").addEventListener("click", () => {
+  const next = root.dataset.theme === "light" ? "dark" : "light";
+  root.dataset.theme = next;
+  localStorage.setItem("vidbrief-theme", next);
+});
+</script>
+</body>
+</html>

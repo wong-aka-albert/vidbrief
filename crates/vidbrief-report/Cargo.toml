@@ -2,6 +2,13 @@
 name = "vidbrief-report"
 version.workspace = true
 edition.workspace = true
-description = "Markdown 报告 → 图表化 HTML 模板"
+description = "报告数据 → 图表化 HTML + Markdown 导出"
 
 [dependencies]
+anyhow.workspace = true
+# 单文件分享:图内嵌成 data: URL(与 mcp 传图用同一个 crate)
+base64 = "0.23"
+serde.workspace = true
+serde_json.workspace = true
+vidbrief-project.workspace = true
+vidbrief-viz.workspace = true

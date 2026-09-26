@@ -98,6 +98,40 @@ fn prepared(tag: &str) -> (TempDir, Layout) {
     (tmp, layout)
 }
 
+/// **跑完要留下一份运行记录** —— 那是「别的会话想知道跑到哪儿了」的唯一入口
+/// (MCP 的 `preprocess_progress` / `preprocess_result` 读的就是它)。
+///
+/// 记录里最要紧的是两件事:**这一趟叫什么**(认人)与**跑完的完整交代**
+/// (与命令直接返回的同一份,agent 不必学两种结果形状)。
+#[test]
+fn a_finished_run_leaves_a_record_of_itself() {
+    let (_tmp, layout) = prepared("run-record");
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(layout.preprocess_dir().join("run.json")).unwrap(),
+    )
+    .expect("运行记录该是 JSON");
+
+    assert_eq!(record["stage"], "done", "{record}");
+    assert_eq!(record["error"], serde_json::Value::Null, "{record}");
+    assert_eq!(
+        record["options"]["transcribe"], false,
+        "这一趟用的是哪套参数要记下来(不然两趟的记录长得一样):{record}"
+    );
+    assert!(
+        record["run_id"].as_str().is_some_and(|id| id.len() >= 8),
+        "要有名字才认得出是哪一趟:{record}"
+    );
+    assert!(record["pid"].as_u64().unwrap_or(0) > 0, "{record}");
+    assert!(
+        record["report"]["shots"].as_u64().unwrap_or(0) > 0,
+        "跑完的交代要跟着记录一起留下:{record}"
+    );
+    assert_eq!(
+        record["report"]["transcript"]["outcome"], "skipped",
+        "报告就是命令/工具直接返回的那一份(这一趟带了 --no-transcribe):{record}"
+    );
+}
+
 #[test]
 fn preprocess_writes_all_four_preprocess_files() {
     let (_tmp, layout) = prepared("files");

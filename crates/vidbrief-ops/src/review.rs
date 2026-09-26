@@ -541,6 +541,78 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
     Ok(())
 }
 
+/// 步 3 的门:**出报告之前,总结得是工具写出去的那一份。**
+///
+/// 与 [`gate_calibrate`] 是**同一套机制**,只是快照对象换成了 `summary.md`
+/// (指纹用 [`vidbrief_project::doc_print`],账记在同一张内容底账上 ——
+/// 见 `ProjectState::content`)。它挡的是两种"跳步":
+///
+/// 1. **步 3 没走过工具**:`summary.md` 不在,或者它不是 `write_summary` 落的
+///    (进度里那一步还空着)。M4 第三轮真 agent 联调就是这个形状 ——
+///    审核门关着,它拿宿主的文件工具把 `summary.md` 整个写了出来,然后接着往下做。
+/// 2. **写完之后又被绕过工具改过**:底账对不上。改一个字、换一版、把文件拿掉,
+///    都在里面。门要的是"**用户看到的那一版,就是出报告用的那一版**"。
+///
+/// 去路只有一条,而且很短:**把定稿交回 `write_summary` 再落一遍**
+/// (内容一字不改也行)。它不是惩罚,它是这条路上唯一的记账口。
+///
+/// # 这里为什么没有"等人拍板"那一档
+///
+/// 步 2 的那道门有三档(未核验 / 待拍板 / 放行),因为校准里"没把握"是模型自己
+/// 说得出来的状态。总结不同:**它没有"没把握"这回事** —— 一版总结要么是这个说法,
+/// 要么是另一个说法,判它是模型自己的活。
+///
+/// 要不要写完停下来等用户点头,是模型照用户那句交代决定的(`DESIGN` §6.1.1):
+/// 用户说"每个节点找我确认",它自然会停;说"全程托管只看结果",就一路做下去。
+/// **门在这里只保证一件事:出报告用的那份总结,和用户在对话里看到的那份是同一份。**
+pub fn gate_summarize(opened: &OpenProject) -> Result<()> {
+    let path = opened.layout().summary_md();
+    let md = std::fs::read_to_string(&path)
+        .ok()
+        .filter(|text| !text.trim().is_empty());
+
+    // ① 步 3 的产出不在(没写过 / 被拿掉 / 是空的)
+    let Some(md) = md else {
+        bail!(
+            "还没有总结,不能出报告。\n\
+             \n\
+             报告的两级内容里,**全局总结**就是这一步的产物(`{}`),\
+             没有它就没有可导的东西。\n\
+             \n\
+             先写总结:`write_summary`(命令行 `vidbrief summary <项目> --md <文件|->`)。",
+            vidbrief_project::layout::SUMMARY_FILE
+        );
+    };
+
+    // ② 它不是工具写出去的那一份
+    let now = vidbrief_project::doc_print(&md);
+    let stale = match opened.state().content.get(vidbrief_project::layout::SUMMARY_FILE) {
+        None => Some("没有底账 —— 这份总结不是经 `write_summary` 落盘的".to_string()),
+        Some(then) if then.digest != now.digest => Some(format!(
+            "内容跟工具写出去的那次对不上(那次 {} 行,现在 {} 行)",
+            then.items, now.items
+        )),
+        Some(_) => None,
+    };
+    if let Some(why) = stale {
+        bail!(
+            "这份总结不是工具写出去的那一份了,不能出报告。\n\
+             \n\
+             `{}`:{why}\n\
+             \n\
+             出报告用的那份总结,得和用户在对话里看到的那份**是同一份** ——\
+             中间被谁换过一版,报告就成了一份没人看过的稿子。\n\
+             \n\
+             **去路:把现在这份正文交回 `write_summary` 再落一遍**\
+             (命令行 `vidbrief summary <项目> --md <这份文件>`,内容一字不改也可以)。\
+             它就是这条路上唯一的记账口 —— 落完这一遍,底账就对上现在这份了。",
+            vidbrief_project::layout::SUMMARY_FILE
+        );
+    }
+
+    Ok(())
+}
+
 /// 材料比上次拍板时动了哪些**条目**。
 ///
 /// 只逐条比,不比计数 —— 编号变了的那种事("从 7 张变成 6 张")对读的人没用,

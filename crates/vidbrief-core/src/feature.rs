@@ -34,6 +34,14 @@ pub const HIST_WEIGHT: f64 = 0.75;
 /// 亮度项权重。
 pub const LUMA_WEIGHT: f64 = 0.25;
 
+/// "纯色帧"的亮度标准差上限(0–255 刻度)。
+///
+/// 见 [`FrameFeature::is_flat`]:判据保守是**故意的** —— 误杀真图的代价
+/// (那处画面证据凭空没了,且没人会提示)比漏放一张黑图大得多。
+pub const FLAT_LUMA_STDDEV: f64 = 2.5;
+/// "纯色帧"的单 bin 占比下限(0–1)。
+pub const FLAT_DOMINANT_SHARE: f64 = 0.98;
+
 /// 一帧的廉价特征:够用来判断"变了多少",不够用来理解画面。
 ///
 /// **不存像素** —— 985 秒的视频按 1fps 采样也有近千帧,每帧 480×270×3 就是 380 MB。
@@ -44,6 +52,8 @@ pub struct FrameFeature {
     hist: [f64; HIST_LEN],
     /// 逐像素 `(r+g+b)/3` 的累加值。
     luma_sum: f64,
+    /// 同上,平方的累加 —— 只为了算亮度标准差(纯色帧判据)。
+    luma_sq_sum: f64,
     /// 实际参与的像素数。
     pixels: f64,
 }
@@ -58,6 +68,7 @@ impl FrameFeature {
         let mut f = FrameFeature {
             hist: [0.0; HIST_LEN],
             luma_sum: 0.0,
+            luma_sq_sum: 0.0,
             pixels: 0.0,
         };
 
@@ -66,7 +77,9 @@ impl FrameFeature {
             f.hist[bin_of(r)] += 1.0;
             f.hist[HIST_BINS + bin_of(g)] += 1.0;
             f.hist[HIST_BINS * 2 + bin_of(b)] += 1.0;
-            f.luma_sum += (r as f64 + g as f64 + b as f64) / 3.0;
+            let luma = (r as f64 + g as f64 + b as f64) / 3.0;
+            f.luma_sum += luma;
+            f.luma_sq_sum += luma * luma;
             f.pixels += 1.0;
         }
         f
@@ -83,6 +96,49 @@ impl FrameFeature {
         } else {
             self.luma_sum / self.pixels
         }
+    }
+
+    /// 亮度的**标准差**(0–255 刻度)。没有像素时为 0。
+    ///
+    /// 纯色帧 ≈ 0,真实画面几到几十。用 `E[x²] - E[x]²` 算 —— 不存像素,只多存一个平方和。
+    pub fn luma_stddev(&self) -> f64 {
+        if self.pixels == 0.0 {
+            return 0.0;
+        }
+        let mean = self.luma_sum / self.pixels;
+        let var = (self.luma_sq_sum / self.pixels) - mean * mean;
+        var.max(0.0).sqrt()
+    }
+
+    /// 某个通道里最挤的那个 bin 占了多少像素(0–1)。
+    ///
+    /// 纯色画面会把一个 bin 吃满;有内容的画面摊在多个 bin 上。
+    pub fn dominant_share(&self) -> f64 {
+        if self.pixels == 0.0 {
+            return 0.0;
+        }
+        let mut best = 0.0f64;
+        for ch in 0..3 {
+            let base = ch * HIST_BINS;
+            let top = self.hist[base..base + HIST_BINS]
+                .iter()
+                .fold(0.0f64, |a, b| a.max(*b));
+            best = best.max(top);
+        }
+        best / self.pixels
+    }
+
+    /// **这一帧是不是纯色**(切黑、片尾淡出、纯色占位)。
+    ///
+    /// 判据**故意保守** —— 两条都得满足:亮度标准差低于 [`FLAT_LUMA_STDDEV`]、
+    /// 且某个通道的一个 bin 吃掉 ≥ [`FLAT_DOMINANT_SHARE`] 的像素。
+    ///
+    /// 为什么保守:漏掉一张纯色图,代价只是 agent 看图时写一句「画面无法确认」;
+    /// **误杀**一张真图,代价是那一处的画面证据凭空没了 —— 而没有任何地方会提示它少了。
+    /// 阈值是拍的(手头没有"带纯色段"的真视频可标定),所以宁可窄:真实场景的
+    /// 暗画面(夜景、淡出中途)标准差通常在 5 以上,离这条线还有一倍。
+    pub fn is_flat(&self) -> bool {
+        self.luma_stddev() < FLAT_LUMA_STDDEV && self.dominant_share() >= FLAT_DOMINANT_SHARE
     }
 
     /// 某个 bin 的归一化占比(调试与测试用)。
@@ -191,6 +247,47 @@ mod tests {
         let data = solid(1, 2, 3, 10);
         let f = FrameFeature::from_rgb24(&data, 100, 1);
         assert_eq!(f.pixels(), 10.0, "应当按实际读到的算");
+    }
+
+    /// 纯色帧判据:**保守**是故意的 —— 误杀真图的代价比漏放一张黑图大得多。
+    #[test]
+    fn a_solid_frame_is_flat_but_a_real_one_is_not() {
+        // 纯黑 / 纯白 / 深灰:都算纯色(切黑、片尾淡出、纯色占位长这样)
+        for (r, g, b) in [(0u8, 0u8, 0u8), (255, 255, 255), (18, 18, 18)] {
+            let f = FrameFeature::from_rgb24(&solid(r, g, b, 1400), 40, 35);
+            assert!(
+                f.is_flat(),
+                "纯色 {r},{g},{b} 该判成纯色:stddev={:.3} share={:.3}",
+                f.luma_stddev(),
+                f.dominant_share()
+            );
+        }
+
+        // JPEG 压缩会在纯色上留一点噪声(±3 上下)—— 那也还是纯色
+        let mut noisy = Vec::new();
+        for i in 0..1400 {
+            let v = if i % 2 == 0 { 2u8 } else { 5u8 };
+            noisy.extend_from_slice(&[v, v, v]);
+        }
+        let f = FrameFeature::from_rgb24(&noisy, 40, 35);
+        assert!(f.is_flat(), "带压缩噪声的黑帧还是纯色:stddev={:.3}", f.luma_stddev());
+
+        // 半黑半白的硬切:亮度标准差很大,不是纯色
+        let mut split = solid(0, 0, 0, 700);
+        split.extend_from_slice(&solid(255, 255, 255, 700));
+        let f = FrameFeature::from_rgb24(&split, 40, 35);
+        assert!(!f.is_flat(), "半黑半白不是纯色:stddev={:.3}", f.luma_stddev());
+
+        // 暗但有内容的画面(渐变):标准差远在阈值之上 —— 这条是"误杀"的护栏
+        let mut gradient = Vec::new();
+        for y in 0..35u32 {
+            for _ in 0..40u32 {
+                let v = (y * 6) as u8;
+                gradient.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let f = FrameFeature::from_rgb24(&gradient, 40, 35);
+        assert!(!f.is_flat(), "有内容的暗画面不许误杀:stddev={:.3}", f.luma_stddev());
     }
 
     #[test]

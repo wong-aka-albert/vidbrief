@@ -3,9 +3,10 @@
 //! MCP 走 stdio 时是 **1 会话 : 1 进程**(`docs/DESIGN.md` §4.7),所以这里不需要
 //! 跨进程共享 —— 但**进程内**有三件事必须有人管:
 //!
-//! 1. **写锁**:首次要改某个项目时取 `project.lock`,一直拿到进程结束。
-//!    这样第二个 agent 会话在**第一次动手**时就知道"这项目有主了",
-//!    而不是改到一半才发现自己的改动会被覆盖。
+//! 1. **写锁**:**按次取放** —— 一次写调用取、这次调用结束就放(`WriteHold` 的 Drop)。
+//!    进程还握着的时候,别的会话动手会立刻拿到"这项目有主了",而不是改到一半才发现;
+//!    而**空转的会话不再把项目占死**(从前是取到进程结束,一个 idle 会话能让别人一直写不进去)。
+//!    两次调用之间被别人改过怎么办:靠 `rev` 乐观并发(`OpenProject::save` 会拦),见 DESIGN §4.7。
 //! 2. **每项目串行**:agent 可能在同一轮里并发发几个写工具。它们都是同步阻塞的
 //!    (读 JSON → 改 → 原子写),两个同时跑就是"后写的赢",前一个的结论凭空消失。
 //! 3. **见过的项目**:`resources/list` 需要一份可枚举的清单,而项目可以建在任何路径
@@ -28,13 +29,38 @@ pub fn session_name() -> String {
     format!("mcp#{}", std::process::id())
 }
 
+/// 表里那一项:锁 + 有几个调用正拿它当凭证。
+struct Held {
+    guard: Arc<LockGuard>,
+    users: usize,
+}
+
+/// **一次写调用的持锁凭证。** Drop 时把这一份引用计数交回去,数到 0 就释放 OS 锁。
+///
+/// 为什么要 RAII 而不是"记得调 `exit_write`":入口有两条(MCP 工具与页面按钮),
+/// 而"改一处、忘了另一处"在这个仓库里发生过([260925-21],那时漏的是排队与警告)。
+/// 凭证拿在手上,编译器就替我们盯着了。
+pub struct WriteHold {
+    state: Arc<State>,
+    dir: PathBuf,
+}
+
+impl Drop for WriteHold {
+    fn drop(&mut self) {
+        self.state.release_write(&self.dir);
+    }
+}
+
 pub struct State {
-    /// 已持有的写锁:项目根 → guard。**只有 `Some` 一种状态** ——
-    /// 没有"只读登记"这回事,拿不到锁就是失败。
+    /// 本进程**正在**持有的写锁:项目根 → (guard, 还有几个调用在用)。
     ///
     /// 这张表不能省:OS 锁**同进程跨 handle 也生效**,所以同一个项目在同一个进程里
     /// 第二次取锁同样会被自己挡住 —— 必须先在这里查一次(键是 [`identity`])。
-    locks: Mutex<HashMap<PathBuf, Arc<LockGuard>>>,
+    ///
+    /// **引用计数是为了"按次取放"**:同一项目上可能有两次写调用重叠(一个正在写、
+    /// 另一个已经进场在排队),谁先走完都不能把别人还攥着的那把锁放掉 ——
+    /// 数到 0 才真放。
+    locks: Mutex<HashMap<PathBuf, Held>>,
     /// 每项目一把的串行锁(进程内)。
     busy: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     /// 已经提醒过"写锁是降级放行"的项目。见 [`State::take_lock_warning`]。
@@ -95,8 +121,9 @@ impl State {
     pub fn ensure_write_lock(&self, opened: &OpenProject) -> Result<()> {
         let dir = identity(opened.dir());
         {
-            let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-            if locks.contains_key(&dir) {
+            let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(held) = locks.get_mut(&dir) {
+                held.users += 1;
                 return Ok(());
             }
         }
@@ -105,22 +132,48 @@ impl State {
         let guard = acquire(opened.layout())?;
         let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         // 竞态兜底:两个工具调用同时进来时,后来者复用先进去的那个 guard
-        locks.entry(dir).or_insert_with(|| Arc::new(guard));
+        match locks.get_mut(&dir) {
+            Some(held) => held.users += 1,
+            None => {
+                locks.insert(dir, Held { guard: Arc::new(guard), users: 1 });
+            }
+        }
         Ok(())
     }
 
-    /// 会话级写操作的**入场**:确保持锁 + 记账。
+    /// 一次写调用结束:交回一份引用计数,数到 0 就把锁放掉。
+    ///
+    /// **不是谁先走完谁放** —— 同一项目上两次调用可能重叠(一次在写、一次在排队),
+    /// 先走的不能把后者的锁放掉。这也是 `Held::users` 存在的唯一理由。
+    pub fn release_write(&self, dir: &Path) {
+        let key = identity(dir);
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(held) = locks.get_mut(&key) else {
+            return;
+        };
+        held.users = held.users.saturating_sub(1);
+        if held.users == 0 {
+            locks.remove(&key);
+        }
+    }
+
+    /// 写操作的**入场**:确保持锁 + 记账,返回**这一趟的持锁凭证**。
     ///
     /// **两个入口都走它**:MCP 工具(见 `tools::open_write`)和页面按钮
     /// (见 `action_handler`)。理由和 `ops::with_write` 一样 ——
     /// 这条序列被漏掉过一次(按钮那条既没排队也没带警告,devlog [260925-21]),
     /// 而编译器不会提醒。
     ///
+    /// 拿到的 [`WriteHold`] 必须**活到这次写做完**:中途 drop 就等于提前放锁。
+    ///
     /// 排队(`serialize`)不在这里:它是 async 的,由调用方自己 await 或 block_on。
-    pub fn enter_write(&self, opened: &OpenProject) -> Result<()> {
+    pub fn enter_write(self: &Arc<Self>, opened: &OpenProject) -> Result<WriteHold> {
         self.ensure_write_lock(opened)?;
         self.note(opened.dir(), opened.id());
-        Ok(())
+        Ok(WriteHold {
+            state: Arc::clone(self),
+            dir: opened.dir().to_path_buf(),
+        })
     }
 
     /// 本进程持有的那把锁。
@@ -129,7 +182,7 @@ impl State {
     /// 重复取锁(同进程再取会被自己挡住)。
     pub fn guard_of(&self, dir: &Path) -> Option<Arc<LockGuard>> {
         let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-        locks.get(&identity(dir)).cloned()
+        locks.get(&identity(dir)).map(|held| Arc::clone(&held.guard))
     }
 
     /// 本进程是否持有该项目的写锁。
@@ -147,7 +200,7 @@ impl State {
         let key = identity(dir);
         let reason = {
             let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-            locks.get(&key)?.degraded().map(str::to_string)
+            locks.get(&key)?.guard.degraded().map(str::to_string)
         };
         let mut warned = self.warned.lock().unwrap_or_else(|e| e.into_inner());
         warned.insert(key).then_some(reason).flatten()
@@ -188,6 +241,7 @@ impl std::fmt::Debug for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vidbrief_ops::testkit::Fake;
 
     #[test]
     fn session_name_carries_the_pid() {
@@ -222,5 +276,52 @@ mod tests {
                 .await;
             drop((a, b));
         });
+    }
+
+
+    /// **按次取放**:凭证 drop 之后锁就放了。
+    ///
+    /// 从前的口径是"首次取到进程结束",代价实测过:一个 **idle 会话**能让别的会话
+    /// 一直写不进去,而 agent 自己无路可走。现在锁只活到这次写调用结束 ——
+    /// "两次调用之间被别人改过"由 `rev` 乐观并发兜(`OpenProject::save`)。
+    #[test]
+    fn the_write_lock_lives_only_as_long_as_the_hold() {
+        let fake = Fake::new("state-hold");
+        let state = Arc::new(State::new());
+        let opened = OpenProject::open(&fake.layout().root().display().to_string()).unwrap();
+        let dir = opened.dir().to_path_buf();
+
+        {
+            let _hold = state.enter_write(&opened).expect("第一趟该拿到锁");
+            assert!(state.holds_lock(&dir), "持有期间该查得到");
+            // 同一项目上第二趟重叠(一个在写、一个在排队):不许互相把锁放掉
+            let _second = state
+                .enter_write(&opened)
+                .expect("同进程再来一趟该复用,不该撞自己");
+        }
+
+        assert!(
+            !state.holds_lock(&dir),
+            "两趟都结束了,锁该放掉 —— 空转的会话不许把项目占死"
+        );
+        // 真放了吗:再取一次(同进程跨 handle 也会被自己挡,所以这能验出来)
+        vidbrief_project::acquire(opened.layout()).expect("锁该已经放了,能重新取到");
+    }
+
+    /// 一个凭证还在手上时,锁**不许**被别人放掉。
+    #[test]
+    fn an_overlapping_hold_keeps_the_lock_alive() {
+        let fake = Fake::new("state-overlap");
+        let state = Arc::new(State::new());
+        let opened = OpenProject::open(&fake.layout().root().display().to_string()).unwrap();
+        let dir = opened.dir().to_path_buf();
+
+        let first = state.enter_write(&opened).unwrap();
+        let _second = state.enter_write(&opened).unwrap();
+        drop(first);
+        assert!(
+            state.holds_lock(&dir),
+            "还有一趟在写,锁就不能放 —— 计数到 0 才放"
+        );
     }
 }

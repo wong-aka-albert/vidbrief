@@ -37,6 +37,7 @@ impl VidbriefServer {
                 + VidbriefServer::conclusion_tools()
                 + VidbriefServer::shot_tools()
                 + VidbriefServer::view_tools()
+                + VidbriefServer::report_tools()
                 + VidbriefServer::guide_tools(),
             prompt_router: crate::prompts::router(),
             state: Arc::new(State::new()),
@@ -50,6 +51,14 @@ impl VidbriefServer {
     /// 换成另一个 `State` 就等于另开一套锁,那是自找麻烦。
     pub fn state_arc(&self) -> Arc<State> {
         self.state.clone()
+    }
+
+    /// 给测试用:工具表原样(名字、说明、入参 schema)。
+    ///
+    /// `skill/tools.md` 就是拿它渲染出来的 —— **唯一事实源是活的工具表**,
+    /// 那份文档是它的投影,有测试盯着不许过期。
+    pub fn tools_for_test(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router.list_all()
     }
 
     /// 给测试用:本服务注册的全部工具名。
@@ -79,13 +88,19 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
 把材料准确递给你(包括**图像本身**),再把你得出的结论原样存回文件。
 
 四步(每一步做完都要停下来给用户看,不要一路跑到底):
-  ① create_project → preprocess          建项目、跑前处理(纯算法,一次做完)
+  ① create_project → preprocess          建项目、跑前处理(纯算法)。**长视频别赌一次调用**:
+     作业跑在独立进程里,`preprocess` 默认只等 180 秒 —— 等不够它会如实说
+     「还在跑 + 当前进度」,那时**别重开**,再调一次 `preprocess` 接着等
+     (或 `preprocess_progress` 看一眼),好了用 `preprocess_result` 取结果。
   ② 校准:list_shots → get_shot 逐张看图,然后**把材料改对** ——
      错的改对(apply_corrections)、缺的补上(extract_shot)、多余的删掉(update_shot);
      判断用 record_shot_check 记下来,最后 render_calibration_table 把对照表给用户过目
      (图 + 转录 + 你的结论一屏看完;render_timeline 是带视频回跳的那页)。
   ③ 总结:search_transcript / get_shot 自主探索 → write_summary
-  ④ 报告:write_report_md
+  ④ 报告:build_report —— 交一整份报告数据(全局总结 + 每条挂在时刻上的知识点,
+     **视频里逐个讲的案例/步骤/样本逐个成条**),工具落 `report.json` 并渲染出可点开的
+     `report.html` 与 `report.md` 导出。
+     **先过步 3 的门**:没写过总结、或总结被绕过工具改过,会被挡住。
 
 **每一步动手前,先取一次操作说明**:提示模板里有一套(prompts,本服务已声明 prompts 能力);
 客户端不暴露 prompts 时用 `get_guide(step)`,同一份文本。不看说明容易漏掉
@@ -117,9 +132,10 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
      如实写进 issues 并给 low confidence —— 用户会在审查节点裁决。
      **读不出来的地方不要拿转录去补** —— 编得像真的,比说「不知道」危险得多。
   4. **材料与结论一律经工具改。** 你可能带着宿主给的文件工具(read/write/exec)——
-     读项目文件可以(材料即接口),但**改**(写 summary、改转录、动 shots.json)必须走本服务
-     的工具:门数的是工具写出去的那一份,绕过它改出来的东西,**下一次开门就会被认出来**
-     (「材料不是工具写出去的那一份」),而用户与体检看到的是一份对不上的材料。
+     读项目文件可以(材料即接口),但**改**(写 summary、改转录、动 shots.json、
+     落报告数据)必须走本服务的工具:门数的是工具写出去的那一份,绕过它改出来的东西,
+     **下一次开门就会被认出来**(「材料不是工具写出去的那一份」),而用户与体检看到的
+     是一份对不上的材料。
 
 **别自己动手改文件。** 谁审过、哪张图看过、哪一步拍过板这些**状态**记在 `state.bin`
 (二进制,带校验和);手改它,工具会当场报「状态文件读不动」并**拒绝开工**,

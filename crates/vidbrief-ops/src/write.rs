@@ -62,10 +62,43 @@ pub fn with_write<T>(
     act(&mut opened, warning.as_deref())
 }
 
+/// 这个项目的写锁**现在**在别人手里吗?拿到就返回 `None`,拿不到就把原因交回来。
+///
+/// 只探一下、**立刻放掉**(`LockGuard` 在这里就 drop 了)。用途是给「起作业」那种
+/// 入口在**开工前**说清楚:现在开不了工,是因为别的会话正写着这个项目 ——
+/// 而不是让作业进程自己撞在锁上、退得一声不吭(它的输出没人看得到)。
+///
+/// 探与真取之间有一个很窄的窗口,所以它**只是把话说得更好听**,不是判据:
+/// 真正的互斥始终在 [`vidbrief_project::acquire`] 那里。
+pub fn lock_note_if_taken(layout: &vidbrief_project::Layout) -> Option<String> {
+    match vidbrief_project::acquire(layout) {
+        Ok(_free) => None,
+        Err(e) => Some(format!("{e:#}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testkit::Fake;
+
+    /// 探锁:**空着**说空着,**被别人拿着**就把原因交回来(不是吞掉)。
+    ///
+    /// 「起作业」那种入口靠它把话说清楚 —— 从前作业撞在锁上只会退得一声不吭。
+    #[test]
+    fn the_lock_probe_says_whether_someone_else_holds_the_project() {
+        let fake = Fake::new("lock-probe");
+        assert_eq!(
+            lock_note_if_taken(fake.layout()),
+            None,
+            "没人拿着的时候该说空着"
+        );
+        let held = vidbrief_project::acquire(fake.layout()).expect("拿一把");
+        let note = lock_note_if_taken(fake.layout()).expect("别人拿着时要给出原因");
+        assert!(!note.is_empty(), "原因不能是空话");
+        drop(held);
+        assert_eq!(lock_note_if_taken(fake.layout()), None, "放掉之后又是空着");
+    }
 
     #[test]
     fn it_opens_locks_acts_and_reports_no_warning_on_a_normal_fs() {
@@ -135,5 +168,32 @@ mod tests {
 
         // 还能再取,说明上一把确实放了
         with_write(&dir, None, |_, _| Ok(())).expect("上一把锁该已经释放");
+    }
+    /// **写回之前比 `rev`**:你读到的那份被别人改过 → 这次写不许落盘。
+    ///
+    /// 这条债挂了一整个里程碑(`check_rev` 从没有调用点)。它和"锁改成按次取放"
+    /// 是一对:锁只保证"同时只有一个人在写",管不了"两次调用之间被别人改过"——
+    /// 而 `preprocess` 那种"开头读、跑几分钟、最后整份写回"的活正好落在缝里。
+    #[test]
+    fn a_write_based_on_a_stale_read_is_refused() {
+        let fake = Fake::new("rev-stale");
+        // 两个会话同时打开:都读到同一个 rev
+        let mut older = fake.open();
+        let mut newer = fake.open();
+
+        newer.state_mut().progress.preprocess.mark_done();
+        newer.save().expect("第一个写的人不该被拦");
+
+        older.state_mut().progress.summarize.mark_done();
+        let err = older.save().unwrap_err().to_string();
+        assert!(err.contains("rev="), "报错要点出两个版本号:{err}");
+        assert!(err.contains("没有落盘"), "要说清这次写没落地:{err}");
+
+        // 重新打开 = 读到最新那份,照常能写
+        let mut fresh = fake.open();
+        fresh.state_mut().progress.summarize.mark_done();
+        fresh
+            .save()
+            .expect("读到最新的一份就不该被拦(修法只有一条:重来一遍)");
     }
 }

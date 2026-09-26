@@ -12,7 +12,7 @@
 //! | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ 已就绪 |
 //! | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ 已就绪 |
 //! | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ 已就绪 |
-//! | P5 `build_report` | **build_report** | ⏳ 等 M6 的报告渲染器 |
+//! | P5 `build_report` | build_report(M6 报告工具) | ✅ 已就绪 |
 //!
 //! 没放出来的能力**照样能用** —— agent 直接调那些工具就行,只是暂时没有现成的话术。
 
@@ -63,6 +63,9 @@ pub(crate) fn calibrate_shots_text(project_id: &str) -> String {
             工具分不出'看过没问题'和'压根没看'。\n\
          6. 用 `record_shot_check` 逐张存回结论。**不要臆测** —— 不确定就 `confidence: low`,或\n\
             在 `type_read` 里如实写「画面无法确认」。读不出来的地方**不要拿转录去补**。\n\
+            `match` 判的是「**画面讲的与同期转录讲的是不是同一件事**」(主题 / 动作 / 对象) ——\n\
+            **用字层面的差异不算不符**(转录把一个字听错了,那是转录纠错的活,走第 5 条):\n\
+            两种读法都说得通的字段迟早被填成两个样,所以这里写死。\n\
          7. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
          \n\
          最后向用户汇报:多少张匹配、多少张存疑、哪几张需要他裁决。**不要替他下结论。**\n\
@@ -152,6 +155,82 @@ pub(crate) fn summarize_video_text(project_id: &str) -> String {
     )
 }
 
+/// P5 `build_report` 的说明。
+pub(crate) fn build_report_text(project_id: &str) -> String {
+    format!(
+        "项目:`{project_id}`。你要为这个视频出一份**报告** —— 它和总结不是一回事:\n\
+         总结是一篇连着读的文章,报告是**挂在时间轴上、边看视频边对照**的一页。\n\
+         \n\
+         1. 先看手上有什么。已经有 `04_report/report.json`(或 `report.md`)时,\n\
+            那是上一轮的报告 —— **先读它**:用户的修改意见是在它之上提的,\n\
+            那份数据里的 `style` 也是**这一轮的口味默认值**(用户没改口就照旧)。\n\
+            全局总结不必重写:`build_report` 不给 `summary` 就用 `03_summary/summary.md`\n\
+            那一份(步 3 的产物);只在报告要的总述与它不一样时才自己写。\n\
+         2. **先把风格定下来**(`build_report` 的 `style`,必填)—— 它按**用户的话**填,\n\
+            别自己默认一个。用户的提示词里带着他要什么,这一栏就是那个落点:\n\
+            - **先取一次风格说明:`get_guide(step=\"styles\")`** —— 五种预置风格\n\
+              (快扫版 / 教学版 / 故事版 / 元组版 / 汇报版)各自**怎么填**:条数怎么按长度换算、\n\
+              每条按什么骨架写、给谁看、要不要挂图。挑一种,或按用户的要求拼一个 `custom`。\n\
+            - `preset` 是**轮廓的名字**(上一步挑的那个);`granularity` 是这一版的粒度\n\
+              (`brief` 概括 / `standard` 标准 / `detailed` 详细 —— **它同时决定条数与篇幅**);\n\
+              `tone` 是语气(**自由文本**:大白话 / 诙谐 / 讲故事 / 行业腔……);\n\
+              `notes` 放用户还有的交代(给谁看、要不要举例子、要不要结论先行)。\n\
+            - 用户**没交代**风格时:照风格说明里那张表挑(拿不准用**教学版**),\n\
+              并且**交付时说清这一版是按什么做的** —— 他才知道该不该让你换。\n\
+         3. **定锚点。** 通读转录(`get_transcript`)与截图清单(`list_shots`),\n\
+            挑出值得单独讲的那几处:一个概念的界定、一次图表的切换、一个案例怎么展开。\n\
+            **视频里逐个讲的,报告里逐个成条**:一个个知识点、一个个步骤、一个个知识点,\n\
+            每一个各占一条 —— 它被讲到的那一刻就是它的锚点,它自己的画面就是它的证据。\n\
+            把六个案例合成一张表塞进一条,读的人在时间轴上点不到某一个案例,\n\
+            在面板里也翻不到「这个案例讲了什么」—— 那是把内容埋了,不是省事。\n\
+            每条给一个时刻(秒,落在视频长度之内)—— 时间轴上那个圆点就是它。\n\
+            条数与每条的长度**按上面定的档位**(`brief` 就真的只留主脉,\n\
+            `detailed` 也别堆空标题 —— 两头都不许:不堆空标题,也别把几条并成一条)。\n\
+         4. 每条知识点写给「一边看视频一边读」的人(**说法按 `tone`**):\n\
+            - `title` 一句话标题;`body` 是**完整解析**(markdown)—— 把这一处的上下文逻辑\n\
+              理顺、关键概念讲清。**浮层里显示的就是 `body`**:只给标题等于没写。\n\
+            - 不要写「见上文」「如前所述」这类回指 —— 读的人是跳着看的,每条要能自己站住。\n\
+            - **听到指代词必须去图里解引用**。讲者说「这一段」「那一段」「这根线」时,\n\
+            另一半信息在画面上 —— 只读转录会悬空。取那一刻的图,把指代写成具体范围\n\
+            (「他说的『这一段』= 图上 7:45–9:30 的那段代码」);图上找不到对应物就\n\
+            写清「指代不明」,并挂一条 `verify`。**别把「这一段」原样抄给读者** ——\n\
+            那等于把疑问递下去。哪类话术算指代,见技能里的 `workflow.md` §0.1。\n\
+            - `shots` 放**真正说明了这条**的截图(先看清单里的 id);右侧图文面板会把它们\n\
+              显示出来。视频画面上已经有的东西不必再摆一遍。\n\
+            - `segments` 放这条关联的转录段号(读的人可以点回原文)。\n\
+              `verify` 放**待核验**的点(画面看不清但结论靠它的数字、一闪而过的标注……),\n\
+              一条一句、写清**怎么核**(去哪个时刻看什么);没有就空着。\n\
+            - **画面上的文字与数字照抄**(版本号、规格、比例):看不清就不写那个数,\n\
+              别给一个「差不多」的 —— 与步 3 同一条,实测最常错的就是数字。\n\
+              **但结论靠的那个数不许静默略过**:看不清就**连不确定一起写出来**\n\
+              (「约 3.12(这个版本号画面看不清,待核验)」),并挂一条 `verify`\n\
+              (「回看 8:05 确认版本号」)。略过它等于悄悄削弱结论,读的人看不出少了什么。\n\
+         5. **每条都要有来源**,至少一条:\n\
+            - 讲者原话:`speaker` + **照抄**的一句转录原文(`quote`)。工具拿它去转录里\n\
+              找段号:**找不到就拒收**(自己报段号没用,工具不认)。别跨段拼。\n\
+            - 外部补充:`external` + 一句话大意 + 能点开的链接。讲者提到的术语、对象、\n\
+              机构、事件里**材料没说清**的,联网查一下补上,读的人能点回出处。\n\
+              **查不到就别编** —— 链接点不开会被工具拒收。\n\
+         6. 一次 `build_report` 把数据与页面一起出了(`topics` 一次给全,工具按时刻排)。\n\
+            返回里的 `url` 给用户:左边他看视频、时间轴上的圆点是知识点,右边是可滑出的\n\
+            图文总结面板。重做就是再调一次 —— **整份替换**。\n\
+         7. **写完停下来**把页面给用户,问他要改哪儿 —— 顺带说一句**这一版是按什么做的**\n\
+            (返回里的 `style`),以及**有几处待核验、是哪几处**(返回里的 `verify`,\n\
+            页面标题栏也标着);他提了意见就带着旧数据再调一次。\n\
+            没有总结(`write_summary`)、或者总结被绕过工具改过,这道门会挡住你 ——\n\
+            那时先把总结落一遍,别绕。"
+    )
+}
+
+/// 报告的**风格轮廓** —— 直接把 `skill/styles.md` 原样发出去。
+///
+/// 为什么用 `include_str!` 而不是另写一份:同一份手艺有两个出口 ——
+/// 装了技能目录的宿主读 `skill/styles.md`,只认协议的宿主走 `get_guide(step="styles")`。
+/// 抄两份迟早各说各话(而「怎么写」恰恰是最常改的那一样)。
+pub(crate) fn styles_text() -> &'static str {
+    include_str!("../../../skill/styles.md")
+}
+
 /// `get_guide` 的总目录:有哪几步、各能拿到什么。
 pub(crate) fn guide_index(project_id: &str) -> String {
     format!(
@@ -167,6 +246,15 @@ pub(crate) fn guide_index(project_id: &str) -> String {
            `disposition_supplements`(补的报 need_shot、不补的报 no_shot)。\n\
          - `summarize_video` —— 图文总结:`list_regions` + `list_shots` + 转录通读建结构,\n\
            逐张看图互证,溯源(截图 id + 时间戳),`write_summary` 落盘。\n\
+         - `build_report` —— 报告(步 4 的产出):把总结与材料整理成**每条挂在时刻上的\n\
+           知识点**(完整解析 + 关联截图/转录段 + 至少一条来源),**视频里逐个讲的\n\
+           内容逐个成条**(一个个案例/步骤/样本各占一条,别合成一张表);\n\
+           **先交代风格**(`style`:轮廓 preset + 粒度 + 语气 + 补充要求),\n\
+           一次 `build_report` 落数据并出页面(时间轴锚点 + 浮动解析 + 图文总结面板,\n\
+           可回跳视频)。\n\
+         - `styles` —— **报告的风格轮廓**:五种预置风格(快扫 / 教学 / 故事 / 元组 / 汇报)\n\
+           各自怎么填 —— 条数怎么按视频长度换算、每条按什么骨架写、给谁看、要不要挂图,\n\
+           以及怎么按用户的话挑一种。报告**动笔前先取这一份**。\n\
          \n\
          说明是给「手上没有提示模板能力」的宿主用的;能取到 prompts 的话,那边是同一份文本。"
     )
@@ -209,6 +297,21 @@ impl VidbriefServer {
     ) -> Result<Vec<PromptMessage>, ErrorData> {
         user_says(summarize_video_text(&args.project_id))
     }
+
+    /// 把总结与材料整理成挂在时间轴上的知识点,出报告页
+    ///
+    /// (函数名带 `_guide` 是为了避开同名工具 `build_report` 生成的方法 ——
+    /// 对协议暴露的名字由 `name` 定,仍然是 `build_report`。)
+    #[prompt(
+        name = "build_report",
+        description = "出报告:每条知识点挂在一个时刻上(完整解析 + 来源),落数据并渲染页面"
+    )]
+    async fn build_report_guide(
+        &self,
+        Parameters(args): Parameters<ProjectArg>,
+    ) -> Result<Vec<PromptMessage>, ErrorData> {
+        user_says(build_report_text(&args.project_id))
+    }
 }
 
 /// 本服务注册的提示模板。与工具一样,是"服务会什么"的一部分。
@@ -226,11 +329,11 @@ mod tests {
     /// 放出来的每个模板,引用的工具都必须在真工具表里存在。
     ///
     /// 这条测试是"不给 agent 递一张指向不存在工具的说明"这个决定的**执行者** ——
-    /// 光靠人记,迟早会有人写个 P5 进来看不出问题。
+    /// 光靠人记,迟早会有人写一个新模板进来看不出问题(P5 就是这么等到 M6 的)。
     #[test]
     fn every_prompt_only_names_tools_that_exist() {
         let names = VidbriefServer::new().tool_names_for_test();
-        let cases: [(&str, &[&str]); 4] = [
+        let cases: [(&str, &[&str]); 5] = [
             (
                 "calibrate_shots",
                 &[
@@ -271,6 +374,15 @@ mod tests {
                     "write_note",
                 ],
             ),
+            (
+                "build_report",
+                &[
+                    "build_report",
+                    "get_transcript",
+                    "list_shots",
+                    "write_summary",
+                ],
+            ),
         ];
 
         for (prompt, tools) in cases {
@@ -283,21 +395,19 @@ mod tests {
         }
     }
 
-    /// 没就绪的模板必须**真的**没注册 —— 免得有人顺手补上却忘了底下的工具还没有。
+    /// 四步 + 报告的模板**全都在**,一步不落。
+    ///
+    /// (以前这里有一条"没就绪的不许注册"的检查 —— P5 到 M6 才放出来,
+    /// 它盯着那件事。现在五步齐了,同一处改成正面断言:缺了谁都不行。)
     #[test]
-    fn prompts_waiting_on_later_milestones_are_not_registered() {
+    fn every_prompt_is_registered() {
         let registered = router();
-        for name in ["build_report"] {
-            assert!(
-                !registered.map.contains_key(name),
-                "{name} 依赖的工具还没做出来(M6),不该现在就放出来"
-            );
-        }
         for name in [
             "calibrate_shots",
             "fix_transcript",
             "find_missing_shots",
             "summarize_video",
+            "build_report",
         ] {
             assert!(registered.map.contains_key(name), "缺提示模板 {name}");
         }
@@ -324,6 +434,10 @@ mod tests {
                 "summarize_video",
                 &["list_regions", "list_shots", "get_transcript", "write_summary"][..],
             ),
+            (
+                "build_report",
+                &["get_transcript", "list_shots", "build_report", "write_summary"][..],
+            ),
         ] {
             assert!(text.contains(step), "目录缺这一步 {step}:{text}");
             for tool in tools {
@@ -335,5 +449,54 @@ mod tests {
             }
         }
         assert!(text.contains("示例项目"), "项目名该填进说明里:{text}");
+    }
+
+    /// 一个个案例挤成一张表 = 内容被埋掉(实测提的):这条口径必须落在模板正文里,
+    /// 光写在文档里没用 —— agent 读的是模板。
+    #[test]
+    fn build_report_guide_asks_for_one_topic_per_case() {
+        let text = build_report_text("示例项目");
+        assert!(text.contains("逐个成条"), "P5 该交代逐个成条:{text}");
+        assert!(text.contains("各占一条"), "P5 该交代各占一条:{text}");
+        assert!(!text.contains("宁可少而实"), "旧的「少而实」措辞会盖掉新口径:{text}");
+    }
+
+    /// **风格文档与代码不许各说各话**:`skill/styles.md` 是轮廓的定义处,
+    /// 代码里那组预设名是用户能点的把手 —— 文档里少一种、或者名字拼错,
+    /// 用户说「换成快扫版」时模型就找不到对应物。
+    #[test]
+    fn every_preset_in_code_is_spelled_out_in_the_styles_skill() {
+        let text = styles_text();
+        for preset in vidbrief_project::ReportPreset::ALL {
+            assert!(
+                text.contains(preset.as_str()),
+                "skill/styles.md 里没写 `{}`(`{}`)—— 用户点这个名字时,模型得找得到定义",
+                preset.as_str(),
+                preset.label()
+            );
+            assert!(
+                text.contains(&format!("### {} ", preset.label())),
+                "skill/styles.md 缺 `{}` 这一节(只出现名字不算定义)",
+                preset.label()
+            );
+        }
+    }
+
+    /// 风格说明不是空壳:它得真讲「怎么填」(条数换算 + 每条骨架),否则等于没写。
+    #[test]
+    fn the_styles_skill_says_how_to_fill_not_only_what_to_call_it() {
+        let text = styles_text();
+        for must in ["每 10 分钟", "结论先行", "骨架", "granularity", "preset"] {
+            assert!(text.contains(must), "skill/styles.md 该讲到 `{must}`");
+        }
+    }
+
+    /// 报告模板要把风格说明指出来 —— 光有 `get_guide(step="styles")` 这一个入口不够,
+    /// 动笔前那一步得有人提。
+    #[test]
+    fn the_report_guide_points_at_the_styles_guide() {
+        let text = build_report_text("示例项目");
+        assert!(text.contains("get_guide(step=\"styles\")"), "{text}");
+        assert!(guide_index("示例项目").contains("`styles`"), "{text}");
     }
 }

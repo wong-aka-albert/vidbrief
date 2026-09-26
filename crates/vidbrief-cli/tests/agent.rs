@@ -767,3 +767,50 @@ fn real_project_is_readable_end_to_end() {
     println!("{readable} 张图都能读出来");
     assert!(readable > 0, "一张能看的图都没有,这个项目还没跑步 1?");
 }
+
+// ── 参数名 ───────────────────────────────────────────────────────────
+
+/// **参数名拼错不许静默失效 —— 报错要点得出那个字段的名字。**
+///
+/// M6 联调撞见过反面:给 `get_transcript` 传 `range`(它要的是 `start` / `end`),
+/// 工具一声不响,直接返回**全量** 322 段 —— agent 拿到一份"看起来对、其实没过滤"的
+/// 材料,还照它往下做。所以参数结构体一律 `deny_unknown_fields`(实测宿主没往
+/// `arguments` 里塞自己的元数据,MCP 也要求入参符合工具的 `inputSchema`)。
+///
+/// 这条测试钉两件事:**失败**,以及**话说得明白**(点名 `range`,agent 才能一步改对)。
+#[test]
+fn a_misspelled_parameter_is_named_back() {
+    let fake = staged("param-typo").with_transcript(FAKE_SEGMENTS);
+    let mut client = McpClient::start(fake.layout().root());
+    client.initialize();
+    let proj = project_arg(&fake);
+
+    let response = client.request(
+        "tools/call",
+        json!({
+            "name": "get_transcript",
+            "arguments": {"project_id": proj, "range": [0.0, 6.0]},
+        }),
+    );
+    let blob = response.to_string();
+    let failed = tool_failed(&response["result"]) || response.get("error").is_some();
+    assert!(failed, "拼错的参数必须是个失败,不能静默跑成别的意思:{blob}");
+    assert!(
+        blob.contains("range"),
+        "报错要点名那个不认识的参数 —— 不点名的话 agent 只能猜:{blob}"
+    );
+
+    // 写对了就该照常能跑 —— 严格不等于脆:同一件事用正确写法,必须过得去
+    let ok = client.tool_text(
+        "get_transcript",
+        json!({"project_id": proj, "start": 0.0, "end": 6.0}),
+    );
+    let parsed = as_json(&ok);
+    assert!(
+        !parsed["segments"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .is_empty(),
+        "写对了该拿到材料:{ok}"
+    );
+}

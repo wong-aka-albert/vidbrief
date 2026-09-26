@@ -13,6 +13,24 @@ use crate::project::OpenProject;
 /// 补图候选的默认窗宽(秒):"附近有图"的判定半径。
 pub const DEFAULT_SUPPLEMENT_WINDOW: f64 = 3.0;
 
+/// 把 `s007` / `7` 都认成截图 id。
+///
+/// 契约层只认 `s007`(那是文件里、文件名里的写法)。工具层放宽一档:
+/// agent 手上常常只有一个从 `list_regions` 或转录里看到的数字,为了一个前缀
+/// 把它打回去重来,纯属浪费一轮往返。
+///
+/// 放在**动作层**而不是各入口各写一份:CLI、MCP、报告数据的校验都要它,
+/// 三份实现迟早对同一个输入给出三种说法。
+pub fn parse_shot_id(raw: &str) -> Result<ShotId> {
+    let text = raw.trim();
+    let normalized = if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        format!("s{text}")
+    } else {
+        text.to_string()
+    };
+    ShotId::parse(&normalized).map_err(Into::into)
+}
+
 /// 默认窗宽。写成函数而不是常量,是为了将来能按视频长度自适应。
 pub fn supplement_window() -> f64 {
     DEFAULT_SUPPLEMENT_WINDOW

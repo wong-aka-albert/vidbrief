@@ -18,4 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 vidbrief-ops.workspace = true
+vidbrief-report.workspace = true
 vidbrief-project.workspace = true
+
+[dev-dependencies]
+# 起一个"材料齐全的假项目"(`Fake`):锁、排队、页面按钮这些都在真项目目录上验
+vidbrief-ops = { workspace = true, features = ["testing"] }

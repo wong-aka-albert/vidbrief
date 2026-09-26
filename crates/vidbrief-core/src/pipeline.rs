@@ -65,19 +65,43 @@ pub fn extract_shots(
         // 末尾几帧可能刚好越过视频结尾,夹一下免得 ffmpeg 抽不到
         let t = clamp_time(item.t, duration);
 
+        // 先体检:纯色帧(切黑、淡出、纯色占位)**照样截下来**,但**预标成弃用**。
+        //
+        // 为什么不干脆不截(这是实测改的口径):`fixtures/test_sample.mp4` 的三个切换点
+        // **就是纯色帧**(合成素材:画面 → 单色 → 单色)。不截的话,"切换点必须命中"
+        // 这条 M1 验收标准当场作废 —— **一次画面切换是事件,黑屏也是那个事件的证据**,
+        // 把图丢掉等于把事件丢掉。所以材料的完整性优先,省的是**注意力**:
+        // 标了弃用它就不进"待校准"那一批(门不拦它),agent 不必为它花一次看图调用;
+        // 而它仍在清单与时间轴上,谁想看一眼都还在,`update_shot(keep)` 一句话就能翻过来。
+        let flat = match extract::flatness_at(video, t) {
+            Ok(f) if f.flat => Some(format!(
+                "纯色帧(亮度标准差 {:.2}、单色占比 {:.0}%):像是切黑 / 淡出 / 纯色占位,\
+                 默认弃用 —— 不用为它花一次看图;要留证据就 `update_shot(keep)` 改回来",
+                f.luma_stddev,
+                f.dominant_share * 100.0
+            )),
+            // 体检失败不当作抽帧失败再报一次:真抽不出来,下面那次会说话
+            _ => None,
+        };
+
         let file = Shot::default_rel_path(item.origin, id, t)?;
         let path = layout.rel(file.as_str());
 
         match extract::extract_frame(video, t, &path, quality) {
             Ok(()) => {
+                let status = if flat.is_some() {
+                    ShotStatus::Drop
+                } else {
+                    ShotStatus::Keep
+                };
                 shots.shots.push(Shot {
                     id,
                     t,
                     file,
                     origin: item.origin,
                     region_id: item.region_id,
-                    status: ShotStatus::Keep,
-                    reason: None,
+                    status,
+                    reason: flat,
                     created_at: vidbrief_project::now(),
                     check: None,
                 });
@@ -90,6 +114,7 @@ pub fn extract_shots(
         on_progress(done + 1, total);
     }
 
+    // 一张都没留下 = 抽不出来(纯色帧现在也会留下,见上)
     if total > 0 && shots.shots.is_empty() {
         let detail = skipped
             .first()

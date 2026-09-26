@@ -21,6 +21,7 @@ use crate::json::{blocking, json};
 use crate::server::VidbriefServer;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RenderTimelineParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -31,6 +32,7 @@ pub struct RenderTimelineParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RenderCalibrationTableParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,

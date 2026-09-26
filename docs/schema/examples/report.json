@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-09-24T21:40:00+08:00",
+  "style": {
+    "preset": "teaching",
+    "granularity": "detailed",
+    "tone": "大白话",
+    "notes": "给刚入门的人看"
+  },
+  "summary": "这是一段很短的样例:讲一分钟,只为把「前处理 → 校准 → 总结 → 报告」走一遍。\n没有真实内容,所有材料都是夹具。",
+  "topics": [
+    {
+      "id": 1,
+      "t": 9.0,
+      "title": "切主图:对象与周期",
+      "body": "讲解人切到解释器主窗口,对象是**Python 列表**、周期一小时。\n转录把术语听成了「派森」—— 校准阶段以画面上的文字定案(见 s001 的看图结论)。",
+      "shots": [
+        "s001"
+      ],
+      "segments": [
+        4,
+        5
+      ],
+      "sources": [
+        {
+          "kind": "speaker",
+          "segment": 5,
+          "quote": "现在看到的是派森列表的结构图"
+        },
+        {
+          "kind": "external",
+          "title": "Python 列表(示例站点)",
+          "url": "https://example.com/futures/sample"
+        }
+      ],
+      "verify": [
+        "画面上 3.12 一带的版本号看不清(按讲解估的)—— 回看 9 秒处确认"
+      ]
+    },
+    {
+      "id": 2,
+      "t": 16.5,
+      "title": "画面停住时的抄录建议",
+      "body": "讲到关键形态时画面停住,讲解人建议**把结论抄下来**。\n这类「停住让你抄」的位置正是步 3 该挂知识点的地方 —— 它天然是一个锚点。",
+      "shots": [],
+      "segments": [
+        7
+      ],
+      "sources": [
+        {
+          "kind": "speaker",
+          "segment": 7,
+          "quote": "画面停住了大家可以把结论抄下来"
+        }
+      ],
+      "verify": []
+    }
+  ]
+}

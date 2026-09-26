@@ -32,7 +32,9 @@ pub mod inspect;
 pub mod materials;
 pub mod preprocess;
 pub mod project;
+pub mod report;
 pub mod review;
+pub mod run;
 pub mod shots;
 pub mod view;
 pub mod write;
@@ -45,7 +47,7 @@ pub mod testkit;
 
 pub use conclusions::{
     CorrectionInput, CorrectionOutcome, ShotCheckInput, WriteMode, apply_corrections,
-    record_shot_check, write_note, write_report_md, write_summary,
+    record_shot_check, write_note, write_summary,
 };
 pub use inspect::{
     HealthLevel, HealthView, InspectOptions, InspectReport, Materials, ShotCounts, inspect,
@@ -64,20 +66,31 @@ pub use project::{
     CreateOptions, Created, Notice, OpenProject, ProjectSummary, UpgradeOptions, UpgradeOutcome,
     create, list_projects, resolve, upgrade,
 };
-pub use review::{approve, counts as review_counts, gate_calibrate};
+pub use report::{
+    ReportFormat, ReportInput, ReportOutcome, Serving, SourceInput, TopicInput, build_report,
+    render_existing,
+};
+pub use review::{approve, counts as review_counts, gate_calibrate, gate_summarize};
+pub use run::{
+    HEARTBEAT, RunOptions, RunOutcome, RunRecord, RunRecorder, RunStage, STALE_AFTER_SECONDS,
+    StartError, path as run_path_of, read as read_run,
+};
 pub use shots::{
     DEFAULT_SUPPLEMENT_WINDOW, ShotAction, SupplementDecision, SupplementDecisionKind,
     SupplementOutcome, disposition_supplements, extract_shot, find_supplement_candidates,
-    supplement_window, update_shot,
+    parse_shot_id, supplement_window, update_shot,
 };
-pub use view::{render_calibration_table, render_timeline, serve_and_open, serve_and_open_table};
-pub use write::with_write;
+pub use view::{
+    render_calibration_table, render_timeline, serve_and_open, serve_and_open_report,
+    serve_and_open_table,
+};
+pub use write::{lock_note_if_taken, with_write};
 
 /// 页面动作的转发 —— **`vidbrief-mcp` 不必直接依赖 `vidbrief-viz`**。
 ///
 /// 依赖图是 `{cli, mcp} → ops → viz`(DESIGN §10.3)。查看服务的类型属于 viz,
 /// 但"给查看服务装一个执行者"是宿主的事;从 ops 转一手,那条边就不用加。
-pub use vidbrief_viz::{Action, ActionHandler, set_action_handler};
+pub use vidbrief_viz::{Action, ActionHandler, set_action_handler, use_separate_process};
 
 /// 默认转录片段里"同期"取多长(秒)。±这个值,见 `docs/DESIGN.md` §6.2 ①。
 pub const NEIGHBOR_WINDOW: f64 = 6.0;

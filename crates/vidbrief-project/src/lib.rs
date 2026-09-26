@@ -37,6 +37,7 @@ pub mod meta;
 pub mod project;
 pub mod regions;
 pub mod relpath;
+pub mod report;
 pub mod shots;
 pub mod source;
 pub mod state;
@@ -58,14 +59,15 @@ pub use project::{
 };
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
+pub use report::{Granularity, Report, ReportPreset, ReportStyle, ReportTopic, TopicSource};
 pub use shots::{Confidence, Evidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
 pub use source::{
     Materialized, Placement, SourceLink, materialize, plan, same_file, sha256_of, simplify_path,
     video_rel_for, volume_of,
 };
 pub use state::{
-    ContentPrint, ProjectState, SegmentState, ShotState, StateFormatError, SupplementState, frame,
-    shots_print, supplements_print, transcript_print, unframe,
+    ContentPrint, ProjectState, SegmentState, ShotState, StateFormatError, SupplementState,
+    doc_print, frame, shots_print, supplements_print, transcript_print, unframe,
 };
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
 pub use transcript::{

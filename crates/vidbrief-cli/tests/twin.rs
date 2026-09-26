@@ -82,11 +82,16 @@ fn the_command_line_twin_writes_through_the_same_door() {
     assert!(!ok, "门没拦:命令行版绕过去了?");
     assert!(stderr.contains("补图候选"), "门该把三类入口都说出来:{stderr}");
 
-    // ③ 报告不控门(它是最后一步),该写得进去
-    let (ok, stdout, stderr) = run(&["report", &proj, "--md", "-"], "# 报告\n");
-    assert!(ok, "report 失败了:\n{stderr}");
-    assert!(stdout.contains("report.md"), "{stdout}");
-    assert!(fake.layout().report_md().is_file());
+    // ③ 报告也有门 —— 它是**步 3 那道**:总结还没写,报告不许出
+    let (ok, _, stderr) = run(
+        &["report", &proj, "--json", "-"],
+        r#"{"style":{"preset":"quick","granularity":"standard","tone":"大白话"},
+             "topics":[{"t":1.0,"title":"标题","body":"正文",
+             "sources":[{"kind":"external","title":"语法文档","url":"https://example.com"}]}]}"#,
+    );
+    assert!(!ok, "总结都没写,报告不该出得来");
+    assert!(stderr.contains("还没有总结"), "{stderr}");
+    assert!(!fake.layout().report_json().is_file(), "被挡住就不该落文件");
 
     // ④ 形式错误当场退回,不留半成品
     let (ok, _, stderr) = run(
@@ -102,6 +107,71 @@ fn the_command_line_twin_writes_through_the_same_door() {
         stderr.contains("至少给一个") || stderr.contains("没有要写的东西"),
         "{stderr}"
     );
+}
+
+/// 出报告那条命令行入口:数据落在同一个地方,而且**过同一道门**。
+#[test]
+fn the_command_line_twin_builds_a_report_through_the_same_gate() {
+    let fake = Fake::new("twin-report")
+        .with_transcript(&[(0.0, 2.0, "各位好,今天讲 Python 列表"), (2.0, 4.0, "看这一段结构图")])
+        .with_curve(5)
+        .with_shot(1, 2.0);
+    let proj = fake.layout().root().to_string_lossy().into_owned();
+
+    // 步 2 的活走命令行干完:看图结论 + 转录核验(审过、没问题的也要报)
+    let (ok, _, stderr) = run(
+        &["shot-check", &proj, "--json", "-"],
+        r#"{"shot_id":"s001","match":true,"audio_visual_sync":true,
+            "type_read":"Python 列表 结构","confidence":"high",
+            "evidence_quote":"各位好,今天讲 Python 列表"}"#,
+    );
+    assert!(ok, "shot-check 失败了:\n{stderr}");
+    let (ok, _, stderr) = run(&["correct", &proj, "--json", "-"], r#"{"reviewed":[1,2]}"#);
+    assert!(ok, "correct 失败了:\n{stderr}");
+
+    // 写总结 —— 走工具(命令行版),底账也就记上了
+    let (ok, _, stderr) = run(&["summary", &proj, "--md", "-"], "# 总述\n\n两句话讲完。\n");
+    assert!(ok, "summary 失败了:\n{stderr}");
+
+    // 出报告:数据 + 两个投影
+    let body = r#"{
+      "style": {"preset": "teaching", "granularity": "detailed", "tone": "大白话", "notes": "给刚入门的人看"},
+      "topics": [
+        {
+          "t": 2.0,
+          "title": "切到解释器主窗口",
+          "body": "讲者从大纲切到解释器主窗口。",
+          "shots": ["s001"],
+          "sources": [{"kind": "speaker", "quote": "看这一段结构图"}]
+        }
+      ]
+    }"#;
+    let (ok, stdout, stderr) = run(&["report", &proj, "--json", "-"], body);
+    assert!(ok, "report 失败了:\n{stderr}");
+    assert!(stdout.contains("知识点   1 条"), "{stdout}");
+    assert!(stdout.contains("风格     教学版 · 详细 · 大白话"), "{stdout}");
+    assert!(stdout.contains("summary.md"), "总结该取步 3 那一份:{stdout}");
+    assert!(stdout.contains("--view report"), "该指出去哪看:{stdout}");
+    assert!(fake.layout().report_json().is_file());
+    assert!(fake.layout().report_md().is_file());
+    assert!(fake.layout().report_html().is_file());
+
+    let report = vidbrief_project::Report::load(&fake.layout().report_json()).unwrap();
+    assert_eq!(report.topics.len(), 1);
+    assert!(report.summary.contains("两句话讲完"), "{}", report.summary);
+    // 段号是工具从材料里找出来的
+    assert_eq!(report.topics[0].segments, vec![2]);
+    // 口味落在数据里(与 MCP 工具同一个字段、同一个必填口径)
+    assert_eq!(
+        report.style.as_ref().map(vidbrief_project::ReportStyle::describe),
+        Some("教学版 · 详细 · 大白话".to_string())
+    );
+
+    // 同一条路:总结被绕过工具改过,命令行版照样拦
+    std::fs::write(fake.layout().summary_md(), "# 手改的\n").unwrap();
+    let (ok, _, stderr) = run(&["report", &proj, "--json", "-"], body);
+    assert!(!ok, "手改过的总结该被拦下");
+    assert!(stderr.contains("不是工具写出去的那一份"), "{stderr}");
 }
 
 /// 候选处置那条命令行入口:形状一样,结论一样落在材料上。
@@ -135,4 +205,24 @@ fn the_command_line_twin_disposes_supplement_candidates() {
 
     let after = vidbrief_ops::supplements(&fake.open()).unwrap().unwrap();
     assert_eq!(after.pending().count(), 0);
+}
+
+// ── 参数扫描 ─────────────────────────────────────────────────────────
+
+/// **用法说明里写着的开关,参数扫描这一关必须认得。**
+///
+/// 实测撞见:`--open` 写在 `vidbrief report -h` 里,却在参数扫描时被当成未知参数
+/// 打回去(`report 不认识参数 --open`)—— 文档说有、实际没有,是最坏的一种不一致。
+/// 这组测试按"开关该被认下来"验:给一个**读不动的输入**,报错也必须换一条
+/// (换到解析 JSON / 找项目去了),而不是"不认识参数"。
+#[test]
+fn the_report_command_accepts_its_documented_switches() {
+    for flag in ["--open", "--self-contained"] {
+        let (ok, _out, err) = run(&["report", "no-such-project", "--json", "-", flag], "{");
+        assert!(!ok, "输入是坏的,命令该失败");
+        assert!(
+            !err.contains("不认识参数"),
+            "`{flag}` 是用法说明里写着的东西,不该被参数扫描拒掉:{err}"
+        );
+    }
 }

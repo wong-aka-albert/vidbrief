@@ -72,7 +72,7 @@
               "keep",
               "drop"
             ],
-            "description": "是否保留(**投影**;判据在 state.bin)。新生成的图默认 keep"
+            "description": "是否保留(**投影**;判据在 state.bin)。新生成的**有内容**的图默认 keep;步 1 认出**纯色帧**(切黑 / 淡出 / 纯色占位)时照样把图截下来,但预标成 drop —— 图是那个事件的证据,省的是看的人(它不进待校准那一批);agent 觉得有用可以 update_shot(keep) 改回来"
           },
           "reason": {
             "oneOf": [
@@ -84,7 +84,7 @@
                 "minLength": 1
               }
             ],
-            "description": "补图理由(**投影**;判据在 state.bin)。origin 为 agent_request / manual 时应有值"
+            "description": "这张图的**处置理由**(**投影**;判据在 state.bin):补图时写为什么要补(origin 为 agent_request / manual 时应有值),步 1 预标弃用的纯色帧写为什么被弃用"
           },
           "created_at": {
             "$ref": "#/$defs/timestamp",
@@ -112,7 +112,7 @@
                 "properties": {
                   "match": {
                     "type": "boolean",
-                    "description": "画面内容与同期转录是否相符"
+                    "description": "画面讲的与同期转录讲的是不是**同一件事**(主题 / 动作 / 对象)。**用字层面的差异不算不符** —— 转录把一个字听错了是转录纠错的活(apply_corrections),不是这里;判据是「这段话配这张图,读的人会不会觉得对不上」。两种读法都说得通的字段迟早被填成两个样,所以这条写死(实测两个模型给过相反答案)"
                   },
                   "audio_visual_sync": {
                     "type": "boolean",

@@ -41,14 +41,20 @@ pub fn install_action_handler(state: Arc<State>, rt: tokio::runtime::Handle) {
     vidbrief_ops::set_action_handler(handler);
 }
 
+/// 这条路的**持锁凭证**活到哪:`approve` 的局部变量里 —— 它 drop 得比函数返回早一点?
+///
+/// 不:它的作用域就是 `approve` 的函数体,而所有用它的代码都在体内。
+/// 单独写一条提醒,是因为"按次取放"这套全靠 Drop 的时机对([`State::enter_write`])。
+
 /// 「这一步我看过了,通过」。
 ///
 /// 报错一律翻译成**给人看的一句话**:读到它的是浏览器里的用户,不是开发者。
-fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Result<String, String> {
+fn approve(state: &Arc<State>, rt: &tokio::runtime::Handle, project_id: &str) -> Result<String, String> {
     // 入口序列和 MCP 工具**共用同一套**(`State::enter_write` + 排队 + 那句警告),
     // 动作本身走 ops 的那一个入口(`with_write`)。三段拼起来就是完整的写事务。
     let opened = OpenProject::open(project_id).map_err(|e| explain(&e))?;
-    state.enter_write(&opened).map_err(|e| explain(&e))?;
+    // 凭证:活到函数结束(这个函数就是"一次写调用"的全部)
+    let _hold = state.enter_write(&opened).map_err(|e| explain(&e))?;
     let dir = opened.dir().to_path_buf();
     // 锁已经在本进程手上 —— 把它当凭证交给 ops,让那边**不要再取一次**
     // (同进程再取会被自己挡住,报错还长得像"被别的会话占着")。
@@ -102,4 +108,56 @@ fn approve(state: &State, rt: &tokio::runtime::Handle, project_id: &str) -> Resu
 /// 把 anyhow 的错误链压成一句话(页面上只显示一行,太长的没人读)。
 fn explain(e: &anyhow::Error) -> String {
     format!("{e:#}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use vidbrief_ops::testkit::Fake;
+
+    /// **页面按钮和工具调用排同一队。**
+    ///
+    /// 从前这里只有一句话:"它接了 `serialize`,和工具调用排同一队"——**没有任何测试
+    /// 能证明它真在排队**(并发跑一次是微秒级窗口,证明不了任何事;`[260925-14]` 教过
+    /// "抓不到 bug 的竞态测试比没有更糟")。所以这条测试**占住名额再点按钮**:
+    /// 名额没放,按钮就必须**阻塞**;放开的瞬间它才动手。
+    ///
+    /// 直接调 [`approve`](HTTP 那一跳由 `vidbrief-viz` 自己的
+    /// `page_actions_are_handed_to_the_host` 盯着)——因为 `OpenProject::open(项目 id)`
+    /// 是**按进程的工作目录**解析 `projects/<id>` 的,测试进程的 cwd 不是那个工作区。
+    /// 换句话说:这里验的是"手递到手之后会不会排队",那是这条测试唯一想钉的东西。
+    #[test]
+    fn the_page_button_waits_for_the_queue() {
+        let fake = Fake::new("action-queue");
+        let rt = tokio::runtime::Runtime::new().expect("建运行时");
+        let state = Arc::new(State::new());
+        let project = fake.layout().root().display().to_string();
+
+        // **占住名额**:这一下模拟"agent 正拿着这个项目的写操作在干活"
+        let opened = vidbrief_ops::OpenProject::open(&project).expect("打开假项目");
+        let held = rt.block_on(state.serialize(opened.dir()));
+
+        let (tx, rx) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_rt = rt.handle().clone();
+        std::thread::spawn(move || {
+            let answer = approve(&worker_state, &worker_rt, &project);
+            let _ = tx.send(answer);
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "名额还被占着,按钮就**不该**跑完 —— 它是排在同一队里的"
+        );
+
+        // 放行:按钮这才被处理。成功或业务报错都行 —— 这条测的是**排队**,不是 approve 的规矩。
+        drop(held);
+        let answer = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("名额放开了,按钮该有回话");
+        assert!(!answer.is_ok() || !answer.unwrap().is_empty(), "按钮要回一句话给页面看");
+    }
 }

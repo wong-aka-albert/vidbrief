@@ -70,6 +70,7 @@ pub struct McpClient {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
     next_id: u64,
 }
 
@@ -106,7 +107,7 @@ impl McpClient {
         // stderr 只收集不打屏:断言失败时把它贴进消息里,平时别污染测试输出
         let stderr = Arc::new(Mutex::new(String::new()));
         let sink = stderr.clone();
-        std::thread::spawn(move || {
+        let stderr_reader = std::thread::spawn(move || {
             for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
                 let mut text = sink.lock().unwrap_or_else(|e| e.into_inner());
                 text.push_str(&line);
@@ -119,12 +120,32 @@ impl McpClient {
             stdin: Some(stdin),
             lines,
             stderr,
+            stderr_reader: Some(stderr_reader),
             next_id: 0,
         }
     }
 
+    /// 服务进程的 pid —— 用来验证"另起进程"这类事实。
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn stderr(&self) -> String {
         self.stderr.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// **断线**:关掉 stdin,等子进程退出,返回 `(退出码, stderr 全文)`。
+    ///
+    /// 这是"客户端断开"那条路的唯一入口 —— 宿主那边看到的是「管道正在被关闭」,
+    /// 而服务这边必须留下**一句明白话**(谁断了、已经落盘的东西在不在)。
+    pub fn disconnect_and_wait(&mut self) -> (Option<i32>, String) {
+        self.stdin = None;
+        let status = self.child.wait().expect("等子进程退出失败");
+        // stderr 那条读线程在管道关闭后自然收尾:等它把最后几行搬进缓冲
+        if let Some(handle) = self.stderr_reader.take() {
+            let _ = handle.join();
+        }
+        (status.code(), self.stderr())
     }
 
     pub fn write_message(&mut self, message: &Value) {
@@ -195,6 +216,45 @@ impl McpClient {
         )
     }
 
+    /// 调一个工具,顺便**把期间的进度通知收下来**。
+    ///
+    /// `notifications/progress` 是这条线上唯一一条「服务主动说话」的路,而客户端得先在
+    /// 请求的 `_meta.progressToken` 里报上自己的名字 —— 报告里没有 token 的调用,
+    /// 服务一条都不该发(`request` 那条路会静悄悄把它们丢掉,正是这个原因)。
+    pub fn call_tool_watching_progress(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        token: Option<&str>,
+    ) -> (Value, Vec<Value>) {
+        self.next_id += 1;
+        let id = self.next_id;
+        let mut params = json!({"name": name, "arguments": arguments});
+        if let Some(token) = token {
+            params["_meta"] = json!({"progressToken": token});
+        }
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": params,
+        }));
+
+        let mut notes = Vec::new();
+        loop {
+            let line = self.next_line();
+            let value: Value = serde_json::from_str(&line).unwrap_or_else(|e| {
+                panic!("stdout 上出现了不是 JSON 的东西(`{line}`):{e}")
+            });
+            if value.get("id").and_then(Value::as_u64) == Some(id) {
+                return (value.get("result").cloned().unwrap_or(Value::Null), notes);
+            }
+            if value.get("method").and_then(Value::as_str) == Some("notifications/progress") {
+                notes.push(value.get("params").cloned().unwrap_or(Value::Null));
+            }
+        }
+    }
+
     /// 调一个工具,**要求它成功**并返回第一段文本。失败时把服务的说明原样报出来。
     pub fn tool_text(&mut self, name: &str, arguments: Value) -> String {
         let result = self.call_tool(name, arguments);
@@ -234,6 +294,28 @@ impl Drop for McpClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// 手写一个 HTTP/1.0 GET,把响应体交回来(不引 HTTP 客户端依赖)。
+///
+/// 目前只有一个用途:问查看服务 `GET /@status` —— "服务到底跑在哪个进程里"。
+pub fn http_get(port: u16, path: &str) -> Result<String, String> {
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    let request = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut text).map_err(|e| e.to_string())?;
+    Ok(text
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or("")
+        .to_string())
 }
 
 /// 工具结果里的第一段文本。

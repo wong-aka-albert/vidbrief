@@ -8,9 +8,13 @@ description = "项目上的动作:建项目 / 跑一步 / 取材料 / 存结论 
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
+# 运行记录里存的是「那一趟跑完的交代」原样(`PreprocessReport` 的 JSON)——
+# 让读的人拿到的与直接跑一次拿到的**同源**,不必学两种形状。
+serde_json.workspace = true
 vidbrief-asr.workspace = true
 vidbrief-core.workspace = true
 vidbrief-project.workspace = true
+vidbrief-report.workspace = true
 vidbrief-viz.workspace = true
 
 [features]
@@ -22,6 +26,3 @@ vidbrief-viz.workspace = true
 #
 # 不默认打开:它不是库的一部分,"造一个假项目"对使用者没有意义。
 testing = []
-
-[dev-dependencies]
-serde_json.workspace = true

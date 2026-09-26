@@ -26,6 +26,18 @@
     --warn: #9a6700;
   }
   * { box-sizing: border-box; }
+
+  /* 滚动条与报告页同一套(那页里写清了两种写法的取舍):面板内的滚动用细条 +
+     圆头 + 透明轨道,别让系统默认那根粗条贴在边上。 */
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--dim) 60%, transparent);
+    border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); background-clip: content-box; }
+
   body { margin: 0; background: var(--bg); color: var(--fg);
     font: 13px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
   header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;

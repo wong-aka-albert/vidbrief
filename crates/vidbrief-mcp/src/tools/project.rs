@@ -15,6 +15,7 @@ use crate::json::{blocking, json};
 use crate::server::VidbriefServer;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateProjectParams {
     /// 源视频路径(任何 ffmpeg 认得的格式:mp4/mkv/mov…)。
     pub video_path: String,
@@ -38,12 +39,14 @@ pub struct CreateProjectParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectRef {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListProjectsParams {
     /// 项目们所在的父目录。默认是服务启动时工作目录下的 `projects/`。
     #[serde(default)]

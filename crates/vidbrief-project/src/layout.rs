@@ -55,6 +55,8 @@ pub const SHOTS_EXTRA2_REL_DIR: &str = "03_summary/shots_extra2";
 
 // ── 04_report/ ──────────────────────────────────────────────────────
 pub const REPORT_DIR: &str = "04_report";
+/// 报告**数据**(渲染器的输入,判据在它这儿;下面两份是它的投影)。
+pub const REPORT_JSON_FILE: &str = "04_report/report.json";
 pub const REPORT_MD_FILE: &str = "04_report/report.md";
 pub const REPORT_HTML_FILE: &str = "04_report/report.html";
 pub const REPORT_ASSETS_REL_DIR: &str = "04_report/assets";
@@ -191,6 +193,10 @@ impl Layout {
     // ── 04_report/ ──────────────────────────────────────────────────
     pub fn report_dir(&self) -> PathBuf {
         self.root.join(REPORT_DIR)
+    }
+    /// 报告**数据**文件 —— 渲染器的输入。`report.md` / `report.html` 是它的投影。
+    pub fn report_json(&self) -> PathBuf {
+        self.rel(REPORT_JSON_FILE)
     }
     pub fn report_md(&self) -> PathBuf {
         self.rel(REPORT_MD_FILE)

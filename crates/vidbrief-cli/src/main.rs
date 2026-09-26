@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use vidbrief_ops::{OpenProject, PreprocessOptions, Stage, TranscriptOutcome};
+use vidbrief_ops::{OpenProject, PreprocessOptions, RunStage, Stage, TranscriptOutcome};
 use vidbrief_project::{SourceLink, human_size};
 
 const USAGE: &str = "\
@@ -27,7 +27,7 @@ Commands:
   shot-check <project> -j F 记一张图的看图结论(record_shot_check)
   supplements <project> -j F 处置一批补图候选(disposition_supplements)
   summary <project> -m F    写总结(write_summary,过校准的门)
-  report <project> -m F     写报告(write_report_md)
+  report <project> -j F     出报告(build_report:数据 + 页面 + 导出)
   upgrade <project>         把项目对齐到当前版本(旧格式 / 状态文件读不动时用)
   ui <project>              渲染时间线视图 + 起本地服务 + 打开浏览器
   mcp [--stdio]             启动 MCP 服务(stdio 传输,供 agent 接入)
@@ -114,18 +114,56 @@ Options:
 ";
 
 const REPORT_USAGE: &str = "\
-vidbrief report —— 写报告(write_report_md 的命令行版)
+vidbrief report —— 出报告(build_report 的命令行版)
 
-Usage: vidbrief report <project> --md <FILE|->
+Usage: vidbrief report <project> --json <FILE|-> [options]
 
 Arguments:
   <project>                项目:项目目录的路径,或 projects/ 下的项目名
 
 Options:
-  -m, --md <FILE|->        Markdown 正文(`-` = 从 stdin 读)
+  -j, --json <FILE|->      输入(`-` = 从 stdin 读)。形状与 MCP 工具 build_report
+                           的入参一致(少了 project_id):
+                           {\"style\":{\"granularity\":\"detailed\",\"tone\":\"大白话\",
+                                     \"notes\":\"给刚入门的人看(可选)\"},
+                            \"summary\":\"全局总结(markdown);不给就用 03_summary/summary.md\",
+                            \"topics\":[{\"t\":85.0,\"title\":\"切主图\",\"body\":\"解析正文(markdown)\",
+                              \"shots\":[\"s001\"],\"segments\":[4,5],
+                              \"sources\":[{\"kind\":\"speaker\",\"quote\":\"照抄的一句转录原文\"},
+                                          {\"kind\":\"external\",\"title\":\"语法文档\",
+                                           \"url\":\"https://example.com\"}]}],
+                            \"format\":\"both\",\"open_browser\":true}
+                           `style` 是必填的:granularity 只能是 brief(概括)/
+                           standard(标准)/ detailed(详细),tone 是自由文本(大白话 /
+                           诙谐 / 讲故事 / 行业腔……)。
+      --format <both|html|md>
+                           出哪几份:both(默认,页面 + Markdown 导出)/ html / md。
+                           给了就以它为准(压过输入里的 format)
+      --open               渲染之后起本地查看服务并打开浏览器,**然后常驻**
+                           (与 `vidbrief ui` 一样,按 Ctrl+C 结束)。
+                           不给就只渲染:页面已经写好,要看用
+                           `vidbrief ui <项目> --view report`
+      --self-contained     **单文件分享**:图内嵌成 base64 塞进页面/导出,
+                           产物能单独发出去(对方不需要项目目录)。
+                           代价是体积(一张图 ×1.37);**视频不内嵌** ——
+                           单文件版的图能带走,点锚点回跳那一半仍要本机素材 + 服务
+  -h, --help               显示本条用法
 
 说明:
-  report.md 是这一步的实体;图表化 HTML 与导出是另一件事(M6)。
+  报告**以数据为源**:`04_report/report.json` 是判据,`report.html`(时间轴上挂知识点、
+  可回跳视频)与 `report.md` 是它的两个投影。重做就是再跑一遍 —— **整份替换**。
+  口味(`style`)落在数据里:页面的标题栏有个小标签、导出的头一行写着它 ——
+  交付时能一句话说清「这份是按什么做的」。
+
+  **这里默认不起服务**:命令行进程一退出,服务就没了,印出来的地址就是个死链。
+  要边看边拖时间轴(页面要播视频,`file://` 下拖不动),用 `vidbrief ui --view report`
+  —— 那条命令本来就是常驻的。输入里给 `\"open_browser\": true` 等同于 `--open`。
+
+  每条知识点必须给全:时刻 `t`、标题、**完整解析正文**(浮层里放的是它)、**至少一条来源**。
+  来源两类:讲者原话 `speaker` + **照抄**的 `quote`(工具去转录里找段号,找不到拒收);
+  外部查到的 `external` + 标题与能点的链接。引的截图必须在 shots.json 里。
+
+  **这道门前置着步 3**:没写过总结、或总结被绕过工具改过,会被挡住并说清怎么办。
 ";
 
 const APPROVE_USAGE: &str = "\
@@ -238,6 +276,8 @@ Options:
   -w, --width <N>          参与打分的缩小宽度,默认 480
       --no-transcribe      跳过语音转文字(只出差帧图与截图)
       --no-shots           只出差帧图与密集区,不抽截图
+      --run-id <ID>        给这一趟起个名字(内部契约:MCP 起作业时用,好让等它的人
+                           在 run.json 里认得出「就是这一趟」)。不给就自己生成。
   -h, --help               显示本条用法
 
 产出(全部落在 01_preprocess/):
@@ -245,10 +285,14 @@ Options:
   dense_regions.json  变化密集区
   shots.json + shots/ 预筛选截图
   transcript.json     + .srt/.txt/.vtt(源视频没有音轨时跳过)
+  run.json            **运行记录**:谁在跑、跑到第几步、跑完的交代或失败原因
+                      (给「别的会话想知道跑到哪儿了」用的;MCP 那三件套读的就是它)
 
 说明:
   - 会先取项目写锁;若另一个会话正开着这个项目,这里会直接拒绝而不是硬写
     (`docs/DESIGN.md` §4.7)。查看视图不受影响。
+  - 这个项目上已经有一趟在跑时**拒绝再开一趟**(两趟同时写会互相盖)。
+    记录超过 2 分钟没有心跳就算那一趟断了,那时重跑不会撞上这条。
 ";
 
 const UI_USAGE: &str = "\
@@ -260,13 +304,16 @@ Arguments:
   <project>                项目目录,或 projects/ 下的项目名
 
 Options:
-      --view <name>        渲染哪一页:timeline(默认,四层共轴时间线 + 视频回跳)
-                           或 calibrate(校准对照表:图 + 转录 + 结论 + 校准日志)
+      --view <name>        渲染哪一页:timeline(默认,四层共轴时间线 + 视频回跳)、
+                           calibrate(校准对照表:图 + 转录 + 结论 + 校准日志)
+                           或 report(报告页:时间轴上的知识点锚点 + 浮动解析 +
+                           右侧图文总结面板;数据来自 04_report/report.json)
       --no-open            只起服务并打印 URL,不打开浏览器
   -h, --help               显示本条用法
 
 说明:
-  - 渲染 01_preprocess/timeline.html(--view calibrate 时是 02_calibrate/calibrate.html)
+  - 渲染 01_preprocess/timeline.html(--view calibrate 是 02_calibrate/calibrate.html,
+    --view report 是 04_report/report.html —— 它需要先跑过 `vidbrief report`)
   - 起一个绑在 127.0.0.1 的静态服务把项目目录发布出去 —— **必须有它浏览器才能 seek**
     (`file://` 打开时对本地媒体有跨域限制,时间轴点了不跳)
   - 端口由操作系统分配,不会和别的东西撞车;只监听回环地址,局域网访问不到
@@ -308,6 +355,7 @@ fn main() -> ExitCode {
         "summary" => cmd_summary(rest),
         "report" => cmd_report(rest),
         "ui" => cmd_ui(rest),
+        "serve" => cmd_serve(rest),
         "mcp" => cmd_mcp(rest),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
@@ -506,8 +554,9 @@ fn link_note(link: SourceLink, size_bytes: u64) -> String {
 
 // ── preprocess ───────────────────────────────────────────────────────
 
-fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
+fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions, Option<String>)> {
     let mut project: Option<String> = None;
+    let mut run_id: Option<String> = None;
     let mut opts = PreprocessOptions::default();
 
     let mut i = 0;
@@ -529,6 +578,8 @@ fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
             }
             "--no-transcribe" => opts.transcribe = false,
             "--no-shots" => opts.shots = false,
+            // 内部契约:MCP 起作业时用它给这一趟起名,好让等它的人认得出「就是这一趟」
+            "--run-id" => run_id = Some(take_value(args, &mut i, inline, key)?),
             other if is_option(other) => {
                 bail!("preprocess 不认识参数 `{other}`(见 `vidbrief preprocess -h`)")
             }
@@ -551,7 +602,7 @@ fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions)> {
 
     let project =
         project.context("用法:vidbrief preprocess <project> [options]")?;
-    Ok((project, opts))
+    Ok((project, opts, run_id))
 }
 
 /// `vidbrief approve` —— 记下"这一步用户看过了",打开步 2 通往步 3 的门。
@@ -594,13 +645,34 @@ fn take_input(args: &[String], cmd: &str, flag: &str) -> Result<String> {
 }
 
 /// 项目名:去掉选项之后的那个位置参数。
-fn positional_project(args: &[String], cmd: &str, flag: &str) -> Result<String> {
+///
+/// `extra` 是这条命令**自己**认识的选项(它们和标志位一样要跳过,值也不能被当成项目名)。
+/// 从参数里挑出"项目"那个位置参数。
+///
+/// `value_flags` = **会吃掉下一个参数**的选项(如 `--format v`);
+/// `bare_flags` = 不带值的开关(如 `--open`)。
+/// **两者都要列全** —— 没列出来的会被当成未知参数打回去。
+/// 这一条踩过:`--open` 写在用法说明里,却在参数扫描这一关就被拒了
+/// (`report 不认识参数 --open`),而那正是"文档说能用的东西不能用"。
+fn positional_project(
+    args: &[String],
+    cmd: &str,
+    flag: &str,
+    value_flags: &[&str],
+    bare_flags: &[&str],
+) -> Result<String> {
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let (key, inline) = split_option(&args[i]);
-        if key == flag || (flag == "--json" && key == "-j") || (flag == "--md" && key == "-m") {
+        if key == flag
+            || (flag == "--json" && key == "-j")
+            || (flag == "--md" && key == "-m")
+            || value_flags.contains(&key)
+        {
             take_value(args, &mut i, inline, flag)?;
+        } else if bare_flags.contains(&key) {
+            // 开关:不取值,也不当项目名
         } else if is_option(&args[i]) {
             bail!("{cmd} 不认识参数 `{}`(见 `vidbrief {cmd} -h`)", args[i]);
         } else {
@@ -617,7 +689,7 @@ fn cmd_correct(args: &[String]) -> Result<()> {
         print!("{CORRECT_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "correct", "--json")?;
+    let name = positional_project(args, "correct", "--json", &[], &[])?;
     let raw = take_input(args, "correct", "--json")?;
     let body: CorrectBody = serde_json::from_str(&raw).context("--json 解析失败")?;
 
@@ -661,7 +733,7 @@ fn cmd_shot_check(args: &[String]) -> Result<()> {
         print!("{SHOT_CHECK_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "shot-check", "--json")?;
+    let name = positional_project(args, "shot-check", "--json", &[], &[])?;
     let raw = take_input(args, "shot-check", "--json")?;
     let body: ShotCheckBody = serde_json::from_str(&raw).context("--json 解析失败")?;
     let shot_id = parse_shot_id(&body.shot_id)?;
@@ -702,7 +774,7 @@ fn cmd_supplements(args: &[String]) -> Result<()> {
         print!("{SUPPLEMENTS_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "supplements", "--json")?;
+    let name = positional_project(args, "supplements", "--json", &[], &[])?;
     let raw = take_input(args, "supplements", "--json")?;
     let body: SupplementsBody = serde_json::from_str(&raw).context("--json 解析失败")?;
 
@@ -753,7 +825,7 @@ fn cmd_summary(args: &[String]) -> Result<()> {
         print!("{SUMMARY_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "summary", "--md")?;
+    let name = positional_project(args, "summary", "--md", &[], &[])?;
     let md = take_input(args, "summary", "--md")?;
 
     let (id, path) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
@@ -768,25 +840,149 @@ fn cmd_summary(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `vidbrief report` —— 写报告(`write_report_md`)。
+/// `vidbrief report` —— 出报告(`build_report`:数据 + 两个投影)。
 fn cmd_report(args: &[String]) -> Result<()> {
     if wants_help(args) {
         print!("{REPORT_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "report", "--md")?;
-    let md = take_input(args, "report", "--md")?;
+    // `--format` / `--open` / `--self-contained` 是命令行上的便利;
+    // 输入里也能给(形状与 MCP 工具一致)
+    let mut format_flag: Option<String> = None;
+    let mut open_flag = false;
+    let mut contained_flag = false;
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = split_option(&args[i]);
+        match key {
+            "--format" => format_flag = Some(take_value(args, &mut i, inline, key)?),
+            "--open" => open_flag = true,
+            "--self-contained" => contained_flag = true,
+            _ => {}
+        }
+        i += 1;
+    }
 
-    let (id, path) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+    let name = positional_project(args, "report", "--json", &["--format"], &["--open", "--self-contained"])?;
+    let raw = take_input(args, "report", "--json")?;
+    let body: ReportBody = serde_json::from_str(&raw).context("--json 解析失败")?;
+
+    let format = match format_flag.as_deref().or(body.format.as_deref()) {
+        None => vidbrief_ops::ReportFormat::Both,
+        Some(raw) => vidbrief_ops::ReportFormat::parse(raw)?,
+    };
+    // **命令行默认不起服务**:这个进程一退出服务就没了,印出来的地址就是死链。
+    // 要那套"页面 + 视频回跳"的体验,显式 `--open`(常驻),或者用 `vidbrief ui`。
+    let serving = if open_flag || body.open_browser.unwrap_or(false) {
+        vidbrief_ops::Serving::On { open_browser: true }
+    } else {
+        vidbrief_ops::Serving::Off
+    };
+    // 单文件分享:图内嵌进页面,产物能单独发出去(视频那一半仍然要素材 + 服务)
+    let images = if contained_flag || body.self_contained.unwrap_or(false) {
+        vidbrief_report::ImageMode::Embedded
+    } else {
+        vidbrief_report::ImageMode::Relative
+    };
+
+    let mut topics = Vec::with_capacity(body.topics.len());
+    for topic in body.topics {
+        topics.push(vidbrief_ops::TopicInput {
+            id: topic.id,
+            t: topic.t,
+            title: topic.title,
+            body: topic.body,
+            shots: topic.shots,
+            segments: topic.segments,
+            verify: topic.verify,
+            sources: topic
+                .sources
+                .into_iter()
+                .map(|source| match source {
+                    ReportSourceBody::Speaker { quote } => {
+                        vidbrief_ops::SourceInput::Speaker { quote }
+                    }
+                    ReportSourceBody::External { title, url } => {
+                        vidbrief_ops::SourceInput::External { title, url }
+                    }
+                })
+                .collect(),
+        });
+    }
+    let input = vidbrief_ops::ReportInput {
+        style: body.style.into_style()?,
+        summary: body.summary,
+        topics,
+    };
+
+    let (id, outcome) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
         if let Some(reason) = lock_note {
             eprintln!("警告:{reason}");
         }
-        let path = vidbrief_ops::write_report_md(opened, &md)?;
-        Ok((opened.id().to_string(), path))
+        let outcome = vidbrief_ops::build_report(opened, &input, format, images, serving)?;
+        Ok((opened.id().to_string(), outcome))
     })?;
+
     println!("项目     {id}");
-    println!("已写入   {}", path.display());
+    println!("知识点   {} 条", outcome.topics);
+    if let Some(style) = &outcome.style {
+        println!("风格     {style}");
+    }
+    println!(
+        "总结     来自 {}",
+        match outcome.summary_from {
+            "input" => "输入里给的",
+            _ => "03_summary/summary.md",
+        }
+    );
+    println!("数据     {}", outcome.report_json.display());
+    if let Some(md) = &outcome.report_md {
+        println!("导出     {}", md.display());
+    }
+    if let Some(html) = &outcome.report_html {
+        println!("页面     {}", html.display());
+    }
+    if outcome.self_contained {
+        println!("单文件   图已内嵌(页面可单独发出去;视频那一半仍要素材 + 本机服务)");
+    }
+    print_stale_anchors(&outcome.stale_anchors);
+    match &outcome.url {
+        Some(url) => {
+            println!("打开     {url}");
+            println!();
+            println!("按 Ctrl+C 结束(这个进程要一直活着,服务才能响应浏览器)。");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        None => {
+            println!();
+            println!("要看这一页(带视频回跳):`vidbrief ui {id} --view report`。");
+        }
+    }
     Ok(())
+}
+
+/// 报告引的图 / 段 / 话在当前材料里找不到了 —— 印一段,并说清怎么修。
+///
+/// **不是报错**:报告照渲染(页面是发现这件事的窗口),但读者要能看到它 ——
+/// 一句"讲者原话"回去核却在转录里找不到,人就没法判断该信谁。
+fn print_stale_anchors(stale: &[String]) {
+    if stale.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "⚠ 这份报告有 {} 处锚点在**当前材料**里找不到了(材料在报告之后被改过):",
+        stale.len()
+    );
+    for line in stale {
+        println!("  · {line}");
+    }
+    println!(
+        "  修法:让 agent 重出一份(`build_report` 整份替换)——\
+         页面上这些地方也已经标出来了。"
+    );
 }
 
 // ── 这几条命令的输入形状 ─────────────────────────────────────────────
@@ -903,13 +1099,103 @@ struct SupplementItem {
     t: Option<f64>,
 }
 
+/// 报告数据。形状与 MCP 工具 `build_report` 的入参一致(少了 `project_id`)——
+/// 同一份 JSON,两条路都吃得下。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportBody {
+    /// **这份报告按什么口味做** —— 用户提示词里那一份要求的落点。必填。
+    style: ReportStyleBody,
+    #[serde(default)]
+    summary: Option<String>,
+    topics: Vec<ReportTopicBody>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    open_browser: Option<bool>,
+    /// 单文件分享:图内嵌 base64(与 MCP 工具的 `self_contained` 同一个开关)。
+    #[serde(default)]
+    self_contained: Option<bool>,
+}
+
+/// 口味:风格轮廓 + 粒度(闭集合)+ 语气(自由文本)+ 补充要求。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportStyleBody {
+    /// `quick` / `teaching` / `story` / `review` / `exec` / `custom`
+    /// —— 轮廓怎么填见 `skill/styles.md`(或 `get_guide(step="styles")`)。
+    preset: String,
+    /// `brief` / `standard` / `detailed`。
+    granularity: String,
+    tone: String,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+impl ReportStyleBody {
+    fn into_style(self) -> anyhow::Result<vidbrief_project::ReportStyle> {
+        let preset = match self.preset.trim() {
+            "quick" => vidbrief_project::ReportPreset::Quick,
+            "teaching" => vidbrief_project::ReportPreset::Teaching,
+            "story" => vidbrief_project::ReportPreset::Story,
+            "review" => vidbrief_project::ReportPreset::Review,
+            "exec" => vidbrief_project::ReportPreset::Exec,
+            "custom" => vidbrief_project::ReportPreset::Custom,
+            other => anyhow::bail!(
+                "style.preset 只能是 quick(快扫版)/ teaching(教学版)/ story(故事版)/                  review(元组版)/ exec(汇报版)/ custom(自定义),收到 `{other}`                 
+轮廓怎么填看 skill/styles.md,或 get_guide(step=\"styles\")"
+            ),
+        };
+        let granularity = match self.granularity.trim() {
+            "brief" => vidbrief_project::Granularity::Brief,
+            "standard" => vidbrief_project::Granularity::Standard,
+            "detailed" => vidbrief_project::Granularity::Detailed,
+            other => anyhow::bail!(
+                "style.granularity 只能是 brief(概括)/ standard(标准)/ detailed(详细),收到 `{other}`"
+            ),
+        };
+        Ok(vidbrief_project::ReportStyle {
+            preset: Some(preset),
+            granularity,
+            tone: self.tone,
+            notes: self.notes,
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportTopicBody {
+    #[serde(default)]
+    id: Option<u32>,
+    t: f64,
+    title: String,
+    body: String,
+    #[serde(default)]
+    shots: Vec<String>,
+    #[serde(default)]
+    segments: Vec<u32>,
+    #[serde(default)]
+    sources: Vec<ReportSourceBody>,
+    #[serde(default)]
+    verify: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ReportSourceBody {
+    /// 讲者原话:**照抄**的一句转录原文(工具去材料里搜段号)。
+    Speaker { quote: String },
+    /// 外部补充:标题 + 能点回去的链接。
+    External { title: String, url: String },
+}
+
 /// 截图 id:`s007` 或 `7`。
+///
+/// 解析只有一处(`vidbrief_ops::parse_shot_id`)—— 几个入口各写一份的话,
+/// 同一个输入迟早得到几种说法。
 fn parse_shot_id(raw: &str) -> Result<vidbrief_project::ShotId> {
-    let digits = raw.strip_prefix('s').unwrap_or(raw);
-    let n: u32 = digits
-        .parse()
-        .with_context(|| format!("截图 id 不合法:`{raw}`(形如 s007 或 7)"))?;
-    vidbrief_project::ShotId::new(n).map_err(Into::into)
+    vidbrief_ops::parse_shot_id(raw)
 }
 
 /// 这个命令是**人**跑的,所以它本身就是"人签的字" —— 不需要谁来转达。
@@ -1025,22 +1311,57 @@ fn cmd_preprocess(args: &[String]) -> Result<()> {
         print!("{PREPROCESS_USAGE}");
         return Ok(());
     }
-    let (name, opts) = parse_preprocess(args)?;
+    let (name, opts, run_id) = parse_preprocess(args)?;
+
+    // 运行记录(`vidbrief_ops::run`)那只手。它在**拿到写锁之后**才开 ——
+    // 顺序有讲究:锁先到、记录后到,「一个项目同一时刻只有一份记录在写」就是
+    // 锁保证的,不是靠运气。两趟同时起步时,输的那趟在锁上就被挡了,连记录都写不出来。
+    let mut recorder: Option<vidbrief_ops::RunRecorder> = None;
 
     // 开 → 取锁 → 干活:这条序列走 ops 那**一个**入口(`vidbrief_ops::with_write`)。
-    // 写锁降级放行的说明交给下面那个函数 —— 它得在开工**之前**说出去,
-    // 而不是等几分钟跑完再说。
-    vidbrief_ops::with_write(&name, None, |opened, lock_note| {
-        run_preprocess(opened, &name, &opts, lock_note)
-    })
+    let outcome = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+        let started = match &run_id {
+            Some(id) => vidbrief_ops::RunRecorder::start_named(opened.layout(), &opts, id),
+            None => vidbrief_ops::RunRecorder::start(opened.layout(), &opts),
+        };
+        match started {
+            Ok(hand) => recorder = Some(hand),
+            // 这个项目上已经有一趟在跑:不许开新的,把话说清楚
+            Err(vidbrief_ops::StartError::Busy(why)) => bail!("{why}"),
+            // 记录写不动**不许拦作业**:它是给别人看的一双眼睛
+            Err(vidbrief_ops::StartError::Storage(e)) => {
+                eprintln!("警告:这趟的运行记录写不了({e:#})—— 不影响跑,只是别人看不到进度。");
+                recorder = None;
+            }
+        }
+
+        // 写锁降级(文件系统不支持锁)那句话说在开工**之前**,记录里也留一份 ——
+        // 作业跑在独立进程里时,agent 只看得到记录,看不到这行终端输出。
+        if let (Some(recorder), Some(note)) = (&recorder, lock_note) {
+            recorder.note_warning(note);
+        }
+        run_preprocess(opened, &name, &opts, lock_note, recorder.as_ref())
+    });
+    if let Err(error) = &outcome {
+        // 还没收尾的(取锁失败、转录失败……)在这里收:记录里要留一句为什么。
+        // 已经收过尾的(报告已经拿到手)不动 —— 那一趟跑到了终点,交代在报告里。
+        if let Some(recorder) = &recorder {
+            recorder.finish_err(&format!("{error:#}"));
+        }
+    }
+    outcome
 }
 
 /// 真正的活。从 [`vidbrief_ops::with_write`] 的闭包里调 —— **锁已经拿在手上**。
+///
+/// `recorder` 是**运行记录**那只手:每换一步往上写一句。它是 `Option` ——
+/// 记录开不出来(磁盘满 / 目录不可写)时作业照跑,只是没有记录可看。
 fn run_preprocess(
     opened: &mut OpenProject,
     name: &str,
     opts: &PreprocessOptions,
     lock_note: Option<&str>,
+    recorder: Option<&vidbrief_ops::RunRecorder>,
 ) -> Result<()> {
     // 文件系统不支持锁时它**不失败**,而是带着一句说明放行 —— 那句话必须说出来,
     // 否则用户就在不知情的情况下失去了"两个人同时改会互相覆盖"的保护。
@@ -1057,29 +1378,70 @@ fn run_preprocess(
     println!();
 
     let mut last_print = Instant::now();
-    let mut on_progress = |stage: Stage| match stage {
-        Stage::Analyzed(a) => {
-            println!(
-                "差帧图   {} 个采样点({}fps),分数最高 {:.3}",
-                a.curve_points, a.fps, a.max_score
-            );
-            println!(
-                "密集区   {} 个  阈值 {:.3}(中位数 {:.3} × {} 与下限 {} 取大)",
-                a.regions, a.mass_threshold, a.mass_median, a.mass_k, a.mass_floor
-            );
-        }
-        Stage::Shot { done, total } => {
-            // 抽帧是有 IO 的,长视频上几十张要好几秒 —— 给点进度别让人以为卡住了
-            if done == total || last_print.elapsed().as_millis() > 300 {
-                eprint!("\r  抽帧     {done}/{total}");
-                last_print = Instant::now();
+    let mut on_progress = |stage: Stage| {
+        // ① 记录:换一步就往上写一句(抽帧那张数报细的)。
+        //    `Stage` 是库里对外的进度语言,记录里的 `RunStage` 是**给别人读**的那套;
+        //    两边在这一个 match 里对齐,别处不许再翻译一遍。
+        if let Some(recorder) = recorder {
+            match stage {
+                Stage::Analyzing => recorder.stage(RunStage::Analyzing, "开始算差帧图", None),
+                Stage::Analyzed(a) => recorder.stage(
+                    RunStage::Shots,
+                    format!("密集区 {} 个,开始抽关键截图", a.regions),
+                    None,
+                ),
+                Stage::Shot { done, total } => recorder.stage(
+                    RunStage::Shots,
+                    format!("抽关键截图 {done}/{total}"),
+                    Some((done, total)),
+                ),
+                Stage::Transcribing => {
+                    recorder.stage(RunStage::Transcribing, "语音转文字(最久的一段)", None)
+                }
+                Stage::Rendering => recorder.stage(RunStage::Rendering, "渲染时间线", None),
             }
+        }
+
+        // ② 终端:人就在跟前,照旧打细的
+        match stage {
+            Stage::Analyzing => eprint!("  分析     抽帧 + 逐帧评分..."),
+            Stage::Analyzed(a) => {
+                eprintln!();
+                println!(
+                    "差帧图   {} 个采样点({}fps),分数最高 {:.3}",
+                    a.curve_points, a.fps, a.max_score
+                );
+                println!(
+                    "密集区   {} 个  阈值 {:.3}(中位数 {:.3} × {} 与下限 {} 取大)",
+                    a.regions, a.mass_threshold, a.mass_median, a.mass_k, a.mass_floor
+                );
+            }
+            Stage::Shot { done, total } => {
+                // 抽帧是有 IO 的,长视频上几十张要好几秒 —— 给点进度别让人以为卡住了
+                if done == total || last_print.elapsed().as_millis() > 300 {
+                    eprint!("\r  抽帧     {done}/{total}");
+                    last_print = Instant::now();
+                }
+            }
+            // 转录是最久的一段,而它**没有细粒度进度**可报 —— 说清这一点,
+            // 免得人对着不动的屏幕以为卡死了
+            Stage::Transcribing => {
+                eprintln!("\n  转录     正在跑 whisper(最久的一段,没有中间进度)")
+            }
+            Stage::Rendering => eprintln!("  视图     渲染时间线..."),
         }
     };
 
     let report = vidbrief_ops::preprocess(opened, opts, &mut on_progress)?;
     if opts.shots {
         eprintln!();
+    }
+
+    // 报告一拿到手就写进记录:**它是这一趟的交代**,MCP 那边的「取结果」靠它。
+    // 注意 `stage = done` 说的是**这一趟跑完了**,不是「步 1 完成了」——
+    // 后者看报告里的 `done`(转录失败时这里是 true、那里是 false)。
+    if let Some(recorder) = recorder {
+        recorder.finish_ok(&report);
     }
 
     match &report.shots {
@@ -1237,6 +1599,20 @@ fn cmd_status(args: &[String]) -> Result<()> {
     println!("材料");
     print_materials(&report.materials);
 
+    // 进度与产物对不上时点一句:④ 标着完成、而 04_report/ 里一份产物都没有。
+    //
+    // M6 联调实测的真场面:agent 看到这个组合,先说了句"报告 done 但文件不在",
+    // 然后**多花了一步** glob 去确认。进度记的是"这一步做过"(见 §4.10),
+    // 产物在不在看文件 —— 两件事都对,但摆在一起才看得出发生了什么。
+    let m = &report.materials;
+    if p.report.done && !(m.report_json || m.report_md || m.report_html) {
+        println!();
+        println!(
+            "⚠️ ④ 报告标着完成,但 04_report/ 下没有产物 ——\
+             进度记的是'这一步做过',产物在不在看文件(可能被拿掉了,或者在别处出的)。"
+        );
+    }
+
     // 有硬伤时用非零退出码,方便脚本和 agent 判断
     if report.unhealthy() {
         bail!("项目存在问题(见上面标 ✗ 的行)");
@@ -1286,6 +1662,26 @@ fn print_materials(m: &vidbrief_ops::Materials) {
     println!(
         "  视图     {}",
         if m.timeline_html { "已渲染" } else { "—" }
+    );
+
+    // 报告:判据(report.json)与两个投影分开数 —— "出过报告"与"文件还在不在"是两件事
+    // (M6 联调:agent 看到 ④✓ 而目录空着,只能再花一步自己去 glob)
+    let have: Vec<&str> = [
+        ("json", m.report_json),
+        ("html", m.report_html),
+        ("md", m.report_md),
+    ]
+    .into_iter()
+    .filter(|(_, present)| *present)
+    .map(|(name, _)| name)
+    .collect();
+    println!(
+        "  报告     {}",
+        if have.is_empty() {
+            "—".to_string()
+        } else {
+            format!("已出({})", have.join("、"))
+        }
     );
 
     // 状态文件那两栏:**读不动要说出来**,不能让它混在"一切正常"里
@@ -1347,12 +1743,13 @@ fn cmd_ui(args: &[String]) -> Result<()> {
             "--view" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    bail!("--view 后面要跟视图名(timeline / calibrate)");
+                    bail!("--view 后面要跟视图名(timeline / calibrate / report)");
                 };
                 view = match v.as_str() {
                     "timeline" => "timeline",
                     "calibrate" => "calibrate",
-                    other => bail!("不认识视图 `{other}` —— 可选:timeline(默认)/ calibrate"),
+                    "report" => "report",
+                    other => bail!("不认识视图 `{other}` —— 可选:timeline(默认)/ calibrate / report"),
                 };
             }
             other => positional.push(other.to_string()),
@@ -1362,9 +1759,16 @@ fn cmd_ui(args: &[String]) -> Result<()> {
     let name = one_positional(&positional, "ui", "项目")?;
 
     let opened = OpenProject::open(&name)?;
-    let (path, url) = match view {
-        "calibrate" => vidbrief_ops::serve_and_open_table(&opened, open_browser)?,
-        _ => vidbrief_ops::serve_and_open(&opened, open_browser)?,
+    let (path, url, stale) = match view {
+        "calibrate" => {
+            let (path, url) = vidbrief_ops::serve_and_open_table(&opened, open_browser)?;
+            (path, url, Vec::new())
+        }
+        "report" => vidbrief_ops::serve_and_open_report(&opened, open_browser)?,
+        _ => {
+            let (path, url) = vidbrief_ops::serve_and_open(&opened, open_browser)?;
+            (path, url, Vec::new())
+        }
     };
 
     println!("视图     {}", path.display());
@@ -1372,9 +1776,14 @@ fn cmd_ui(args: &[String]) -> Result<()> {
     if !open_browser {
         println!("         (--no-open:请手动打开上面的地址)");
     }
+    print_stale_anchors(&stale);
     println!();
     match view {
         "calibrate" => println!("顶部可按「还没核验 / 没把握 / 已弃用 / 有结论」筛选;点缩略图看大图。"),
+        "report" => println!(
+            "左边是视频与时间轴(轴上的圆点是知识点,播放头走到哪就显示哪一条),\
+             右边是图文总结面板 —— 点右上角按钮滑出。点圆点转到视频对应位置。"
+        ),
         _ => println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。"),
     }
 
@@ -1384,6 +1793,181 @@ fn cmd_ui(args: &[String]) -> Result<()> {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }
+}
+
+// ── serve ────────────────────────────────────────────────────────────
+
+const SERVE_USAGE: &str = "vidbrief serve —— 本地查看服务(独立进程)
+
+Usage:
+  vidbrief serve [--port <N>] [--mount <id>=<目录>]...     # 起一份,前台跑着
+  vidbrief serve --stop [<项目>]                          # 关掉在跑的服务
+
+Options:
+  --port <N>          监听端口。默认 0 = 由操作系统分配(不撞车)。
+                      起好之后 stdout 只打印**一行**握手 JSON:{\"pid\":…,\"port\":…}
+                      —— 打印完 stdout 就不再用了(调用方拿它当协议通道)。
+  --mount <id>=<目录> 起手就挂一个项目(可重复)。之后还能通过控制面
+                      `POST /@mount` 动态挂 —— MCP 会话就是这么做的。
+      --stop [<项目>] 关掉在跑的服务:**这是「关掉」的正门**。
+                      不给项目 = 关掉本机所有在跑的服务;
+                      给了项目 = 只关挂着它的那些(按目录或项目 id 认)。
+                      走的是 `POST /@shutdown`,不是「按端口找进程杀」。
+  -h, --help          显示本条用法
+
+说明:
+  **为什么服务要能独立成一个进程**:从前它跑在工具进程里,「关掉页面」等于关掉
+  那个进程 —— 而它可能就是 agent 的会话进程。独立之后,`--stop`(或页面上的关闭)
+  只关服务自己,**不连坐**。
+
+  在跑的服务各自登记在 `<临时目录>/vidbrief-view/<pid>.json`(端口、挂着哪些项目),
+  `--stop` 靠它发现。登记表不进项目目录 —— 项目里只该有材料。
+";
+
+fn cmd_serve(args: &[String]) -> Result<()> {
+    if wants_help(args) {
+        print!("{SERVE_USAGE}");
+        return Ok(());
+    }
+
+    let mut port: u16 = 0;
+    let mut mounts: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut stop: Option<String> = None;
+    let mut watch_stdin = false;
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = split_option(&args[i]);
+        match key {
+            "--port" => {
+                let value = take_value(args, &mut i, inline, key)?;
+                port = value
+                    .parse()
+                    .with_context(|| format!("--port 要是端口号,收到 `{value}`"))?;
+            }
+            "--mount" => {
+                let value = take_value(args, &mut i, inline, key)?;
+                let (id, dir) = value
+                    .split_once('=')
+                    .with_context(|| format!("--mount 的写法是 <id>=<目录>,收到 `{value}`"))?;
+                mounts.push((id.to_string(), std::path::PathBuf::from(dir)));
+            }
+            "--watch-stdin" => watch_stdin = true,
+            "--stop" => {
+                // `--stop` 后面**可以**跟一个项目(也可以不跟):用 inline 值,
+                // 否则看下一个参数像不像选项再决定吃不吃
+                stop = Some(match inline {
+                    Some(v) => v,
+                    None => match args.get(i + 1) {
+                        Some(next) if !is_option(next) => {
+                            i += 1;
+                            next.clone()
+                        }
+                        _ => String::new(),
+                    },
+                });
+            }
+            other => bail!("serve 不认识参数 `{other}`(见 `vidbrief serve -h`)"),
+        }
+        i += 1;
+    }
+
+    if let Some(project) = stop {
+        return stop_servers(&project);
+    }
+
+    let port = vidbrief_viz::run_in_this_process(port, mounts)?;
+    vidbrief_viz::print_handshake(port)?;
+
+    if watch_stdin {
+        // 父进程活着 = 这条管道开着。它一走(或自己退出),我们这边读到 EOF,跟着收工
+        // (顺手把登记表里自己那一份收掉 —— 退出走的是 `process::exit`,析构不会跑)。
+        vidbrief_viz::watch_parent_on_stdin();
+    }
+
+    // 握手行发出去之后 stdout 不再使用(调用方把它当协议通道读一行就丢)
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+/// `serve --stop`:按登记表找到在跑的服务,走 `POST /@shutdown` 让它们自己收工。
+fn stop_servers(project: &str) -> Result<()> {
+    let dir = vidbrief_viz::registry_dir();
+    if !dir.is_dir() {
+        println!("没有在跑的查看服务(登记目录 {} 不在)", dir.display());
+        return Ok(());
+    }
+    // 给了项目就只关挂着它的那些:按目录或项目 id 认
+    let want = if project.is_empty() {
+        None
+    } else {
+        Some(
+            std::path::Path::new(project)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(project)),
+        )
+    };
+
+    let mut stopped = 0usize;
+    let mut skipped = 0usize;
+    let mut stale = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let port = status.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+        let pid = status.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+        if port == 0 {
+            let _ = std::fs::remove_file(&path);
+            stale += 1;
+            continue;
+        }
+
+        if let Some(want) = &want {
+            let hit = status["mounts"].as_array().is_some_and(|list| {
+                list.iter().any(|m| {
+                    let root = m.get("root").and_then(|r| r.as_str()).unwrap_or("");
+                    let id = m.get("id").and_then(|r| r.as_str()).unwrap_or("");
+                    std::path::Path::new(root)
+                        .canonicalize()
+                        .map(|c| &c == want)
+                        .unwrap_or(false)
+                        || std::path::Path::new(id) == want.as_path()
+                })
+            });
+            if !hit {
+                skipped += 1;
+                continue;
+            }
+        }
+
+        match vidbrief_viz::post_control(port, "@shutdown", &serde_json::json!({})) {
+            Ok(_) => {
+                println!("已关掉     pid {pid} · 端口 {port}");
+                stopped += 1;
+            }
+            Err(e) => {
+                // 端口没人应:那一份是**陈旧登记**(进程早没了),清掉它
+                println!("已经不在   pid {pid} · 端口 {port}({e:#})");
+                let _ = std::fs::remove_file(&path);
+                stale += 1;
+            }
+        }
+    }
+
+    match (stopped, skipped, stale) {
+        (0, 0, 0) => println!("没有在跑的查看服务"),
+        (0, n, _) if n > 0 => println!("没有挂着这个项目的服务(另有 {n} 份在跑,没动它们)"),
+        _ => println!("关掉 {stopped} 份(stale {stale} 份已清账)"),
+    }
+    Ok(())
 }
 
 // ── mcp ──────────────────────────────────────────────────────────────

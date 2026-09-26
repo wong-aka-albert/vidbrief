@@ -19,12 +19,14 @@ use crate::server::VidbriefServer;
 const DEFAULT_NEIGHBOR_WINDOW: f64 = 6.0;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectRef {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShotRef {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -36,6 +38,7 @@ pub struct ShotRef {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TranscriptQuery {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -48,6 +51,7 @@ pub struct TranscriptQuery {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,

@@ -147,5 +147,8 @@ MCP 服务走 **stdio**,由 agent 客户端把它拉起来(不占端口、不用
 - ✅ **M0** 数据模型定稿:JSON Schema + Rust 类型 + 目录骨架 + `vidbrief init`
 - ✅ **M1** 步 1 打通:`vidbrief-core` 差帧/密集区/抽帧 + `vidbrief-asr` 转录 + `vidbrief preprocess`
 - ✅ **M2** 时间线视图:四层共轴 + 视频回跳 + 本地查看服务
-- ✅ **M3** MCP 服务:stdio 传输 + 21 个工具 + 资源 + 提示模板 + 项目写锁
-- ⏳ **M4**(下一步)步 2 校准循环:对照表视图 + **在真实 agent 上联调**
+- ✅ **M3** MCP 服务:stdio 传输 + 工具组(现 24 件,速查见 [`skill/tools.md`](./skill/tools.md))+ 资源 + 提示模板 + 项目写锁
+- ✅ **M4** 步 2 校准循环:对照表视图 + **在真实 agent 上联调**(五轮;门的判据按核验状态定稿)
+- ✅ **M5** 步 3 总结:自主探索 + P4 实战打磨 + `get_guide` 说明书出口(真 agent 三轮)
+- ✅ **M6** 步 4 报告:`vidbrief-report` + `build_report` + P5;报告页(两级内容 + 时间轴浮层)+ `report.md` 导出
+- ⏳ **M7**(下一步)加固:增量重跑、失败重试、批量、性能、进度通知、外挂接口

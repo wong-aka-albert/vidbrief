@@ -50,6 +50,48 @@ pub fn serve_and_open_table(opened: &OpenProject, open_browser: bool) -> Result<
     Ok((path, url))
 }
 
+/// 报告页版本:渲染 `04_report/report.html` + 起服务 + (可选)打开浏览器。
+///
+/// 与上面两条**同一道工序**:报告页也要播视频(点锚点回跳),`file://` 下拖不动。
+/// 只渲染、不落数据 —— 数据是 `crate::report::build_report` 的活。
+///
+/// 第三个返回值是**锚点过期**清单(见 [`crate::report::stale_anchors`]):
+/// 这条路正是"材料改过之后再看一眼旧报告",所以它是唯一需要报这件事的入口。
+pub fn serve_and_open_report(
+    opened: &OpenProject,
+    open_browser: bool,
+) -> Result<(PathBuf, String, Vec<String>)> {
+    let stale = match vidbrief_project::Report::load(&opened.layout().report_json()) {
+        Ok(report) => crate::report::stale_anchors(opened, &report),
+        // 报告数据还没有/读不动 —— 下面渲染那步会给出更准的报错
+        Err(_) => Vec::new(),
+    };
+    // 这条路是"起服务 + 开着视频看页面",图用相对路径就够(素材就在项目里)
+    let path = vidbrief_report::html::render_report(
+        opened.layout(),
+        &stale,
+        vidbrief_report::ImageMode::Relative,
+    )?;
+    let url = serve(
+        opened,
+        vidbrief_project::layout::REPORT_HTML_FILE,
+        open_browser,
+    )?;
+    Ok((path, url, stale))
+}
+
+/// 起本地服务 + 挂载项目 + (可选)打开浏览器,返回浏览器 URL。
+///
+/// **给同一 crate 里的渲染动作共用**(报告页在 `crate::report` 里渲染)——
+/// "起服务"这件事只有一处实现,不然迟早有一个人忘了 `mount`。
+pub(crate) fn serve_view(
+    opened: &OpenProject,
+    view_rel: &str,
+    open_browser: bool,
+) -> Result<String> {
+    serve(opened, view_rel, open_browser)
+}
+
 /// 起本地服务 + 挂载项目 + (可选)打开浏览器,返回浏览器 URL。
 fn serve(opened: &OpenProject, view_rel: &str, open_browser: bool) -> Result<String> {
     vidbrief_viz::mount(opened.id(), opened.layout().root())?;

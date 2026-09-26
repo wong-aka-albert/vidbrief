@@ -76,6 +76,47 @@ pub fn frame_at(video: &Path, t: f64, width: u32, height: u32) -> Result<Vec<u8>
     Ok(out)
 }
 
+/// **这一帧是不是纯色**(切黑 / 片尾淡出 / 纯色占位)。
+///
+/// 抽帧之前先花一次小解码看一眼。用途:纯色帧**照样截下来,但会被预标成弃用**
+/// (见 `pipeline::extract_shots`)—— 省的是 agent 的注意力,不是材料:
+/// 实测 16 分钟的视频末尾切黑,算法当关键帧截了一张,agent 得为它花一次调用然后写
+/// 「画面无法确认」(技术债表里那条"纯色帧没有检测",第三次撞见同一现象)。
+///
+/// **为什么不是"干脆不截"**(实测改的口径):`fixtures/test_sample.mp4` 的三个切换点
+/// 就是纯色帧 —— 不截的话"切换点必须命中"这条 M1 验收标准当场作废。
+/// **一次画面切换是事件,黑屏也是那个事件的证据**,丢掉图等于丢掉事件。
+///
+/// 判据是纯函数([`FrameFeature::is_flat`]),这里只负责把像素拿回来 ——
+/// 采样宽度比正式截图小得多(统计量不需要分辨率,而解码是按秒定位的,不按像素数)。
+///
+/// **只给步 1 的自动截图用**。`extract_shot`(点名要某一刻)不拦:那是明确点的菜,
+/// 给出来由 agent 自己判 —— 悄悄地不给,比给一张黑图更坏。
+pub fn flatness_at(video: &Path, t: f64) -> Result<Flatness> {
+    const SAMPLE_WIDTH: u32 = 320;
+    // 16:9 只是给 ffmpeg 一个尺寸;统计量对高度不敏感(逐像素扫,按实际像素数归一)
+    const SAMPLE_HEIGHT: u32 = 180;
+
+    let pixels = frame_at(video, t, SAMPLE_WIDTH, SAMPLE_HEIGHT)?;
+    let feature = crate::feature::FrameFeature::from_rgb24(&pixels, SAMPLE_WIDTH, SAMPLE_HEIGHT);
+    Ok(Flatness {
+        luma_stddev: feature.luma_stddev(),
+        dominant_share: feature.dominant_share(),
+        flat: feature.is_flat(),
+    })
+}
+
+/// 纯色体检的结果。数字都带出来,是为了让"为什么没截这一张"能写进日志。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flatness {
+    /// 亮度标准差(0–255 刻度)。
+    pub luma_stddev: f64,
+    /// 最挤的那个通道 bin 的占比(0–1)。
+    pub dominant_share: f64,
+    /// 是不是纯色(判据见 [`FrameFeature::is_flat`])。
+    pub flat: bool,
+}
+
 /// 抽 `video` 在时刻 `t` 的那一帧,写到 `out`(JPEG)。
 pub fn extract_frame(video: &Path, t: f64, out: &Path, quality: ShotQuality) -> Result<()> {
     if !t.is_finite() || t < 0.0 {

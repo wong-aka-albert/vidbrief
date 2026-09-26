@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vidbrief 04_report/report.json",
+  "description": "报告数据 —— 报告渲染器的输入。两级内容:全局总结(summary)+ 局部知识点(topics,每条挂在时刻 t 上)。渲染链是数据为源:report.html 从它渲染、report.md 是它的导出视图(两侧都是投影,判据在这份文件)。设计见 docs/DESIGN.md §8 与 devlog [260926-07]。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generated_at", "summary", "topics"],
+  "properties": {
+    "generated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "style": {
+      "type": "object",
+      "description": "这份报告是按什么风格做的(用户要什么就填什么)。**新报告一律要有**;M6 之前产出的旧数据没有这一栏,所以不列入 required",
+      "additionalProperties": false,
+      "required": ["granularity", "tone"],
+      "properties": {
+        "preset": {
+          "type": "string",
+          "enum": ["quick", "teaching", "story", "review", "exec", "custom"],
+          "description": "风格轮廓:快扫版 / 教学版 / 故事版 / 元组版 / 汇报版 / 自定义。**新报告一律要有**;这一栏加进来之前的旧数据可能没有。**它决定怎么填** —— 条数、每条骨架、详略、证据密度;定义见 skill/styles.md 与 get_guide(step=\"styles\")"
+        },
+        "granularity": {
+          "type": "string",
+          "enum": ["brief", "standard", "detailed"],
+          "description": "知识粒度:brief 概括 / standard 标准 / detailed 详细。它同时决定条数与篇幅的档位"
+        },
+        "tone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "语言风格(自由文本):大白话 / 诙谐 / 讲故事 / 行业腔…… 口味穷举不了,但必须写出来"
+        },
+        "notes": {
+          "type": "string",
+          "description": "用户还有别的交代:给谁看、要不要举例子、要不要结论先行。没交代就不给"
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "全局总结(markdown):主旨、结构、脉络 —— 对整支视频的总述。允许为空(还没写)"
+    },
+    "topics": {
+      "type": "array",
+      "description": "局部知识点,按 t 升序。允许为空",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "t", "title", "body", "shots", "segments", "sources", "verify"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "项目内唯一,从 1 起"
+          },
+          "t": {
+            "type": "number",
+            "minimum": 0,
+            "description": "锚点:视频内时刻(秒)。点它 → 时间轴定位;浮层也挂在这儿"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "一句话标题"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "解析正文(markdown):整理上下文逻辑、阐述关键概念。不是复述转录"
+          },
+          "shots": {
+            "type": "array",
+            "description": "关联截图。空数组 = 这条不挂图",
+            "items": {
+              "$ref": "#/$defs/shot_id"
+            }
+          },
+          "segments": {
+            "type": "array",
+            "description": "关联转录段 id(可点回原文)。空数组 = 不指段",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "verify": {
+            "type": "array",
+            "description": "待核验:读的人该回头核一下的点。**画面看不清但结论靠它的数字必须写在这儿**(不许静默略过)。空数组 = 这条没有要核的",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "sources": {
+            "type": "array",
+            "description": "来源:讲者原话与外部补充分开记。空数组 = 还没标来源(渲染时会显著提示)",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "segment", "quote"],
+                  "properties": {
+                    "kind": { "const": "speaker" },
+                    "segment": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "转录段 id(quote 在该段的当前文本里找得到)"
+                    },
+                    "quote": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "照抄的一句转录原文 —— 与 ShotCheck.evidence 同一条规矩"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "title", "url"],
+                  "properties": {
+                    "kind": { "const": "external" },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "这条补充说的大意(一句话)"
+                    },
+                    "url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "出处链接。页面上必须能点回去"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "shot_id": {
+      "type": "string",
+      "pattern": "^s[0-9]{3,}$"
+    }
+  }
+}

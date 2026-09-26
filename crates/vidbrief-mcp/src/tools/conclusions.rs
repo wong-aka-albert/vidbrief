@@ -1,8 +1,11 @@
 //! D 组:结论回写(`record_shot_check` / `apply_corrections` / `write_note` /
-//! `write_summary` / `write_report_md`)。
+//! `write_summary`)。
 //!
 //! 设计见 `docs/DESIGN.md` §6.1 —— **工具不判断对错,只搬运与保存。**
 //! 这几个是"agent 的判断落成文件"的唯一入口;所有写入都要先拿到项目写锁。
+//!
+//! 步 4(报告)不在这里:它落在 `tools/report.rs` —— 数据、页面、导出是一次动作
+//! (见 devlog [260926-07] 的"数据为源")。
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -68,12 +71,18 @@ impl From<CorrectionTypeArg> for CorrectionType {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecordShotCheckParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
     /// 截图 id,形如 `s007`(也接受纯数字 `7`)。
     pub shot_id: String,
-    /// 画面内容与同期转录是否相符。
+    /// 画面讲的与同期转录讲的**是不是同一件事**(主题 / 动作 / 对象)。
+    ///
+    /// **用字层面的差异不算不符** —— 转录把一个字听错了,那是转录纠错的活
+    /// (`apply_corrections`),不是"图文不符"。判据说白了:**这段话配这张图,
+    /// 读的人会不会觉得对不上**。(写死这一条的理由:两种读法都说得通的字段,
+    /// 迟早被不同 agent 填成两个样 —— 实测两个模型给过相反答案。)
     pub r#match: bool,
     /// 画面与语音在时间上是否对得上(画面切了但话还在讲上一张,就是 false)。
     pub audio_visual_sync: bool,
@@ -100,6 +109,7 @@ pub struct RecordShotCheckParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CorrectionItem {
     /// 转录段 id(`transcript.json` 里的序号,从 1 起)。
     pub segment_id: u32,
@@ -134,6 +144,7 @@ pub enum CorrectionOutcomeArg {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyCorrectionsParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -150,6 +161,7 @@ pub struct ApplyCorrectionsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteNoteParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -168,6 +180,7 @@ pub struct WriteNoteParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteDocParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -176,6 +189,7 @@ pub struct WriteDocParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ApproveParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -312,7 +326,10 @@ impl VidbriefServer {
                        \n\n\
                        **这道门前置着步 2 的确认**:校准没被用户确认过、或者确认之后\
                        材料又变过,这里会被挡住 —— 那时别绕,把状态给用户看,他点头后\
-                       调 `approve`。",
+                       调 `approve`。\
+                       \n\n\
+                       写下的这一份会被记进**内容底账**:出报告时工具拿它对一遍,\
+                       确认「用户看到的那版总结,就是出报告用的那版」。",
         annotations(title = "写总结", read_only_hint = false, idempotent_hint = true)
     )]
     async fn write_summary(
@@ -324,7 +341,8 @@ impl VidbriefServer {
         let path = blocking(move || vidbrief_ops::write_summary(&mut opened, &md)).await?;
         Ok(attach_warning(
             text(format!(
-                "已写入 {}\n下一步是报告:写 report.md 用 write_report_md。",
+                "已写入 {}\n下一步是报告:把知识点整理好,用 `build_report` 落数据并出页面\
+                 (动手前取一次 `get_guide(step=\"build_report\")`)。",
                 path.display()
             )),
             slot.warning(),
@@ -385,25 +403,6 @@ impl VidbriefServer {
                     .map(|n| format!("\n理由:{n}"))
                     .unwrap_or_default()
             )),
-            slot.warning(),
-        ))
-    }
-
-    #[tool(
-        description = "写 `04_report/report.md`,并标记步 4 完成。\
-                       图片引用请用相对路径 `04_report/assets/…`(报告 HTML 会去那儿找);\
-                       **图表化 HTML 还没实现**(见 DESIGN §13 的 M6),这一步只落 Markdown。",
-        annotations(title = "写报告", read_only_hint = false, idempotent_hint = true)
-    )]
-    async fn write_report_md(
-        &self,
-        Parameters(p): Parameters<WriteDocParams>,
-    ) -> Result<CallToolResult, CallToolResult> {
-        let (mut opened, slot) = self.open_write(&p.project_id).await?;
-        let md = p.md;
-        let path = blocking(move || vidbrief_ops::write_report_md(&mut opened, &md)).await?;
-        Ok(attach_warning(
-            text(format!("已写入 {}", path.display())),
             slot.warning(),
         ))
     }

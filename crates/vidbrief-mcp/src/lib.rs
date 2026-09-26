@@ -56,6 +56,11 @@ pub fn serve_stdio() -> anyhow::Result<()> {
     runtime.block_on(async {
         use rmcp::ServiceExt as _;
 
+        // **服务跑在别的进程里**(2026-09-26):从前查看服务是本进程里的一条线程,
+        // 于是"关掉页面"= 杀掉工具自己 —— 而它可能就是 agent 的会话进程。
+        // 现在第一次要视图时 spawn 一份 `vidbrief serve`,页面与它同生共死,不连坐。
+        vidbrief_ops::use_separate_process();
+
         let server = VidbriefServer::new();
         // 页面上的按钮要能落到这个进程里执行 —— **用同一份 State**(同一把写锁、
         // 同一张"见过的项目"表),并用同一个运行时排队,免得和工具调用各写各的
@@ -70,6 +75,15 @@ pub fn serve_stdio() -> anyhow::Result<()> {
             .waiting()
             .await
             .map_err(|e| anyhow::anyhow!("MCP 服务异常结束:{e}"))?;
+        // **断线要是一句明白话。** 宿主那边通常只会说「管道正在被关闭」—— 那是它自己的
+        // 传输层在说话,读的人(和 agent)看不出"谁断了、已经落盘的东西在不在"。
+        // stderr 不进协议通道,但它在日志里是**唯一**写着这件事的地方。
+        eprintln!(
+            "vidbrief: 客户端断开了连接(stdin 关闭),服务退出。\
+             已经返回过的每次调用都已落盘;没跑完的那一次不会补写。\
+             步 1 例外 —— 它的作业跑在**独立进程**里,会话走了它照样跑完;\
+             看 `<项目>/01_preprocess/run.json` 就知道它跑到哪儿了。"
+        );
         Ok(())
     })
 }

@@ -16,6 +16,7 @@ use crate::tools::materials::parse_shot_id;
 use crate::tools::attach_warning;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SupplementParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -31,6 +32,7 @@ pub struct SupplementParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractShotParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -41,6 +43,7 @@ pub struct ExtractShotParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DispositionSupplementsParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
@@ -50,6 +53,7 @@ pub struct DispositionSupplementsParams {
 
 /// 一条候选的结论。
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DispositionItem {
     /// 候选号(`find_supplement_candidates` 返回的那个 `id`)。
     pub id: u32,
@@ -63,6 +67,7 @@ pub struct DispositionItem {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateShotParams {
     #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
     pub project_id: String,
