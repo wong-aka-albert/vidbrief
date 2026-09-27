@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -409,12 +409,51 @@ pub fn url_for(id: &str, rel: &str) -> Result<String> {
     Ok(format!("http://127.0.0.1:{port}/{id}/{safe}"))
 }
 
+/// 同时伺候几条连接。
+///
+/// **为什么不写成一个循环**:从前这里是
+/// `for request in server.incoming_requests()` —— 一次只处理一个请求,而视频那种
+/// 响应是几十 MB 的**流式写**。实测(2026-09-27,真 agent 那轮跑完看报告页):
+/// 页面一打开,浏览器就去拉视频,同一个页面自己的其它请求(`report.html`、
+/// `report.json`、截图)全排在它后面 —— `project.json` 八秒都拿不到;
+/// 浏览器被切走时更糟:那条连接没人读、也没人关,服务端 `write` 就阻塞在那儿,
+/// 整个服务看着像死了,直到那条连接被放掉才恢复(实测:关掉浏览器侧连接后
+/// 0.02 秒就通了)。
+///
+/// 现在 N 条线程各自 `recv()`,谁手上堵住都不牵连别人。
+const WORKERS: usize = 4;
+
 fn serve_forever(server: Server) {
-    for request in server.incoming_requests() {
-        // 单个请求出错不能让服务死掉
-        if let Err(e) = handle(&server, request) {
-            eprintln!("查看服务:请求处理失败:{e:#}");
+    let server = Arc::new(server);
+    let mut workers = Vec::new();
+    for i in 0..WORKERS {
+        let server = Arc::clone(&server);
+        let spawned = std::thread::Builder::new()
+            .name(format!("vidbrief-view-worker-{i}"))
+            .spawn(move || {
+                loop {
+                    // 单个请求出错不能让服务死掉
+                    match server.recv() {
+                        Ok(request) => {
+                            if let Err(e) = handle(&server, request) {
+                                eprintln!("查看服务:请求处理失败:{e:#}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("查看服务:收请求失败:{e}");
+                            break;
+                        }
+                    }
+                }
+            });
+        match spawned {
+            Ok(worker) => workers.push(worker),
+            Err(e) => eprintln!("查看服务:工作线程起不来:{e}"),
         }
+    }
+    // 工作线程活着,这个线程就活着 —— 调用方靠它来判断"服务在不在跑"
+    for worker in workers {
+        let _ = worker.join();
     }
 }
 
@@ -905,5 +944,66 @@ mod tests {
             assert_eq!(Action::parse(action.name()), Some(action));
         }
         assert_eq!(Action::parse("delete_everything"), None, "不认识的必须被拒");
+    }
+
+    /// **一条慢慢读(或者干脆不读)的连接,不能把别的请求堵住。**
+    ///
+    /// 这是实测踩出来的:报告页一打开,浏览器就去拉视频(几十 MB 的流式响应),
+    /// 而服务当时一次只处理一个请求 —— 于是同一个页面的 `project.json`
+    /// 八秒都拿不到,看着像死了。判据就是"另一条请求照样很快回话"。
+    #[test]
+    fn a_slow_reader_does_not_block_other_requests() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpStream;
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("vidbrief-slow-reader-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 要大到"服务端一口气写不完":客户端不读,内核缓冲填满之后才有阻塞
+        std::fs::write(dir.join("big.bin"), vec![7u8; 8 * 1024 * 1024]).unwrap();
+        std::fs::write(dir.join("small.txt"), b"tinybody").unwrap();
+
+        let port = ensure_running().unwrap();
+        mount("slow", &dir).unwrap();
+
+        // 慢客户端:要大文件,只读一小口就不读了(浏览器被切走时的样子)
+        let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        slow.write_all(b"GET /slow/big.bin HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let mut sip = [0u8; 64];
+        let _ = slow.read(&mut sip);
+
+        // 这条应当很快回来(从前它要一直等到上面那条连接被放掉)
+        let mut fast = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        fast.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let started = Instant::now();
+        fast.write_all(b"GET /slow/small.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let mut answer = Vec::new();
+        while started.elapsed() < Duration::from_secs(5) {
+            let mut chunk = [0u8; 512];
+            match fast.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    answer.extend_from_slice(&chunk[..n]);
+                    if String::from_utf8_lossy(&answer).contains("tinybody") {
+                        break;
+                    }
+                }
+                Err(_) => break, // 读超时:没等到
+            }
+        }
+        let took = started.elapsed();
+
+        drop(slow);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            String::from_utf8_lossy(&answer).contains("tinybody"),
+            "那条慢连接把这条请求堵住了(等了 {took:?},只收到 {} 字节)",
+            answer.len()
+        );
+        assert!(took < Duration::from_secs(3), "不该等这么久:{took:?}");
     }
 }

@@ -31,6 +31,12 @@ pub const TRANSCRIPT_FILE: &str = "01_preprocess/transcript.json";
 pub const SHOTS_REL_DIR: &str = "01_preprocess/shots";
 pub const SHOTS_FILE: &str = "01_preprocess/shots.json";
 pub const PREPROCESS_TIMELINE_FILE: &str = "01_preprocess/timeline.html";
+/// 步 1 的**输入指纹**(源视频 sha256 + 抽帧参数 + 模型 + 口径版本)。
+///
+/// 增量重跑靠它判断"这一步要不要重算":指纹逐项相同 → 不重算、也不作废成果
+/// (尤其那批看图结论与核验戳 —— 重跑一次就全清,而校正是项目里最贵的活)。
+/// 它是**记录**不是判据:判据永远是当场重算的那一份(见 `vidbrief-ops::inputs`)。
+pub const PREPROCESS_INPUTS_FILE: &str = "01_preprocess/inputs.json";
 
 // ── 02_calibrate/ ───────────────────────────────────────────────────
 pub const CALIBRATE_DIR: &str = "02_calibrate";
@@ -50,6 +56,10 @@ pub const SUMMARY_DIR: &str = "03_summary";
 pub const AGENT_LOG_FILE: &str = "03_summary/agent_log.md";
 pub const NOTES_REL_DIR: &str = "03_summary/notes";
 pub const SUMMARY_FILE: &str = "03_summary/summary.md";
+/// 步 3 的**结构化产物**:分段(`sections.json`)。
+///
+/// 报告页由它组装 —— 渲染那一步**不再需要模型给任何数据**(见 `crate::sections`)。
+pub const SUMMARY_SECTIONS_FILE: &str = "03_summary/sections.json";
 /// 步 3 的二次补图。
 pub const SHOTS_EXTRA2_REL_DIR: &str = "03_summary/shots_extra2";
 
@@ -143,6 +153,10 @@ impl Layout {
     pub fn preprocess_timeline(&self) -> PathBuf {
         self.rel(PREPROCESS_TIMELINE_FILE)
     }
+    /// 步 1 的输入指纹(增量重跑的比较对象)。
+    pub fn preprocess_inputs(&self) -> PathBuf {
+        self.rel(PREPROCESS_INPUTS_FILE)
+    }
 
     // ── 02_calibrate/ ───────────────────────────────────────────────
     pub fn calibrate_dir(&self) -> PathBuf {
@@ -185,6 +199,10 @@ impl Layout {
     }
     pub fn summary_md(&self) -> PathBuf {
         self.rel(SUMMARY_FILE)
+    }
+    /// 分段的落点(步 3 的结构化产物;报告页从它组装)。
+    pub fn summary_sections(&self) -> PathBuf {
+        self.rel(SUMMARY_SECTIONS_FILE)
     }
     pub fn shots_extra2_dir(&self) -> PathBuf {
         self.rel(SHOTS_EXTRA2_REL_DIR)
@@ -297,6 +315,7 @@ mod tests {
             TRANSCRIPT_FILE,
             SHOTS_FILE,
             PREPROCESS_TIMELINE_FILE,
+            PREPROCESS_INPUTS_FILE,
             TRANSCRIPT_FIXED_FILE,
             TRANSCRIPT_DIFF_FILE,
             SUPPLEMENT_REQUESTS_FILE,

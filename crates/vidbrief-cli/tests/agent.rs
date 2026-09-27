@@ -418,7 +418,7 @@ fn p4_summarize_video_tools_all_answer() {
     // 报错要说清**还差哪一条**,而且**不该把人扯进来**(那是模型自己的活)。
     let blocked = client.call_tool(
         "write_summary",
-        json!({"project_id": proj, "md": "# 总结\n"}),
+        json!({"project_id": proj, "title": "总结", "md": "# 总结\n"}),
     );
     assert!(tool_failed(&blocked), "还有没核验的就写总结,该被挡住:{blocked}");
     let blocked_text = first_text(&blocked);
@@ -482,7 +482,7 @@ fn p4_summarize_video_tools_all_answer() {
 
     client.tool_text(
         "write_summary",
-        json!({"project_id": proj, "md": "# 总结\n\n这一段是结果积累充分后的第一段运行。[s001 @0:06]\n"}),
+        json!({"project_id": proj, "title": "总结", "md": "# 总结\n\n这一段是结果积累充分后的第一段运行。[s001 @0:06]\n"}),
     );
     let after_auto = as_json(&client.tool_text("get_project", json!({"project_id": proj})));
     assert_eq!(
@@ -505,7 +505,7 @@ fn p4_summarize_video_tools_all_answer() {
             "evidence_quote": "为什么我们经常说提前进入这一段",
         }),
     );
-    let waiting = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v2\n"}));
+    let waiting = client.call_tool("write_summary", json!({"project_id": proj, "title": "总结", "md": "# 总结 v2\n"}));
     assert!(tool_failed(&waiting), "有待拍板的项,该拦:{waiting}");
     let waiting_text = first_text(&waiting);
     assert!(waiting_text.contains("等人拍板"), "{waiting_text}");
@@ -520,7 +520,7 @@ fn p4_summarize_video_tools_all_answer() {
     assert!(approved.contains("门开了"), "该说清现在能干什么:{approved}");
     client.tool_text(
         "write_summary",
-        json!({"project_id": proj, "md": "# 总结 v2\n\n补图并拍板之后的版本。\n"}),
+        json!({"project_id": proj, "title": "总结", "md": "# 总结 v2\n\n补图并拍板之后的版本。\n"}),
     );
 
     // **拍板之后材料又动过 → 那次拍板不再覆盖新冒出来的项**
@@ -537,7 +537,7 @@ fn p4_summarize_video_tools_all_answer() {
             "evidence_quote": "大家看一下这样的图",
         }),
     );
-    let again = client.call_tool("write_summary", json!({"project_id": proj, "md": "# 总结 v3\n"}));
+    let again = client.call_tool("write_summary", json!({"project_id": proj, "title": "总结", "md": "# 总结 v3\n"}));
     assert!(tool_failed(&again), "拍板之后又冒出新的待拍板项,该重新拦:{again}");
     let again_text = first_text(&again);
     assert!(again_text.contains("等人拍板"), "{again_text}");
@@ -547,7 +547,7 @@ fn p4_summarize_video_tools_all_answer() {
     client.tool_text("approve", json!({"project_id": proj, "note": "用户说就这样"}));
     client.tool_text(
         "write_summary",
-        json!({"project_id": proj, "md": "# 总结 v3\n\n最终版。\n"}),
+        json!({"project_id": proj, "title": "总结", "md": "# 总结 v3\n\n最终版。\n"}),
     );
 
     // 步 3 该被标上了 —— 用户靠这个知道走到哪了

@@ -17,7 +17,7 @@
 pub mod html;
 pub mod md;
 
-pub use html::{render_report, render_report_html};
+pub use html::{Notices, render_report, render_report_html};
 pub use md::{export_markdown, write_markdown};
 
 /// **图怎么进产物** —— 两个投影共用这一档。

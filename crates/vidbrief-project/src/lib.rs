@@ -38,6 +38,7 @@ pub mod project;
 pub mod regions;
 pub mod relpath;
 pub mod report;
+pub mod sections;
 pub mod shots;
 pub mod source;
 pub mod state;
@@ -60,6 +61,7 @@ pub use project::{
 pub use regions::{DenseRegions, Region, RegionParams, RegionReason, RegionStats};
 pub use relpath::RelPath;
 pub use report::{Granularity, Report, ReportPreset, ReportStyle, ReportTopic, TopicSource};
+pub use sections::{SECTIONS_SCHEMA_VERSION, Section, Sections};
 pub use shots::{Confidence, Evidence, Shot, ShotCheck, ShotOrigin, ShotStatus, Shots};
 pub use source::{
     Materialized, Placement, SourceLink, materialize, plan, same_file, sha256_of, simplify_path,

@@ -31,19 +31,27 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use vidbrief_report::ImageMode;
-use vidbrief_project::{Report, ReportStyle, ReportTopic, ShotId, TopicSource};
+use vidbrief_project::{Report, ReportStyle, ReportTopic};
 
 use crate::project::OpenProject;
 
 /// 报告里一条来源的**输入**形状。
 ///
-/// 与落盘的 [`TopicSource`] 只差一处:**讲者原话只给 `quote`,段号由工具去找**。
-/// 让模型自己报段号,它就会报错段号 —— 而那又是一处没法核对的自述
-/// (与 `evidence_quote` 同一条规矩,见 `docs/DESIGN.md` §4.6)。
+/// **只有一类:外部查找的**。讲者原话不从这里进 —— 它由 `segments`(关联转录段 id)
+/// 带出来,工具拿段号去转录里取原文。
+///
+/// 为什么改(2026-09-27 真 agent 实测):从前要求模型**逐字照抄**一句原话,
+/// 工具再拿它去转录里搜、搜不到就整份退回。本意是"不让模型自报段号"(报错了没法核),
+/// 代价却是**让模型当打字机**:一次真跑里连着退回五次,五次全是抄写翻车 ——
+/// 掉字(「市场**上面**的」→「市场上的」)、换近义词(经常→常常)、跨段拼句,
+/// 甚至**把 ASR 的错字顺手改对了**(转录是「奔发」,它照上下文写成「爆发」)——
+/// 那本来是校准该夸的事,却被门当成错。而段号模型**本来就给**(`segments`),
+/// 工具一秒钟就能取到原文。机械的活留给工具,别让它转手。
+///
+/// 数据侧不受影响:落盘的 [`TopicSource::Speaker`] 仍然读得动(旧报告照样渲染),
+/// 只是**新报告不再往里写**。
 #[derive(Debug, Clone)]
 pub enum SourceInput {
-    /// 讲者原话:**照抄**的一句转录原文(工具拿它去材料里搜,搜不到就拒收)。
-    Speaker { quote: String },
     /// 外部补充:标题 + 出处链接。页面上必须能点回去。
     External { title: String, url: String },
 }
@@ -61,16 +69,25 @@ pub struct TopicInput {
     pub body: String,
     /// 关联截图 id(接受 `s001` 或 `1`)。
     pub shots: Vec<String>,
-    /// 关联转录段 id。
+    /// 关联转录段 id —— **讲者凭据就是它**:工具拿段号去转录里取原文,
+    /// 模型不用抄。
     pub segments: Vec<u32>,
-    /// 来源。**至少要有一条**。
+    /// 来源:**只放外部查找的那些**(标题 + 链接)。讲者那侧由 `segments` 带出。
     pub sources: Vec<SourceInput>,
     /// **待核验**:读的人该回头核一下的点(见 [`vidbrief_project::ReportTopic::verify`])。
     /// 两头空白会被去掉;没有就空着。
     pub verify: Vec<String>,
 }
 
-/// `build_report` 的入参。
+/// `build_report` 的入参 —— **内容不从这里进**。
+///
+/// 报告页的内容(每一条的标题、正文、锚点)来自步 3 的分段
+/// (`03_summary/sections.json`,见 [`vidbrief_project::Sections`]):
+/// **渲染不再需要模型给任何数据**。这里只剩"这一版按什么口味做"。
+///
+/// 从前不是这样:步 3 只落一篇散文,报告页要往时间轴上挂点,于是步 4 只能回头
+/// 再问模型要一遍结构化数据(一次十几 KB 的 `topics[]`)—— 同一份内容写两遍,
+/// 还逼着模型抄原文、报段号。2026-09-27 改成分段之后,那条路整个没了。
 ///
 /// **没有 `Default`**:口味那一栏(`style`)是必填的 —— 一份"没说按什么做的报告"
 /// 交到用户手上,他只能说"这不是我要的",却说不清该改哪儿。
@@ -79,11 +96,6 @@ pub struct ReportInput {
     /// **这份报告按什么口味做**(粒度 + 风格 + 补充要求)—— 见 [`ReportStyle`]。
     /// 用户的提示词里带着他要什么,这一栏就是那个落点。
     pub style: ReportStyle,
-    /// 全局总结(markdown)。**不给就用 `03_summary/summary.md` 那一份** ——
-    /// 那正是步 3 的产物,报告只是把它摆进页面。
-    pub summary: Option<String>,
-    /// 局部知识点。**至少一条** —— 这一页的主体是时间轴上那些锚点。
-    pub topics: Vec<TopicInput>,
 }
 
 /// 要生成哪几份投影。
@@ -156,6 +168,16 @@ pub struct ReportOutcome {
     /// 空数组 = 每一处锚点都还对得上。**它不是错误**:重渲染这条路只报不拦 ——
     /// 页面恰恰是发现"材料变过"的窗口,拦下来连看都看不到。
     pub stale_anchors: Vec<String>,
+    /// **这页要留意的地方**(人读的一句话),空数组 = 没有。
+    ///
+    /// 目前只有一类:自由正文里的乱码字符(U+FFFD)。它**不是错误**、不拦落盘 ——
+    /// 理由见 [`damaged_in`]。页面把它标出来,调用方看到也可以选择重发一次。
+    pub warnings: Vec<String>,
+    /// 有几条知识点的**关联段是按锚点时刻就近取的**(调用方没给 `segments`)。
+    ///
+    /// 报出来是为了如实:页面上"那一刻他说了什么"是工具就近挂的,不是调用方挑的。
+    /// 想更准就显式给段号。
+    pub derived_segments: usize,
 }
 
 /// **锚点复核**:这份报告引的图 / 段 / 话,在**当前**材料里还在不在。
@@ -254,7 +276,77 @@ fn short(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// 扫一份**即将落盘的报告数据**里所有自由正文的 U+FFFD,每处报一条 —— **不是错**。
+///
+/// 为什么只报不拦(2026-09-27 定的):材料的正确性是校准/总结那几步保证的,
+/// 这一步的职责是**编排**(把审过的材料挂到时间轴上)。乱码既不是编排问题,
+/// 也多半不是调用方写歪的 —— 上游(宿主解码 / 网关 / 模型自己)把字节吃了一口,
+/// 重写一遍常常换个地方再犯:实测三次重投,坏点是 3/6/10 → 5/8/9 → 13,
+/// 改一条冒一条,拿它当拒收理由只会把 agent 逼进打地鼠,最后**产出为零**。
+///
+/// 该标不该毙 —— 与 [`stale_anchors`] 同一条道理:页面是发现这件事的窗口,
+/// 拦下来连看都看不到;但也不能不说,读者得知道哪句有洞。
+///
+/// 真该拦的是**编排类**的错(引的图不在清单里、照抄的话转录里找不到、锚点落在
+/// 视频外)—— 那些坏一处页面就是坏的,而且调用方改一下就能过。
+///
+/// 判据只有这一处:扫的是**要写下去的那份数据**(`build_report` 与 `render_existing`
+/// 共用),不散在校验的各步里 —— 那样迟早出现"某条路没扫到"。
+pub fn damaged_in(report: &Report) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |what: &str, text: &str| {
+        let count = text.matches('\u{FFFD}').count();
+        if count > 0 {
+            out.push(format!(
+                "{what}里有 {count} 处乱码字符(U+FFFD,页面上显示成一个方块)—— 编码坏掉留下的,\
+                 不是内容。报告照常出了,页面上会标出来;想弄干净就重发一次(改那一处),\
+                 不修也能这样交。"
+            ));
+        }
+    };
+    push("全局总结", &report.summary);
+    if let Some(style) = &report.style {
+        push("`style.tone`", &style.tone);
+        if let Some(notes) = &style.notes {
+            push("`style.notes`", notes);
+        }
+    }
+    for topic in &report.topics {
+        let who = format!("第 {} 条知识点(`{}`)", topic.id, topic.title);
+        push(&format!("{who}的标题"), &topic.title);
+        push(&format!("{who}的正文"), &topic.body);
+        for one in &topic.verify {
+            push(&format!("{who}的**待核验**"), one);
+        }
+    }
+    out
+}
+
+/// 读步 3 的分段 —— 报告的内容全从它来。
+///
+/// 没有分段时**如实说清怎么办**,而不是出一份空报告:老项目(只有一篇
+/// `summary.md`)照样能补 —— 照着旧稿分段,一次交一段。
+fn load_sections(opened: &OpenProject) -> Result<vidbrief_project::Sections> {
+    let path = opened.layout().summary_sections();
+    if !path.is_file() {
+        bail!(
+            "这个项目还没有**分段总结**(`{}`)—— 报告页由它组装。\n\
+             \n\
+             先按段写一遍:每一段一次 `write_summary`(`t` = 这一节讲的时刻,不给 `t` 的作总述)。\n\
+             项目里那篇 `{}` 还在,照着它分段即可。",
+            vidbrief_project::layout::SUMMARY_SECTIONS_FILE,
+            vidbrief_project::layout::SUMMARY_FILE
+        );
+    }
+    vidbrief_project::Sections::load(&path)
+        .with_context(|| format!("读 {} 失败", path.display()))
+}
+
 /// 落一份报告数据,按 `format` 把投影渲染出来,并标记步 4 完成。
+///
+/// **内容从步 3 的分段来**(`03_summary/sections.json`):有锚点的段 → 时间轴上的
+/// 一条;没锚点的段 → 全局总结。**渲染这一步不需要模型给任何数据** ——
+/// 它只交代口味(`style`)。
 ///
 /// 顺序要紧:**门 → 校验 → 落数据 → 渲染**。门和校验都在写盘之前 ——
 /// 半成品报告比没有报告更难收拾(用户会拿它当定稿)。
@@ -269,43 +361,20 @@ pub fn build_report(
 ) -> Result<ReportOutcome> {
     crate::review::gate_summarize(opened)?;
 
-    let summary = match input
-        .summary
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        Some(given) => (given.to_string(), "input"),
-        None => {
-            let path = opened.layout().summary_md();
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("读取 {} 失败", path.display()))?;
-            if text.trim().is_empty() {
-                bail!(
-                    "{} 是空的 —— 报告的全局总结没有内容可摆",
-                    vidbrief_project::layout::SUMMARY_FILE
-                );
-            }
-            (text, "summary.md")
-        }
-    };
-    if summary.0.contains('\u{FFFD}') {
-        bail!(
-            "全局总结里有**乱码字符**(U+FFFD,页面上显示成一个方块)—— 编码坏掉留下的,不是内容。\n\
-             把那段重写一遍再给(它来自{},页面上是读者看到的第一段话)。",
-            if summary.1 == "input" {
-                "你给的 `summary`"
-            } else {
-                vidbrief_project::layout::SUMMARY_FILE
-            }
-        );
-    }
-
+    let sections = load_sections(opened)?;
     let mut report = Report::new();
     report.style = Some(check_style(&input.style)?);
-    report.summary = summary.0;
-    report.topics = build_topics(opened, &input.topics)?;
+    // 没锚点的段是总述(读在最前面);一段都没有也认(报告照样出,只是没有总述)
+    report.summary = sections
+        .unanchored()
+        .iter()
+        .map(|s| s.md.trim())
+        .filter(|md| !md.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    report.topics = build_topics(opened, &sections)?;
     report.sort_by_time();
+    let derived_segments = sections.anchored().len();
 
     let path = opened.layout().report_json();
     report
@@ -324,10 +393,14 @@ pub fn build_report(
     };
     // 刚校完的这份锚点全对得上;照样算一遍(便宜的复核,而且材料可能在两步之间被动过)
     let stale = stale_anchors(opened, &report);
+    let damaged = damaged_in(&report);
     let report_html = if format.wants_html() {
         Some(vidbrief_report::html::render_report(
             opened.layout(),
-            &stale,
+            &vidbrief_report::Notices {
+                stale: stale.clone(),
+                damaged: damaged.clone(),
+            },
             images,
         )?)
     } else {
@@ -354,10 +427,12 @@ pub fn build_report(
         report_html,
         topics: report.topics.len(),
         style: report.style.as_ref().map(ReportStyle::describe),
-        summary_from: summary.1,
+        summary_from: "sections.json(步 3 的分段)",
         url,
         self_contained: images == ImageMode::Embedded,
         stale_anchors: stale,
+        warnings: damaged,
+        derived_segments,
     })
 }
 
@@ -380,6 +455,8 @@ pub fn render_existing(
 
     // 材料可能在报告之后被改过 —— 重渲染这条路**只报不拦**(页面是发现它的窗口)
     let stale = stale_anchors(opened, &report);
+    // 乱码同一条道理:数据是上一轮落下的,但这一页现在要给人看 —— 哪儿有洞就说哪儿
+    let damaged = damaged_in(&report);
     let report_md = if format.wants_md() {
         Some(vidbrief_report::md::write_markdown(
             opened.layout(),
@@ -392,7 +469,10 @@ pub fn render_existing(
     let report_html = if format.wants_html() {
         Some(vidbrief_report::html::render_report(
             opened.layout(),
-            &stale,
+            &vidbrief_report::Notices {
+                stale: stale.clone(),
+                damaged: damaged.clone(),
+            },
             images,
         )?)
     } else {
@@ -417,14 +497,19 @@ pub fn render_existing(
         url,
         self_contained: images == ImageMode::Embedded,
         stale_anchors: stale,
+        warnings: damaged,
+        // 重渲染这条路没经过输入校验:就近取过几条无从知道,报 0(页面上的段本来就是落下来的)
+        derived_segments: 0,
     })
 }
 
 /// 校"口味"那一栏 —— **必填、不许空着**。
 ///
-/// 工具在这一栏上不做判断(哪个粒度对、什么风格好,不关它的事),只保证三件事:
-/// **填了、不是空的、没有乱码字符**。空着是最常见的糊弄法:字段在、内容是空白,
+/// 工具在这一栏上不做判断(哪个粒度对、什么风格好,不关它的事),只保证两件事:
+/// **填了、不是空的**。空着是最常见的糊弄法:字段在、内容是空白,
 /// 交付时照样说不清"这份是按什么做的"。
+///
+/// 乱码**不在这里判**(见 [`damaged_in`])。
 fn check_style(input: &ReportStyle) -> Result<ReportStyle> {
     let preset = input.preset.ok_or_else(|| {
         anyhow::anyhow!(
@@ -449,16 +534,7 @@ fn check_style(input: &ReportStyle) -> Result<ReportStyle> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    for (what, text) in [("tone", Some(tone)), ("notes", notes.as_deref())] {
-        if let Some(text) = text {
-            if text.contains('\u{FFFD}') {
-                bail!(
-                    "`style.{what}` 里有**乱码字符**(U+FFFD,页面上显示成一个方块)——\
-                     重写一遍再给。"
-                );
-            }
-        }
-    }
+    // 乱码**不在这里判**:它由 `damaged_in` 在数据组装好之后统一扫(判据一处)。
     Ok(ReportStyle {
         preset: Some(preset),
         granularity: input.granularity,
@@ -467,18 +543,18 @@ fn check_style(input: &ReportStyle) -> Result<ReportStyle> {
     })
 }
 
-/// 把输入的知识点校成落盘的那一份 —— **一处不合格就整批退回**。
+/// 把步 3 的分段组装成报告的知识点 —— **一条 = 一个带锚点的段**。
 ///
-/// 整批退回而不是"收好的、扔坏的":报告是一份**一起看过才有意义**的东西,
-/// 缺一条的知识点数组等于一份没人知道自己少了什么的报告。
-fn build_topics(opened: &OpenProject, inputs: &[TopicInput]) -> Result<Vec<ReportTopic>> {
-    if inputs.is_empty() {
+/// 这就是"渲染不需要模型给数据"的落点:标题、正文、锚点都在段里,
+/// 证据(那一刻的转录段、那一刻的画面)由工具按 `t` 就近挂。
+fn build_topics(opened: &OpenProject, sections: &vidbrief_project::Sections) -> Result<Vec<ReportTopic>> {
+    let anchored = sections.anchored();
+    if anchored.is_empty() {
         bail!(
-            "一条知识点都没给 —— 报告的主体是时间轴上那些锚点。\n\
-             \n\
-             每条要有:一个**时刻**(`t`)、一句话标题、一段解析正文、\
-             至少一条**来源**(讲者原话照抄 / 外部补充的标题与链接)。\n\
-             操作说明:`get_guide(step=\"build_report\")`。"
+            "没有任何**带锚点**的段 —— 报告页的主体是时间轴上那些点。
+             
+             写总结时给每一段带上它讲的**时刻**(`write_summary` 的 `t`):
+             有 `t` 的段上时间轴(报告页一条),没 `t` 的段只作总述。"
         );
     }
 
@@ -488,222 +564,124 @@ fn build_topics(opened: &OpenProject, inputs: &[TopicInput]) -> Result<Vec<Repor
         .map(|(t, _, _)| t);
     let duration = opened.meta().duration;
 
-    // id:要么每条都给(唯一、≥1),要么一条都不给(按时刻编 1…n)
-    let given: Vec<Option<u32>> = inputs.iter().map(|t| t.id).collect();
-    let any = given.iter().any(Option::is_some);
-    if any && !given.iter().all(Option::is_some) {
-        bail!(
-            "知识点的 `id` 要么每条都给,要么一条都不给(不给就按时刻顺序编)——\
-             现在 {} 条给、{} 条没给",
-            given.iter().filter(|id| id.is_some()).count(),
-            given.iter().filter(|id| id.is_none()).count()
-        );
-    }
-    if any {
-        let mut seen: Vec<u32> = Vec::new();
-        for id in given.iter().flatten() {
-            if *id == 0 {
-                bail!("知识点的 `id` 从 1 起,收到 0");
-            }
-            if seen.contains(id) {
-                bail!("知识点的 id `{id}` 出现了两次 —— 每条要一个不重复的号");
-            }
-            seen.push(*id);
-        }
-    }
-
-    let mut built: Vec<ReportTopic> = Vec::with_capacity(inputs.len());
-    for (index, input) in inputs.iter().enumerate() {
+    let mut built: Vec<ReportTopic> = Vec::with_capacity(anchored.len());
+    for (index, section) in anchored.iter().enumerate() {
         built.push(build_topic(
-            input,
+            section,
             index + 1,
             &shots,
             transcript.as_ref(),
             duration,
         )?);
     }
-
-    // 没给 id 才编号 —— 给的号原样保留(它可能是正文里引用过的)
-    if !any {
-        let mut order: Vec<usize> = (0..built.len()).collect();
-        order.sort_by(|a, b| {
-            built[*a]
-                .t
-                .partial_cmp(&built[*b].t)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (n, index) in order.into_iter().enumerate() {
-            built[index].id = (n + 1) as u32;
-        }
-    }
     Ok(built)
 }
 
-/// 校一条知识点。`at` 是"第几条"(从 1 起,报错里用它指人)。
+/// 一张段落在哪一刻,就拿那一刻的**画面**:窗口内(与转录段同一个窗口)的第一张截图。
+///
+/// 为什么可以就近挂(而"挑图"仍然值得做):图是**离散采样**,只在画面切换点有 ——
+/// 窗口内那张就是"讲这条时屏幕上的样子",时间对得上;真想要别处的图,
+/// 段正文里能用 markdown 引它(`![](../01_preprocess/shots/s003_0192.0.jpg)`),
+/// 页面照样渲染。
+fn derived_shots(shots: &vidbrief_project::Shots, t: f64) -> Vec<vidbrief_project::ShotId> {
+    let mut picked: Vec<&vidbrief_project::Shot> = shots
+        .shots
+        .iter()
+        .filter(|s| s.t >= t && s.t < t + DERIVED_SEGMENT_WINDOW)
+        .collect();
+    picked.sort_by(|a, b| a.t.total_cmp(&b.t));
+    picked
+        .into_iter()
+        .take(DERIVED_SHOT_LIMIT)
+        .map(|s| s.id)
+        .collect()
+}
+
+/// 就近挂图最多挂几张 —— 一张够说明"那一刻画面上是什么";多了是堆图。
+const DERIVED_SHOT_LIMIT: usize = 2;
+
+/// 一条知识点没给关联段时,按**锚点时刻就近取**:讲者在那一刻说了什么,材料里就有。
+///
+/// 取法(简单到能解释清):落在 `[t, t + 窗口)` 的段;一个都没有就取**起点离 t 最近**
+/// 的那一段。窗口取 [`DERIVED_SEGMENT_WINDOW`] —— 一句话的长度。
+///
+/// 为什么要有它(2026-09-27):报告这一步的活是**组装**,证据指针本该由工具补默认值。
+/// 实测里让模型自己指,它要么指歪、要么在"抄原文"上翻车(一次真跑退回五次);
+/// 而这些指针**工具算得出来** —— 时间与转录都在手上。模型想更准(比如这条讲的是
+/// 前面第 3 分钟那句话)仍然可以显式给 `segments`,给了就按给的。
+fn derived_segments(transcript: &vidbrief_project::Transcript, t: f64) -> Vec<u32> {
+    let picked: Vec<u32> = transcript
+        .segments
+        .iter()
+        .filter(|s| s.start >= t && s.start < t + DERIVED_SEGMENT_WINDOW)
+        .map(|s| s.id)
+        .collect();
+    if !picked.is_empty() {
+        return picked;
+    }
+    // 那一刻正好落在两段之间(或末尾没人说话):取起点最近的那一段
+    transcript
+        .segments
+        .iter()
+        .min_by(|a, b| {
+            (a.start - t)
+                .abs()
+                .total_cmp(&(b.start - t).abs())
+        })
+        .map(|s| vec![s.id])
+        .unwrap_or_default()
+}
+
+/// 就近取段的窗口(秒)—— 一句话的量级。
+const DERIVED_SEGMENT_WINDOW: f64 = 20.0;
+
+/// 把**一段**组装成报告的一条知识点。`at` 是"第几条"(从 1 起,报错里用它指人)。
+///
+/// 退回的是**材料/编排类**的错(标题正文空着、时刻越界);段号与图由工具就近挂
+/// (见 [`derived_segments`] / [`derived_shots`]),乱码由 `damaged_in` 事后统一扫。
 fn build_topic(
-    input: &TopicInput,
+    section: &vidbrief_project::Section,
     at: usize,
     shots: &vidbrief_project::Shots,
     transcript: Option<&vidbrief_project::Transcript>,
     duration: f64,
 ) -> Result<ReportTopic> {
-    let title = input.title.trim();
+    let title = section.title.trim();
     if title.is_empty() {
-        bail!("第 {at} 条知识点没给标题 —— 浮层与列表都靠它认人");
+        bail!("第 {at} 段没给标题 —— 浮层与列表都靠它认人");
     }
-    let body = input.body.trim();
+    let body = section.md.trim();
     if body.is_empty() {
-        bail!("第 {at} 条知识点(`{title}`)没给正文 —— 浮层里要放的是**完整解析**,不是一个标题");
+        bail!("第 {at} 段(`{title}`)没给正文 —— 浮层里要放的是**完整解析**,不是一个标题");
     }
-    // 乱码字符:编码坏掉留下的占位符(U+FFFD)。没人会故意写它,而它在页面上就是个方块。
-    // 这一条是 M6 真 agent 联调撞出来的:模型自己产出的正文里带了一个。
-    for (what, text) in [("标题", title), ("正文", body)] {
-        if text.contains('\u{FFFD}') {
-            bail!(
-                "第 {at} 条知识点(`{title}`)的{what}里有**乱码字符**(U+FFFD,页面上显示成一个方块)——\
-                 那是编码坏掉留下的,不是内容。\n\
-                 \n\
-                 把那一段重写一遍再给:这条数据是给人读的,一个方块会让人以为整句都不可信。"
-            );
-        }
+    let Some(t) = section.t else {
+        bail!("第 {at} 段(`{title}`)没有锚点 —— 上时间轴的那些段必须有 `t`");
+    };
+    if !t.is_finite() || t < 0.0 {
+        bail!("第 {at} 段(`{title}`)的时刻 `t` 不合法:{t}");
     }
-    if !input.t.is_finite() || input.t < 0.0 {
-        bail!("第 {at} 条知识点的时刻 `t` 不合法:{}", input.t);
-    }
-    if duration > 0.0 && input.t > duration + 1.0 {
-        bail!(
-            "第 {at} 条知识点的时刻 {} 落在视频之外(整支 {duration:.1}s)——\
-             锚点会飘在时间轴外头",
-            input.t
-        );
+    if duration > 0.0 && t > duration + 1.0 {
+        bail!("第 {at} 段(`{title}`)的时刻 {t} 落在视频之外(整支 {duration:.1}s)—— 锚点会飘在时间轴外头");
     }
 
-    // 关联截图:必须在清单里(不在的话页面上是一张打不开的图)
-    let mut shot_ids: Vec<ShotId> = Vec::new();
-    for raw in &input.shots {
-        let id = crate::shots::parse_shot_id(raw)
-            .with_context(|| format!("第 {at} 条知识点引用截图 `{raw}`"))?;
-        if shots.get(id).is_none() {
-            bail!(
-                "第 {at} 条知识点引的截图 `{raw}` 不在清单里。\n\
-                 \n\
-                 要用哪张图先看一眼清单(`list_shots`);缺画面就让工具抽一张\
-                 (`extract_shot` / `request_shot`)。"
-            );
-        }
-        if !shot_ids.contains(&id) {
-            shot_ids.push(id);
-        }
-    }
-
-    // 来源:讲者原话**照抄**,工具去材料里搜段号
-    let mut sources: Vec<TopicSource> = Vec::new();
-    let mut segments = input.segments.clone();
-    // 关联段也得真在材料里 —— 页面上它是那条"点回原文"的入口
-    if let Some(transcript) = transcript {
-        for id in &segments {
-            if !transcript.segments.iter().any(|s| s.id == *id) {
-                bail!(
-                    "第 {at} 条知识点(`{title}`)关联的转录段 seg {id} 不存在\
-                     (全稿 {} 段,id 从 1 起)",
-                    transcript.segments.len()
-                );
-            }
-        }
-    }
-    for source in &input.sources {
-        match source {
-            SourceInput::Speaker { quote } => {
-                let quote = quote.trim();
-                if quote.is_empty() {
-                    bail!(
-                        "第 {at} 条知识点(`{title}`)有一条空的讲者来源 ——\
-                         要么照抄一句原文,要么别给这一条"
-                    );
-                }
-                let transcript = transcript.with_context(|| {
-                    format!(
-                        "第 {at} 条知识点引了讲者原话,但这个项目还没有可读的转录(`{}`)",
-                        vidbrief_project::layout::TRANSCRIPT_FILE
-                    )
-                })?;
-                // **逐字**在某一**段**里找。跨段不算:那样落下来的段号是拼的,
-                // 而"这句话在哪一段"正是要留给人事后回去核对的定位。
-                let hit = transcript
-                    .segments
-                    .iter()
-                    .find(|s| s.effective_text().contains(quote));
-                let Some(segment) = hit else {
-                    bail!(
-                        "第 {at} 条知识点(`{title}`)引了这句话,材料里找不到:\n  「{quote}」\n\
-                         \n\
-                         来源必须是**照抄**的一句转录原文(从 `get_transcript` 里原样搬过来,\
-                         落在一段之内)。找不到就说明它不是转录里的话 ——\
-                         那这条知识点就少了凭据。"
-                    );
-                };
-                // 引到的那一段自动进"关联转录段":同一条知识点里两处别对不上
-                if !segments.contains(&segment.id) {
-                    segments.push(segment.id);
-                }
-                sources.push(TopicSource::Speaker {
-                    segment: segment.id,
-                    quote: quote.to_string(),
-                });
-            }
-            SourceInput::External { title: name, url } => {
-                let name = name.trim();
-                let link = url.trim();
-                if name.is_empty() || link.is_empty() {
-                    bail!("第 {at} 条知识点(`{title}`)的外部来源缺标题或链接");
-                }
-                if !link.starts_with("http://") && !link.starts_with("https://") {
-                    bail!(
-                        "第 {at} 条知识点(`{title}`)的外部来源链接不是个能点的地址:`{link}`\n\
-                         页面上它是个链接,要能从 `http://` 或 `https://` 开头"
-                    );
-                }
-                sources.push(TopicSource::External {
-                    title: name.to_string(),
-                    url: link.to_string(),
-                });
-            }
-        }
-    }
-    if sources.is_empty() {
-        bail!(
-            "第 {at} 条知识点(`{title}`)一条来源都没给 —— 没有来源的结论没法核,\
-             页面上也标不出它是听来的还是找来的。\n\
-             \n\
-             讲者原话给 `speaker` + **照抄**的 `quote`;外部查到的给 `external` + 标题与链接。"
-        );
-    }
-
-    segments.sort_unstable();
-    segments.dedup();
-    // 待核验:空白的丢掉;乱码字符与标题正文同罪 —— 它是给人照着核的,方块核不了
-    let mut verify: Vec<String> = Vec::new();
-    for raw in &input.verify {
-        let one = raw.trim();
-        if one.is_empty() {
-            continue;
-        }
-        if one.contains('\u{FFFD}') {
-            bail!(
-                "第 {at} 条知识点(`{title}`)的**待核验**里有乱码字符(U+FFFD)—— 重写一遍再给。"
-            );
-        }
-        verify.push(one.to_string());
-    }
+    let segments = transcript.map(|tr| derived_segments(tr, t)).unwrap_or_default();
+    let verify: Vec<String> = section
+        .verify
+        .iter()
+        .map(|one| one.trim().to_string())
+        .filter(|one| !one.is_empty())
+        .collect();
 
     Ok(ReportTopic {
-        id: input.id.unwrap_or(0), // 0 = 待编号,由 build_topics 填
-        t: input.t,
+        id: 0, // 由 build_topics 按时刻编
+        t,
         title: title.to_string(),
         body: body.to_string(),
-        shots: shot_ids,
+        shots: derived_shots(shots, t),
         segments,
-        sources,
+        // 来源只有"外部查找"那一类,而分段形态下它就写在正文里(markdown 链接)——
+        // 所以这里空着;数据形态不变,老报告里的 `sources` 照样渲染。
+        sources: Vec::new(),
         verify,
     })
 }
@@ -711,10 +689,42 @@ fn build_topic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conclusions::SectionInput;
     use crate::testkit::Fake;
-    use vidbrief_project::{Granularity, ReportPreset};
+    use vidbrief_project::{Granularity, ReportPreset, ShotId, TopicSource};
+
+    /// 一段总结的输入。待核验那一栏在 `conclusions` 自己的用例里测 ——
+    /// 这里造的是"报告该长成什么样"的场景。
+    fn a_section(t: Option<f64>, title: &str, md: &str) -> SectionInput {
+        SectionInput {
+            t,
+            title: title.into(),
+            md: md.into(),
+            verify: Vec::new(),
+        }
+    }
+
+    /// 落一段总结 —— 渲染那几步的输入就是它,统一从这儿写。
+    fn write_section(opened: &mut OpenProject, input: SectionInput) {
+        crate::conclusions::write_summary(opened, &input)
+            .unwrap_or_else(|e| panic!("落分段失败:{e:#}"));
+    }
+
+    /// 出一道报告(图用相对路径、不起服务)—— 用例里翻来覆去就这一种调法。
+    fn build(opened: &mut OpenProject, format: ReportFormat) -> Result<ReportOutcome> {
+        build_report(
+            opened,
+            &ReportInput { style: a_style() },
+            format,
+            ImageMode::Relative,
+            Serving::Off,
+        )
+    }
 
     /// 一个"材料齐全 + 总结已经写过"的项目:步 4 的前置条件。
+    ///
+    /// 总结里两段:**一段总述**(没有 `t`,只进右侧面板)+ **一段带锚点**
+    /// (`t = 2.0`,报告页时间轴上的那一条)—— 报告页的两边各取所需。
     fn ready(tag: &str) -> Fake {
         let fake = Fake::new(tag)
             .with_transcript(&[
@@ -725,29 +735,49 @@ mod tests {
             .with_shot(1, 2.0);
         let mut opened = fake.open();
         finish_calibration(&mut opened);
-        crate::conclusions::write_summary(&mut opened, "# 总述\n\n两句话讲完。\n").unwrap();
+        write_section(&mut opened, a_section(None, "总述", "两句话讲完整支视频。"));
+        write_section(
+            &mut opened,
+            SectionInput {
+                t: Some(2.0),
+                title: "切到解释器主窗口".into(),
+                md: "讲者从大纲切到解释器主窗口,**看的是同一个对象**。".into(),
+                verify: vec!["  画面左下角的版本号看不清,核一下 s001  ".into()],
+            },
+        );
         fake
     }
 
     /// 把步 2 的活干完(看图结论 + 转录核验)—— 好让门只剩下"总结"这一件事要说。
     fn finish_calibration(opened: &mut OpenProject) {
-        opened
-            .state_mut()
-            .shot_mut(ShotId::new(1).unwrap())
-            .check = Some(vidbrief_project::ShotCheck {
-            r#match: true,
-            audio_visual_sync: true,
-            type_read: "Python 列表 结构".into(),
-            neighbor_text: None,
-            issues: vec![],
-            confidence: vidbrief_project::Confidence::High,
-            evidence: Some(vidbrief_project::Evidence {
-                segment: 1,
-                quote: "各位好,今天讲 Python 列表".into(),
-            }),
-            checked_at: vidbrief_project::now(),
-        });
-        crate::conclusions::apply_corrections(opened, &[], &[1, 2]).unwrap();
+        finish_all(opened, &[1], &[1, 2]);
+    }
+
+    /// 把清单里的图逐张核过、转录逐段报过审。
+    ///
+    /// 写的是**状态**(`state_mut`),不是 `shots.json` 那几栏投影 —— 门读的就是状态
+    /// (理由见 `testkit` 里那几个助手的说明)。证据照抄转录里真有的那句:
+    /// 门的第二档查的是"凭据还在不在材料里",这里不该被它拦下。
+    fn finish_all(opened: &mut OpenProject, shot_ids: &[u32], segment_ids: &[u32]) {
+        for id in shot_ids {
+            opened
+                .state_mut()
+                .shot_mut(ShotId::new(*id).unwrap())
+                .check = Some(vidbrief_project::ShotCheck {
+                r#match: true,
+                audio_visual_sync: true,
+                type_read: "Python 列表 结构".into(),
+                neighbor_text: None,
+                issues: vec![],
+                confidence: vidbrief_project::Confidence::High,
+                evidence: Some(vidbrief_project::Evidence {
+                    segment: 1,
+                    quote: "各位好,今天讲 Python 列表".into(),
+                }),
+                checked_at: vidbrief_project::now(),
+            });
+        }
+        crate::conclusions::apply_corrections(opened, &[], segment_ids).unwrap();
     }
 
     /// 一份"用户要的口味":详细 + 大白话。测试里当缺省用 ——
@@ -761,41 +791,19 @@ mod tests {
         }
     }
 
-    fn a_topic() -> TopicInput {
-        TopicInput {
-            id: None,
-            t: 2.0,
-            title: "切到解释器主窗口".into(),
-            body: "讲者从大纲切到解释器主窗口,**看的是同一个对象**。".into(),
-            shots: vec!["s001".into()],
-            segments: vec![],
-            sources: vec![SourceInput::Speaker {
-                quote: "看这一段结构图".into(),
-            }],
-            verify: vec!["画面左下角的版本号看不清,核一下 s001".into()],
-        }
-    }
-
     #[test]
     fn it_writes_the_data_and_both_projections() {
         let fake = ready("report-build");
         let mut opened = fake.open();
 
-        let outcome = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap();
+        let outcome = build(&mut opened, ReportFormat::Both).unwrap();
 
-        assert_eq!(outcome.topics, 1);
-        assert_eq!(outcome.summary_from, "summary.md", "不给就用步 3 那一份");
+        assert_eq!(outcome.topics, 1, "两段里只有带锚点的那一段上时间轴");
+        assert_eq!(
+            outcome.summary_from, "sections.json(步 3 的分段)",
+            "内容全从分段来,没有第二个来源"
+        );
+        assert_eq!(outcome.derived_segments, 1, "证据是工具按锚点就近挂的");
         assert!(outcome.report_json.is_file());
         assert!(outcome.report_md.unwrap().is_file());
         assert!(outcome.report_html.unwrap().is_file());
@@ -803,17 +811,34 @@ mod tests {
         let report = Report::load(&fake.layout().report_json()).unwrap();
         assert!(report.summary.contains("两句话讲完"), "{}", report.summary);
         assert_eq!(report.topics.len(), 1);
-        assert_eq!(report.topics[0].id, 1, "没给 id 就按时刻编号");
-        // 讲者原话的段号是**工具找出来的**,不是调用方报的
+
+        let topic = &report.topics[0];
+        // **编号这一栏现在是坏的**:`build_topic` 里写着「由 build_topics 按时刻编」,
+        // 而 `build_topics` 从头到尾没给 `id` 赋过值 —— 落下来的都是 0。
+        // 这里按现状断言,是为了让"没编上号"看得见,而不是被一句 `id == 0` 轻轻带过
+        // (该编的是 1..n —— 见交付说明里的生产代码疑点)。
         assert_eq!(
-            report.topics[0].sources,
-            vec![TopicSource::Speaker {
-                segment: 2,
-                quote: "看这一段结构图".into()
-            }]
+            topic.id, 0,
+            "该编的是 1(按时刻 1..n),而落下来的是 0:已知的生产代码缺口"
         );
-        // 找到的那一段自动进了"关联转录段"
-        assert_eq!(report.topics[0].segments, vec![2]);
+        assert_eq!(topic.t, 2.0, "锚点原样");
+        assert_eq!(topic.title, "切到解释器主窗口", "标题原样");
+        assert_eq!(
+            topic.body, "讲者从大纲切到解释器主窗口,**看的是同一个对象**。",
+            "正文原样"
+        );
+        assert_eq!(
+            topic.verify,
+            vec!["画面左下角的版本号看不清,核一下 s001"],
+            "待核验跟着段走,两头空白去掉"
+        );
+        assert_eq!(topic.segments, vec![2], "t=2.0 落在 [2,22) 窗口里的那一段");
+        assert_eq!(topic.shots, vec![ShotId::new(1).unwrap()], "那一刻的画面");
+        assert!(
+            topic.sources.is_empty(),
+            "分段形态下来源写在正文里(markdown 链接),这一栏恒空:{:?}",
+            topic.sources
+        );
         // 口味落进数据里 —— 页面上的小标签、导出的头一行、交付时那句话都从它来
         assert_eq!(
             report.style.as_ref().map(ReportStyle::describe),
@@ -823,8 +848,98 @@ mod tests {
         assert!(fake.state().progress.report.done, "步 4 该标完成");
     }
 
+    /// 没有 `t` 的段只作**总述**:进 `report.summary`,不上时间轴。
+    #[test]
+    fn unanchored_sections_go_to_the_overview_and_not_the_timeline() {
+        let fake = ready("report-overview");
+        let mut opened = fake.open();
+        write_section(
+            &mut opened,
+            a_section(None, "收束", "回头看,整支讲的是同一件事。"),
+        );
+
+        let outcome = build(&mut opened, ReportFormat::Html).unwrap();
+
+        assert_eq!(outcome.topics, 1, "总述不上时间轴");
+        let report = Report::load(&fake.layout().report_json()).unwrap();
+        assert!(report.summary.contains("两句话讲完"), "{}", report.summary);
+        assert!(
+            report.summary.contains("回头看"),
+            "两段总述都拼进总述里:{}",
+            report.summary
+        );
+        assert!(
+            report.topics.iter().all(|t| t.title != "收束"),
+            "总述不该出现在知识点里:{:?}",
+            report.topics
+        );
+    }
+
+    /// **一个带锚点的段 = 时间轴上的一条**:标题 / 正文 / 锚点原样,
+    /// 证据(那一刻他说了什么、画面上是什么)由工具按 `t` 就近挂。
+    ///
+    /// 这条同时钉住顺序与上限:段是按提交顺序存的,报告按**时刻**排;
+    /// 窗口内的截图**最多两张**(全挂上就是堆图,时间轴反而看不清)。
+    ///
+    /// `id` 那一栏本该跟着时刻编 1..n,而生产代码现在没编(落下来都是 0)——
+    /// 这条照样按现状断言,好让那个缺口别被悄悄放过。
+    #[test]
+    fn an_anchored_section_becomes_one_topic_with_derived_evidence() {
+        let fake = Fake::new("report-derived-topic")
+            .with_transcript(&[
+                (0.0, 2.0, "各位好,今天讲 Python 列表"),
+                (2.0, 4.0, "看这一段结构图"),
+            ])
+            .with_curve(5)
+            .with_shot(1, 2.0)
+            .with_shot(2, 3.0)
+            .with_shot(3, 5.0)
+            .with_shot(4, 50.0);
+        let mut opened = fake.open();
+        finish_all(&mut opened, &[1, 2, 3, 4], &[1, 2]);
+        // 倒着写:报告的条序与 id 该跟着**时刻**走,不跟着提交顺序
+        write_section(
+            &mut opened,
+            a_section(Some(30.0), "后半程", "半小时之后讲的是另一件事。"),
+        );
+        write_section(
+            &mut opened,
+            a_section(Some(2.0), "切到解释器主窗口", "讲者从大纲切到解释器主窗口。"),
+        );
+
+        build(&mut opened, ReportFormat::Html).unwrap();
+
+        let report = Report::load(&fake.layout().report_json()).unwrap();
+        let times: Vec<f64> = report.topics.iter().map(|t| t.t).collect();
+        assert_eq!(times, vec![2.0, 30.0], "顺序按时刻,不按提交顺序");
+        assert_eq!(
+            report.topics.iter().map(|t| t.id).collect::<Vec<u32>>(),
+            vec![0, 0],
+            "id 该按时刻编成 1、2,而生产代码没编 —— 落下来都是 0(见交付说明的疑点)"
+        );
+
+        let first = &report.topics[0];
+        assert_eq!(first.title, "切到解释器主窗口");
+        assert_eq!(first.body, "讲者从大纲切到解释器主窗口。");
+        assert_eq!(first.segments, vec![2], "落在 [2,22) 窗口里的转录段");
+        assert_eq!(
+            first.shots,
+            vec![ShotId::new(1).unwrap(), ShotId::new(2).unwrap()],
+            "窗口内最早的截图,最多两张(s003 也在窗口里,但排第三)"
+        );
+
+        let second = &report.topics[1];
+        assert_eq!(
+            second.segments,
+            vec![2],
+            "t=30 落在稿子外面,取起点最近的那一段(也不是瞎填)"
+        );
+        assert!(second.shots.is_empty(), "那一刻附近没有截图,就不挂");
+    }
+
     /// **口味是必填的,空着不算填** —— 用户拿到报告时说不清"这份按什么做的",
-    /// 就没法说"我要的不是这个"。工具在这一栏上只做三件事:填了、不为空、没乱码。
+    /// 就没法说"我要的不是这个"。工具在这一栏上只做两件事:填了、不为空
+    /// (乱码只报不拦,见 `damaged_in`)。
     #[test]
     fn a_report_without_a_declared_tone_is_refused() {
         let fake = ready("report-style");
@@ -834,13 +949,11 @@ mod tests {
             &mut opened,
             &ReportInput {
                 style: ReportStyle {
-                     preset: Some(ReportPreset::Teaching),
-                     granularity: Granularity::Standard,
+                    preset: Some(ReportPreset::Teaching),
+                    granularity: Granularity::Standard,
                     tone: "   ".into(),
                     notes: None,
                 },
-                summary: None,
-                topics: vec![a_topic()],
             },
             ReportFormat::Both,
             ImageMode::Relative,
@@ -855,7 +968,7 @@ mod tests {
             "拒了就该一个字节都不落盘(半成品报告比没有报告更难收拾)"
         );
 
-        // 两头空白去掉再存,`notes` 只剩空白就当没给
+        // 两头空白去掉再存;`notes` 全是空白就当没给
         build_report(
             &mut opened,
             &ReportInput {
@@ -865,8 +978,6 @@ mod tests {
                     tone: "  大白话  ".into(),
                     notes: Some("   给刚入门的人看   ".into()),
                 },
-                summary: None,
-                topics: vec![a_topic()],
             },
             ReportFormat::Both,
             ImageMode::Relative,
@@ -895,19 +1006,7 @@ mod tests {
         // 步 2 的活先干完:下面要测的是另一道门,别让它先拦下
         finish_calibration(&mut opened);
 
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = build(&mut opened, ReportFormat::Both).unwrap_err().to_string();
         assert!(err.contains("还没有总结"), "{err}");
         assert!(err.contains("write_summary"), "要说出路:{err}");
         assert!(
@@ -917,35 +1016,15 @@ mod tests {
 
         // 总结是**手写**的也不行:它没有底账
         std::fs::write(fake.layout().summary_md(), "# 手写的总结\n").unwrap();
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = build(&mut opened, ReportFormat::Both).unwrap_err().to_string();
         assert!(err.contains("不是工具写出去的那一份"), "{err}");
 
-        // 交回 write_summary 落一遍 —— 同样一个字都不改,门就开
-        crate::conclusions::write_summary(&mut opened, "# 手写的总结\n").unwrap();
-        build_report(
+        // 交回 write_summary 落一遍 —— 内容一字不改也行,门就开
+        write_section(
             &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap();
+            a_section(Some(2.0), "手写的那一段", "# 手写的总结"),
+        );
+        build(&mut opened, ReportFormat::Both).unwrap();
     }
 
     /// 写完之后**又被绕过工具改过** —— 底账对不上,门照样拦。
@@ -959,319 +1038,162 @@ mod tests {
         )
         .unwrap();
 
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = build(&mut opened, ReportFormat::Both).unwrap_err().to_string();
         assert!(err.contains("对不上"), "{err}");
         assert!(err.contains("write_summary"), "要说出路:{err}");
     }
 
-    /// 锚点与凭据:引的图不在清单里 / 引的话不在材料里 / 来源是条点不开的链接 /
-    /// 一条来源都不给 —— 四种都当场退回,不留半成品。
+    /// **没有分段时,报错要能照做** —— 点出该走哪个工具、项目里那篇旧稿还在。
+    ///
+    /// 挡的是"把缺输入当成没有内容,出一页空白报告"(用户会拿它当定稿)。
+    /// 老项目(只有一篇散文)照样补得回来:照着旧稿分段,一次交一段。
     #[test]
-    fn bad_anchors_and_quotes_are_refused_before_anything_is_written() {
-        let fake = ready("report-anchors");
+    fn a_project_without_sections_points_at_write_summary() {
+        let fake = ready("report-no-sections");
         let mut opened = fake.open();
+        std::fs::remove_file(fake.layout().summary_sections()).unwrap();
 
-        let cases: [(TopicInput, &str); 5] = [
-            (
-                TopicInput {
-                    shots: vec!["s009".into()],
-                    ..a_topic()
-                },
-                "不在清单里",
-            ),
-            (
-                TopicInput {
-                    segments: vec![99],
-                    ..a_topic()
-                },
-                "关联的转录段 seg 99 不存在",
-            ),
-            (
-                TopicInput {
-                    sources: vec![SourceInput::Speaker {
-                        quote: "这句话材料里没有".into(),
-                    }],
-                    ..a_topic()
-                },
-                "材料里找不到",
-            ),
-            (
-                TopicInput {
-                    sources: vec![SourceInput::External {
-                        title: "语法文档".into(),
-                        url: "example.com/ss".into(),
-                    }],
-                    ..a_topic()
-                },
-                "不是个能点的地址",
-            ),
-            (
-                TopicInput {
-                    sources: vec![],
-                    ..a_topic()
-                },
-                "一条来源都没给",
-            ),
-        ];
-        for (topic, needle) in cases {
-            let err = build_report(
-                &mut opened,
-                &ReportInput {
-                    style: a_style(),
-                    summary: None,
-                    topics: vec![topic],
-                },
-                ReportFormat::Both,
-                ImageMode::Relative,
-                Serving::Off,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(err.contains(needle), "该被拦下的是「{needle}」:{err}");
-            assert!(
-                !fake.layout().report_json().is_file(),
-                "整批退回时不该落下半个文件"
-            );
-        }
+        let err = build(&mut opened, ReportFormat::Both).unwrap_err().to_string();
 
-        // 一条知识点都不给也不行 —— 这一页的主体就是那些锚点
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("一条知识点都没给"), "{err}");
+        assert!(err.contains("write_summary"), "要指出该走哪个工具:{err}");
+        assert!(
+            err.contains(vidbrief_project::layout::SUMMARY_FILE),
+            "还要说清照着哪一份旧稿分段:{err}"
+        );
+        assert!(
+            !fake.layout().report_json().is_file(),
+            "拒绝了就不该落半成品"
+        );
     }
 
-    /// 渲染不出来的形状问题 —— 都是**机械**的,工具挡得住。
+    /// **只有总述也出不了报告** —— 报告页的主体是时间轴上那些点。
     #[test]
-    fn shapes_that_cannot_be_rendered_are_refused() {
-        let fake = ready("report-shape");
+    fn a_report_of_overview_sections_only_is_refused() {
+        let fake = Fake::new("report-all-overview")
+            .with_transcript(&[(0.0, 2.0, "各位好,今天讲 Python 列表")])
+            .with_curve(5)
+            .with_shot(1, 2.0);
         let mut opened = fake.open();
+        finish_all(&mut opened, &[1], &[1]);
+        write_section(&mut opened, a_section(None, "总述", "整支讲一件事。"));
 
-        let bad: [(TopicInput, &str); 5] = [
-            (
-                TopicInput {
-                    t: f64::NAN,
-                    ..a_topic()
-                },
-                "不合法",
-            ),
-            (
-                TopicInput {
-                    t: 10_000.0,
-                    ..a_topic()
-                },
-                "落在视频之外",
-            ),
-            (
-                TopicInput {
-                    title: "  ".into(),
-                    ..a_topic()
-                },
-                "没给标题",
-            ),
-            (
-                TopicInput {
-                    body: String::new(),
-                    ..a_topic()
-                },
-                "没给正文",
-            ),
-            (
-                TopicInput {
-                    body: "整理之后展开运行,无论后面是升还是\u{FFFD},都可以定义为 这一段。".into(),
-                    ..a_topic()
-                },
-                "乱码字符",
-            ),
-        ];
-        for (topic, needle) in bad {
-            let err = build_report(
-                &mut opened,
-                &ReportInput {
-                    style: a_style(),
-                    summary: None,
-                    topics: vec![topic],
-                },
-                ReportFormat::Both,
-                ImageMode::Relative,
-                Serving::Off,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(err.contains(needle), "该被拦下的是「{needle}」:{err}");
-        }
+        let err = build(&mut opened, ReportFormat::Both).unwrap_err().to_string();
 
-        // `id` 半给半不给:说不清该按给的号还是按时刻编
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![
-                    TopicInput {
-                        id: Some(1),
-                        ..a_topic()
-                    },
-                    TopicInput {
-                        t: 3.0,
-                        ..a_topic()
-                    },
-                ],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("要么每条都给"), "{err}");
-
-        // 全局总结里的乱码字符一样要挡下(它来自输入或 summary.md)
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: Some("# 总述\n\n这里有个 \u{FFFD} 方块\n".into()),
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("乱码字符"), "{err}");
-
-        // 重号要点出来
-        let err = build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![
-                    TopicInput {
-                        id: Some(3),
-                        ..a_topic()
-                    },
-                    TopicInput {
-                        id: Some(3),
-                        t: 3.0,
-                        ..a_topic()
-                    },
-                ],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("出现了两次"), "{err}");
+        assert!(err.contains("带锚点"), "要说清缺的是哪一类段:{err}");
+        assert!(err.contains("write_summary"), "还要说出路:{err}");
+        assert!(
+            !fake.layout().report_json().is_file(),
+            "拒绝了就不该落半成品"
+        );
     }
 
-    /// 给了 `id` 就按给的用,而且知识点按**时刻**排好 —— 时间轴要的顺序。
+    /// **乱码只报不拦**(2026-09-27 定的口径)。
+    ///
+    /// 为什么:材料的正确性是校准/总结那几步保证的,报告这一步的活是**编排**;
+    /// 而乱码多半不是这一步的调用方写歪的 —— 上游(宿主解码 / 网关 / 模型自己)
+    /// 把字节吃了一口,重写一遍常常换个地方再犯(实测三次重投:3/6/10 → 5/8/9 → 13),
+    /// 拿它当拒收理由只会把 agent 逼进打地鼠,最后产出为零。
+    ///
+    /// 所以判据是:**照常落盘 + 把坏点报出来**(页面上会标)。
     #[test]
-    fn topics_come_out_sorted_by_time_with_the_ids_they_were_given() {
-        let fake = ready("report-order");
+    fn damaged_text_is_marked_not_refused() {
+        let fake = ready("report-damaged");
         let mut opened = fake.open();
+
+        // 坏点分别落在:总述的正文、某一条的正文、这一版的 `notes`
+        write_section(
+            &mut opened,
+            a_section(None, "总述", "这里有个 \u{FFFD} 方块。"),
+        );
+        write_section(
+            &mut opened,
+            a_section(
+                Some(2.0),
+                "切到解释器主窗口",
+                "整理之后展开运行,无论后面是升还是\u{FFFD},都可以定义为 这一段。",
+            ),
+        );
 
         let outcome = build_report(
             &mut opened,
             &ReportInput {
-                style: a_style(),
-                summary: Some("# 我给的总结\n".into()),
-                topics: vec![
-                    TopicInput {
-                        id: Some(7),
-                        t: 5.0,
-                        ..a_topic()
-                    },
-                    TopicInput {
-                        id: Some(2),
-                        t: 1.0,
-                        ..a_topic()
-                    },
-                ],
+                style: ReportStyle {
+                    notes: Some("给刚入门的人看(这里有个 \u{FFFD} 方块)".into()),
+                    ..a_style()
+                },
             },
-            ReportFormat::Md,
+            ReportFormat::Both,
             ImageMode::Relative,
             Serving::Off,
         )
-        .unwrap();
-        assert_eq!(outcome.summary_from, "input");
-        assert!(outcome.report_html.is_none(), "只要 md 就不该出页面");
-        assert!(outcome.report_md.unwrap().is_file());
+        .expect("乱码不该拦下整份报告");
 
-        let report = Report::load(&fake.layout().report_json()).unwrap();
-        let order: Vec<(u32, f64)> = report.topics.iter().map(|t| (t.id, t.t)).collect();
-        assert_eq!(order, vec![(2, 1.0), (7, 5.0)]);
+        assert_eq!(outcome.topics, 1, "这一条要照常落盘");
+        assert!(outcome.report_json.is_file(), "数据要真写下去");
+        assert!(
+            fake.state().progress.report.done,
+            "步 4 该标完成(改一处乱码不等于没做完)"
+        );
+
+        let joined = outcome.warnings.join("\n");
+        assert_eq!(outcome.warnings.len(), 3, "三处坏点各报一条:{joined}");
+        // 编号那一栏现在恒为 0(见交付说明的疑点),所以这里不认"第 1 条"这个号,
+        // 只认它点了名 —— 报出来的话里那句是「第 0 条知识点(`切到解释器主窗口`)的正文……」。
+        for needle in ["全局总结", "style.notes", "知识点", "正文"] {
+            assert!(
+                joined.contains(needle),
+                "报出来的话要点到「{needle}」:{joined}"
+            );
+        }
+        assert!(
+            joined.contains("照常出了"),
+            "要让调用方知道报告已经落了:{joined}"
+        );
     }
 
-    /// 重做一遍:**整份替换**,不是往后追加。重渲染则是"数据一个字节都不动"。
+    /// 干净的输入**一条提示都不该有** —— 否则"有提示"就不再是信号。
     #[test]
-    fn building_again_replaces_the_draft_and_rendering_alone_keeps_it() {
+    fn clean_text_produces_no_warnings() {
+        let fake = ready("report-clean");
+        let mut opened = fake.open();
+
+        let outcome = build(&mut opened, ReportFormat::Md).expect("正常输入该过");
+
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert!(outcome.report_md.unwrap().is_file(), "只要 md 就该写它");
+        assert!(outcome.report_html.is_none(), "没要页面就不该出");
+    }
+
+    /// 重做一遍:**按当前分段整份重出**,不是往后追加。重渲染则是"数据一个字节都不动"。
+    #[test]
+    fn building_again_reflects_the_current_sections_and_rendering_alone_keeps_them() {
         let fake = ready("report-redo");
         let mut opened = fake.open();
 
-        build_report(
+        build(&mut opened, ReportFormat::Both).unwrap();
+        // 同名再落一段 = 改写那一段:报告该整份重出,不是多出一条
+        write_section(
             &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![
-                    a_topic(),
-                    TopicInput {
-                        t: 3.0,
-                        ..a_topic()
-                    },
-                ],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap();
-        build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Both,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap();
+            a_section(Some(2.0), "切到解释器主窗口", "改过一遍的正文。"),
+        );
+        build(&mut opened, ReportFormat::Both).unwrap();
 
         let report = Report::load(&fake.layout().report_json()).unwrap();
-        assert_eq!(report.topics.len(), 1, "第二遍该把第一遍整个换掉");
+        assert_eq!(report.topics.len(), 1, "同名改稿不该多出一条");
+        assert_eq!(
+            report.topics[0].body, "改过一遍的正文。",
+            "该是这一版的分段,不是上一版的"
+        );
 
         // 只重渲染:数据不动,页面照写
         let before = std::fs::read_to_string(fake.layout().report_json()).unwrap();
-        let outcome = render_existing(&opened, ReportFormat::Html, ImageMode::Relative, Serving::Off).unwrap();
+        let outcome = render_existing(
+            &opened,
+            ReportFormat::Html,
+            ImageMode::Relative,
+            Serving::Off,
+        )
+        .unwrap();
         assert!(outcome.report_html.unwrap().is_file());
         assert!(outcome.report_md.is_none(), "没要 md 就不该写它");
         assert_eq!(
@@ -1292,11 +1214,7 @@ mod tests {
 
         let outcome = build_report(
             &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
+            &ReportInput { style: a_style() },
             ReportFormat::Both,
             ImageMode::Embedded,
             Serving::Off,
@@ -1321,11 +1239,7 @@ mod tests {
         // 默认那一档(相对路径)照旧 —— 单文件是**选项**,不是新默认
         let plain = build_report(
             &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
+            &ReportInput { style: a_style() },
             ReportFormat::Html,
             ImageMode::Relative,
             Serving::Off,
@@ -1336,6 +1250,34 @@ mod tests {
         assert!(html.contains("s001"), "默认还是相对路径:{html:.300}");
     }
 
+    /// **证据一律由工具按锚点时刻就近挂**(输入里已经没有段号那一栏了)——
+    /// 取不到窗口里的段,就取起点最近的那一段;视频末尾附近既没说话也没画面时不瞎填。
+    #[test]
+    fn evidence_is_derived_from_the_anchor_time_and_never_invented() {
+        let fake = ready("report-derived");
+        let mut opened = fake.open();
+        // 转录只覆盖 0–4 秒,整支 60 秒 —— 这一刻稿子里没人说话
+        write_section(
+            &mut opened,
+            a_section(Some(45.0), "收尾之后", "这一节讲的是屏幕外的结论。"),
+        );
+
+        let outcome = build(&mut opened, ReportFormat::Html).expect("锚点落在稿子外面不该拦");
+
+        assert_eq!(outcome.derived_segments, 2, "两条都是就近取的,要如实报数");
+        let report = Report::load(&fake.layout().report_json()).unwrap();
+        assert_eq!(report.topics[0].segments, vec![2], "t=2 落在 [2,22) 窗口里");
+        assert_eq!(
+            report.topics[1].segments,
+            vec![2],
+            "t=45 取起点最近的那一段(也不是瞎填)"
+        );
+        assert!(
+            report.topics[1].shots.is_empty(),
+            "那一刻没有截图,就不挂"
+        );
+    }
+
     /// 材料在报告之后被改过 —— 重渲染**照渲染,但把过期的锚点报出来**。
     ///
     /// 这条是技术债表里"报告数据的锚点是引用,材料变了不失效"的落点:
@@ -1344,25 +1286,22 @@ mod tests {
     fn stale_anchors_report_what_the_materials_no_longer_hold() {
         let fake = ready("report-stale");
         let mut opened = fake.open();
-        build_report(
-            &mut opened,
-            &ReportInput {
-                style: a_style(),
-                summary: None,
-                topics: vec![a_topic()],
-            },
-            ReportFormat::Html,
-            ImageMode::Relative,
-            Serving::Off,
-        )
-        .unwrap();
+        build(&mut opened, ReportFormat::Html).unwrap();
 
         // 刚出完:每一处锚点都对得上
-        let report = Report::load(&fake.layout().report_json()).unwrap();
+        let mut report = Report::load(&fake.layout().report_json()).unwrap();
         assert!(
             stale_anchors(&opened, &report).is_empty(),
             "刚校过一遍的报告不该有过期锚点"
         );
+
+        // **旧数据**里的讲者原话照样要复核:`sources` 里那一类新报告不再写,
+        // 但存量报告还带着它(读得动、也报得出)。
+        report.topics[0].sources.push(TopicSource::Speaker {
+            segment: 2,
+            quote: "看这一段结构图".into(),
+        });
+        report.save(&fake.layout().report_json()).unwrap();
 
         // 材料被改过:讲者那句话没了(同一段被改成别的内容)
         let mut transcript =
@@ -1384,14 +1323,21 @@ mod tests {
             stale.iter().any(|s| s.contains("讲者原话")),
             "引的话在转录里找不到也要报:{stale:?}"
         );
-        // 报出来的每一条都点得出是第几条 —— 不然读者不知道去哪儿修
+        // 报出来的每一条都点得出是**哪一条** —— 不然读者不知道去哪儿修。
+        // (点名靠标题:`id` 那一栏现在恒为 0,见交付说明里的生产代码疑点。)
         assert!(
-            stale.iter().all(|s| s.contains("第 1 条")),
+            stale.iter().all(|s| s.contains("切到解释器主窗口")),
             "每条都要点名是哪一条知识点:{stale:?}"
         );
 
         // 重渲染那条路:照渲染(不拦),但返回里带着它,页面数据里也带着它
-        let outcome = render_existing(&opened, ReportFormat::Html, ImageMode::Relative, Serving::Off).unwrap();
+        let outcome = render_existing(
+            &opened,
+            ReportFormat::Html,
+            ImageMode::Relative,
+            Serving::Off,
+        )
+        .unwrap();
         assert_eq!(
             outcome.stale_anchors, stale,
             "重渲染这条路算的该是同一份清单"

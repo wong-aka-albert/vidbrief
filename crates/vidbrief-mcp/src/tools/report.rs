@@ -24,70 +24,13 @@ use serde::{Deserialize, Serialize};
 use crate::json::{blocking, failed, json};
 use crate::server::VidbriefServer;
 
-/// 一条知识点的来源。
-///
-/// **两类分开**:讲者原话(照抄的转录原文)与外部补充(标题 + 链接)。
-/// 读的人要一眼分得清哪句是听来的、哪句是找来的。
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SourceParam {
-    /// 讲者原话。`quote` 要**照抄**一句转录原文(落在一段之内)——
-    /// 工具拿它去转录里搜:搜得到就连段号一起记下,搜不到拒收。
-    ///
-    /// **别自己报段号**:报错段号是一处没法核对的自述,而"这句话在哪一段"
-    /// 正是要留给人事后回去核对的定位。
-    Speaker {
-        /// 照抄的一句转录原文。
-        quote: String,
-    },
-    /// 外部补充(联网检索 / 知识库):这条背景是从哪儿来的。
-    External {
-        /// 这条补充说的大意(一句话)。
-        title: String,
-        /// 出处链接。页面上是个能点的链接,要 `http://` 或 `https://` 开头。
-        url: String,
-    },
-}
-
-/// 一条**局部知识点** —— 挂在时刻上。
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TopicParam {
-    /// 项目内唯一,从 1 起。**要么每条都给,要么一条都不给**(不给就按时刻顺序编)。
-    #[serde(default)]
-    pub id: Option<u32>,
-    /// 锚点:视频内时刻(秒)。时间轴上那个圆点、点它跳到的位置,都靠它。
-    pub t: f64,
-    /// 一句话标题。
-    pub title: String,
-    /// 解析正文(markdown):把这一处的上下文逻辑讲清楚、关键概念与逻辑说明白。
-    /// **不是复述转录** —— 复述留给转录本身,这里要的是"读懂了之后的说法"。
-    pub body: String,
-    /// 关联截图 id(接受 `s001` 或 `1`)。
-    /// **图文面板会把它们显示出来**,所以挑真正说明了问题的那几张。
-    #[serde(default)]
-    pub shots: Vec<String>,
-    /// 关联转录段 id(可点回原文)。
-    #[serde(default)]
-    pub segments: Vec<u32>,
-    /// 来源。**至少要有一条** —— 没有来源的结论没法核。
-    #[serde(default)]
-    pub sources: Vec<SourceParam>,
-    /// **待核验**:读的人该回头核一下的点。
-    ///
-    /// **画面看不清、但结论靠它的数字必须写在这儿**(例如
-    /// 「3.12 那个数看不清,按讲解估的 —— 回看 8:05 确认」)。不许静默略过:
-    /// 略过了结论就少一块,而读的人不知道少了。
-    #[serde(default)]
-    pub verify: Vec<String>,
-}
-
 /// **这份报告按什么口味做** —— 用户的提示词里带着他要什么,这一栏就是那个落点。
 ///
 /// **必填**:一份"没说按什么做的报告"交到用户手上,他只能说"这不是我要的",
 /// 却说不清该改哪儿。工具在这一栏上不做判断(哪个粒度对他更好,不关工具的事),
 /// 只保证填了、不是空的。
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(deny_unknown_fields)]
 pub struct StyleParam {
     /// 风格轮廓(**先看 `get_guide(step="styles")`**):`quick` 快扫版 / `teaching` 教学版 /
@@ -109,6 +52,7 @@ pub struct StyleParam {
 
 /// 风格轮廓(线上写法与 `report.json` 里的 `ReportPreset` 一致)。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum PresetParam {
     /// 快扫版:看过视频的人扫一眼就想起来(结论先行、少图)。
@@ -140,6 +84,7 @@ impl From<PresetParam> for vidbrief_project::ReportPreset {
 
 /// 知识粒度(线上写法与 `report.json` 里的 `Granularity` 一致)。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum GranularityParam {
     /// 概括:只留骨架。
@@ -167,14 +112,6 @@ pub struct BuildReportParams {
     pub project_id: String,
     /// **这份报告按什么口味做**(粒度 + 风格):从**用户的话**里读出来填这儿。
     pub style: StyleParam,
-    /// 全局总结(markdown):主旨、结构、脉络 —— 整支视频的总述。
-    ///
-    /// **不给就用 `03_summary/summary.md` 那一份**(步 3 的产物)。
-    /// 只在"报告要的总结和那一份不一样"时才给。
-    #[serde(default)]
-    pub summary: Option<String>,
-    /// 局部知识点,给几条都行(工具会自己按时刻排)。
-    pub topics: Vec<TopicParam>,
     /// 出哪几份:`both`(默认,页面 + Markdown 导出)/ `html` / `md`。
     #[serde(default)]
     pub format: Option<String>,
@@ -208,6 +145,13 @@ struct ReportBrief {
     /// 本地查看服务的地址。**给用户点开的就是这个**,不是 report_html。
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    /// **这页要留意的地方**(自由正文里的乱码字符),空数组不写。
+    ///
+    /// 它**不是错误**:报告照常落盘了,页面也照渲染 —— 见 `vidbrief_ops::report`
+    /// 里 `damaged_spots` 的解释(乱码多半来自上游,重写常常换地方再犯)。
+    /// 交给用户看的时候要**如实说**这几处,别当没看见。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     hint: String,
 }
 
@@ -220,16 +164,17 @@ impl VidbriefServer {
                        再渲染出 `report.html`(时间轴上的知识点锚点 + 浮动解析 + 右侧图文总结面板\
                        + 可回跳的视频)与 `report.md` 导出。**整份替换**:重做就是再调一次。\
                        \n\n\
+                       **内容从步 3 的段来** —— 这个工具**不用你交任何内容**:\
+                       每一条(标题、正文、锚点)就是 `write_summary` 交过的那些段,\
+                       它们那一刻的转录与画面由工具就近挂上。你只交代**口味**。\
+                       \n\n\
                        **先交代口味**(`style`,必填):用户要什么就填什么 ——\
-                       `granularity`(知识粒度,`brief` 概括 / `standard` 标准 / `detailed` 详细,\
-                       **它同时决定条数与篇幅**)、`tone`(语言风格,自由文本:大白话 / 诙谐 /\
-                       讲故事 / 行业腔……)、`notes`(还有别的交代:给谁看、要不要例子)。\
+                       `granularity`(条数已由步 3 的段定下,这里只是这一版的粒度说明)、\
+                       `tone`(语言风格,自由文本:大白话 / 诙谐 / 讲故事 / 行业腔……)、\
+                       `notes`(还有别的交代:给谁看、要不要例子)。\
                        用户没说出口味就按标准 + 平实的讲人话,并在交付时**说清这一版是按什么做的**。\
                        \n\n\
-                       **每条知识点必须给全**:`t`(时刻)、标题、**完整解析正文**(浮层里放的是它,\
-                       不是一个标题)、**至少一条来源**。来源两类:讲者原话 `speaker` + **照抄**的 \
-                       `quote`(工具去转录里找段号,找不到拒收);外部查到的 `external` + 标题与链接。\
-                       引的截图必须在 `list_shots` 的清单里。\n\n\
+                       要改内容就**回步 3 改段**(再交一次同名的那段),然后重出;`topics` 这类参数不存在。\n\n\
                        **这道门前置着步 3**:没写过总结(`write_summary`)、或者总结被绕过工具改过,\
                        会被挡住并告诉你怎么办。\n\n\
                        动手前取一次操作说明:`get_guide(step=\"build_report\")`。",
@@ -252,28 +197,6 @@ impl VidbriefServer {
             vidbrief_report::ImageMode::Relative
         };
 
-        let mut topics = Vec::with_capacity(p.topics.len());
-        for topic in p.topics {
-            topics.push(vidbrief_ops::TopicInput {
-                id: topic.id,
-                t: topic.t,
-                title: topic.title,
-                body: topic.body,
-                shots: topic.shots,
-                segments: topic.segments,
-                verify: topic.verify,
-                sources: topic
-                    .sources
-                    .into_iter()
-                    .map(|source| match source {
-                        SourceParam::Speaker { quote } => vidbrief_ops::SourceInput::Speaker { quote },
-                        SourceParam::External { title, url } => {
-                            vidbrief_ops::SourceInput::External { title, url }
-                        }
-                    })
-                    .collect(),
-            });
-        }
         let input = vidbrief_ops::ReportInput {
             style: vidbrief_project::ReportStyle {
                 preset: Some(p.style.preset.into()),
@@ -281,8 +204,6 @@ impl VidbriefServer {
                 tone: p.style.tone,
                 notes: p.style.notes,
             },
-            summary: p.summary,
-            topics,
         };
 
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
@@ -303,6 +224,18 @@ impl VidbriefServer {
             (None, None) => "报告数据已落盘。".to_string(),
         };
 
+        // 有坏点就把话说在前面:报告出了,但哪几处不该当真得让用户知道
+        // (它们不是错误、不拦落盘 —— 见 `ReportBrief::warnings`)。
+        let hint = if outcome.warnings.is_empty() {
+            hint
+        } else {
+            format!(
+                "报告出了,但有 {} 处**乱码字符**(页面上是方块)—— 多半是上游把字节吃了一口,\
+                 不是内容问题。交付时**如实说**这几处、别当没看见;用户要干净版就照原样重发一次。\n{hint}",
+                outcome.warnings.len()
+            )
+        };
+
         let brief = ReportBrief {
             report_json: outcome.report_json.display().to_string(),
             report_html: outcome.report_html.map(|p| p.display().to_string()),
@@ -311,6 +244,7 @@ impl VidbriefServer {
             style: outcome.style,
             summary_from: outcome.summary_from,
             url: outcome.url,
+            warnings: outcome.warnings,
             hint,
         };
         Ok(crate::tools::attach_warning(json(&brief)?, slot.warning()))

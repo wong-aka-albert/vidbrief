@@ -367,6 +367,32 @@ fn a_failed_transcription_does_not_mark_the_step_done() {
     // 但视觉产出要保留 —— 重跑时不必重算差帧图
     assert!(layout.change_curve().is_file(), "已算好的差帧图不该被丢掉");
     assert!(layout.shots_json().is_file(), "已抽好的截图不该被丢掉");
+
+    // ③ **再跑一趟(whisper 还是坏的)**:做成的那部分**不该重做**。
+    //
+    // 这是「失败重试:接着跑,不是重来」那条的核心判据 —— 而它现在由**增量重跑**兜着:
+    // 上一趟留下的画面材料是完整的一份,输入又没变,于是沿用、只重跑转录。
+    let before = shot_stamps(&layout);
+    let out = Command::new(env!("CARGO_BIN_EXE_vidbrief"))
+        .current_dir(&tmp.0)
+        .env("VIDBRIEF_WHISPER_BIN", "definitely-not-whisper")
+        .env("VIDBRIEF_WHISPER_MODEL", "definitely-not-a-model.bin")
+        .args(["preprocess", "test-sample"])
+        .output()
+        .expect("无法启动 vidbrief");
+    assert!(!out.status.success(), "whisper 还是坏的,这一趟该照旧判失败");
+    assert!(
+        stdout(&out).contains("沿用上次那批"),
+        "重试该说清画面是沿用的:\n{}",
+        stdout(&out)
+    );
+    assert_eq!(shot_stamps(&layout), before, "重试把截图重抽了一遍");
+    let report = run_report(&layout);
+    assert_eq!(
+        report["reuse"]["visual"],
+        serde_json::Value::Bool(true),
+        "画面那半是上一趟做成的,重试不该重做:{report}"
+    );
 }
 
 #[test]
@@ -376,7 +402,7 @@ fn preprocess_help_and_bad_arguments() {
     let out = run_in(&cwd, &["preprocess", "-h"]);
     assert!(out.status.success());
     let text = stdout(&out);
-    for expected in ["--no-transcribe", "--no-shots", "-f, --fps"] {
+    for expected in ["--no-transcribe", "--no-shots", "--force", "-f, --fps"] {
         assert!(text.contains(expected), "用法里缺 `{expected}`:\n{text}");
     }
 
@@ -395,4 +421,204 @@ fn preprocess_help_and_bad_arguments() {
     let out = run_in(&cwd, &["preprocess", "nope"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("找不到项目"), "{}", stderr(&out));
+}
+
+// ── 增量重跑:输入没变就不重算,更不作废成果 ─────────────────────────
+
+/// 每张截图的 (相对路径, 修改时间) —— 用来证明「一张都没重写」。
+///
+/// 为什么不拿"报告里说沿用了"当唯一判据:那是**自述**。文件是不是真没被碰,
+/// 只有文件系统说了算;两条一起看,才算证明了"没重算"。
+fn shot_stamps(layout: &Layout) -> Vec<(String, std::time::SystemTime)> {
+    let shots = Shots::load(&layout.shots_json()).expect("读截图清单");
+    let mut out: Vec<(String, std::time::SystemTime)> = shots
+        .shots
+        .iter()
+        .map(|s| {
+            let path = layout.rel(s.file.as_str());
+            let at = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("截图 {} 不在盘上:{e}", s.id))
+                .modified()
+                .expect("取不到修改时间");
+            (s.file.as_str().to_string(), at)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 读这一趟的运行记录里那份报告。
+fn run_report(layout: &Layout) -> serde_json::Value {
+    let text = std::fs::read_to_string(layout.preprocess_dir().join("run.json"))
+        .expect("运行记录该在");
+    let record: serde_json::Value = serde_json::from_str(&text).expect("记录该是 JSON");
+    record["report"].clone()
+}
+
+/// **同样的输入再跑一遍:不重算、也不作废成果。**
+///
+/// 靶子是这条路上最贵的东西 —— 校准(逐张看图 + 逐段核验)。从前重跑步 1
+/// 就把它全清掉,`shot_checks_cleared` / `segment_checks_cleared` 报的就是那个数。
+#[test]
+fn a_second_run_with_the_same_inputs_reuses_the_pictures() {
+    let (tmp, layout) = prepared("reuse-same");
+    let before = shot_stamps(&layout);
+    assert!(!before.is_empty(), "第一次跑该留下截图");
+    assert!(
+        layout.preprocess_inputs().is_file(),
+        "第一趟跑完该留下输入指纹({})",
+        layout.preprocess_inputs().display()
+    );
+
+    let out = run_in(&tmp.0, &["preprocess", "test-sample", "--no-transcribe"]);
+    assert!(out.status.success(), "二跑失败:\n{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("沿用上次那批"), "没说清沿用了:\n{text}");
+    assert_eq!(shot_stamps(&layout), before, "截图被重写了");
+
+    let report = run_report(&layout);
+    assert_eq!(report["reuse"]["visual"], serde_json::Value::Bool(true), "{report}");
+    assert_eq!(
+        report["reuse"]["visual_why_not"],
+        serde_json::Value::Null,
+        "沿用了就不该有「为什么没沿用」:{report}"
+    );
+    assert_eq!(report["shot_checks_cleared"], serde_json::json!(0), "{report}");
+}
+
+/// **改了 `fps`:画面重算,而且说得出是哪一项变的。**
+///
+/// 转录那半不在这一条里(它会跑 whisper,几十秒)—— 那半的判据在
+/// `vidbrief_ops::preprocess` 的单测里,一条一条钉着。
+#[test]
+fn changing_fps_recomputes_the_pictures_and_says_why() {
+    let (tmp, layout) = prepared("reuse-fps");
+    let before = shot_stamps(&layout);
+
+    let out = run_in(
+        &tmp.0,
+        &["preprocess", "test-sample", "--no-transcribe", "--fps", "2"],
+    );
+    assert!(out.status.success(), "重跑失败:\n{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("画面重算"), "没说清重算了:\n{text}");
+    assert!(
+        text.contains("fps"),
+        "要指名道姓说是哪一项变的:\n{text}"
+    );
+    assert_ne!(shot_stamps(&layout), before, "改了 fps 就该重抽截图");
+
+    let report = run_report(&layout);
+    assert_eq!(report["reuse"]["visual"], serde_json::Value::Bool(false), "{report}");
+    let why = report["reuse"]["visual_why_not"].as_str().unwrap_or_default();
+    assert!(why.contains("fps"), "{why}");
+}
+
+/// **源视频被就地改过:不得复用,而且要把这件事说出来。**
+///
+/// 硬链接场景下源文件与项目里那份是同一份数据 —— 源被改了,项目里的材料就全不可信。
+/// 判据是**当场重算**的 sha256,不是 `project.json` 里 init 时记的那个。
+#[test]
+fn a_changed_source_video_forces_a_recompute_and_says_so() {
+    let (tmp, layout) = prepared("reuse-source");
+
+    // 往源视频尾部加一个字节:内容变了(sha256 不同),ffmpeg 照样读得动
+    let project = Project::load(&layout.project_json()).expect("读 project.json");
+    let video = layout.rel(project.source.path.as_str());
+    let mut bytes = std::fs::read(&video).expect("读源视频");
+    bytes.push(0);
+    std::fs::write(&video, &bytes).expect("写回源视频");
+
+    let out = run_in(&tmp.0, &["preprocess", "test-sample", "--no-transcribe"]);
+    assert!(out.status.success(), "重跑失败:\n{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("源视频内容跟 project.json 里记的对不上"),
+        "源被改过这件事必须说出来:\n{text}"
+    );
+    assert!(text.contains("源视频内容变了"), "重算的理由要指名:\n{text}");
+
+    let report = run_report(&layout);
+    assert_eq!(report["reuse"]["source_changed"], serde_json::Value::Bool(true), "{report}");
+    assert_eq!(report["reuse"]["visual"], serde_json::Value::Bool(false), "{report}");
+}
+
+/// **`--force`:输入一个字没变,也照重算。**
+///
+/// 「能省则省」不该变成「没法强制重来」—— 怀疑上次那批材料、或者换了算法想干净地
+/// 重跑一遍时,得有这么一条正门。这条也是复用那套判据的**反面对照**:同样的场景,
+/// 不加 `--force` 是沿用(见 [`a_second_run_with_the_same_inputs_reuses_the_pictures`])。
+#[test]
+fn force_recomputes_even_when_nothing_changed() {
+    let (tmp, layout) = prepared("reuse-force");
+    let before = shot_stamps(&layout);
+
+    let out = run_in(
+        &tmp.0,
+        &["preprocess", "test-sample", "--no-transcribe", "--force"],
+    );
+    assert!(out.status.success(), "重跑失败:\n{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("force"), "要说是 `--force` 让重算的:\n{text}");
+    assert_ne!(shot_stamps(&layout), before, "--force 就该重抽截图");
+
+    let report = run_report(&layout);
+    assert_eq!(report["reuse"]["visual"], serde_json::Value::Bool(false), "{report}");
+}
+
+/// **复用不吃模型的选择。**
+///
+/// 复用是"这一步要不要重算"的判断,**不是**"哪些成果不要了"的判断:模型在步 2 里
+/// 把某张图弃用(`update_shot` 的 `drop`)、给另一张写下看图结论 —— 那些决定住在
+/// `state.bin` 里,沿用那条路上**一个都不许碰**。只有真的重算(输入变了 / `--force`)
+/// 才会作废它们,理由是硬的:重抽之后那些结论说的是旧帧。
+///
+/// 这条钉住的是「工具不替模型做主」:复用绝不等于把模型之前的判断一并锁死或清掉。
+#[test]
+fn reuse_never_touches_what_the_model_decided() {
+    use vidbrief_project::{Confidence, ShotCheck, ShotId, ShotStatus};
+
+    let (tmp, layout) = prepared("reuse-keeps");
+    let mut state = state_of(&layout);
+
+    let dropped = ShotId::new(1).expect("合法 shot id");
+    let checked = ShotId::new(2).expect("合法 shot id");
+    state.shot_mut(dropped).status = ShotStatus::Drop;
+    state.shot_mut(checked).check = Some(ShotCheck {
+        r#match: true,
+        audio_visual_sync: true,
+        type_read: "一张示意图".into(),
+        neighbor_text: None,
+        issues: Vec::new(),
+        confidence: Confidence::High,
+        evidence: None,
+        checked_at: vidbrief_project::now(),
+    });
+    state.write(&layout.state_file()).expect("写状态");
+
+    // ① 沿用(输入没变):模型的决定一条不许动
+    let out = run_in(&tmp.0, &["preprocess", "test-sample", "--no-transcribe"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let kept = state_of(&layout);
+    assert_eq!(
+        kept.shot(dropped).map(|s| s.status),
+        Some(ShotStatus::Drop),
+        "复用把模型的弃用抹了"
+    );
+    assert!(
+        kept.shot(checked).and_then(|s| s.check.as_ref()).is_some(),
+        "复用把模型的看图结论抹了"
+    );
+
+    // ② 对照:重算才作废 —— 而且理由是真的(那些结论说的是旧帧)
+    let out = run_in(
+        &tmp.0,
+        &["preprocess", "test-sample", "--no-transcribe", "--force"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let after = state_of(&layout);
+    assert!(
+        after.shot(checked).and_then(|s| s.check.as_ref()).is_none(),
+        "重算就该作废旧结论"
+    );
 }

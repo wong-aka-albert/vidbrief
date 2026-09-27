@@ -28,6 +28,7 @@
 //!    而输入来自命令行或 JSON,形态本就不同。
 
 pub mod conclusions;
+pub mod inputs;
 pub mod inspect;
 pub mod materials;
 pub mod preprocess;
@@ -46,12 +47,16 @@ pub mod write;
 pub mod testkit;
 
 pub use conclusions::{
-    CorrectionInput, CorrectionOutcome, ShotCheckInput, WriteMode, apply_corrections,
-    record_shot_check, write_note, write_summary,
+    CorrectionInput, CorrectionOutcome, SectionInput, ShotCheckInput, SummaryOutcome, WriteMode,
+    apply_corrections, record_shot_check, write_note, write_summary,
 };
 pub use inspect::{
     HealthLevel, HealthView, InspectOptions, InspectReport, Materials, ShotCounts, inspect,
     inspect_opened,
+};
+pub use inputs::{
+    INPUTS_SCHEMA_VERSION, PreprocessInputs, TRANSCRIBE_ALGO_VERSION, TranscriptInputs,
+    VISUAL_ALGO_VERSION, VisualInputs,
 };
 pub use materials::{
     SegmentView, ShotDetail, TranscriptView, change_curve, content_mismatches,
@@ -60,7 +65,8 @@ pub use materials::{
     transcript, transcript_search,
 };
 pub use preprocess::{
-    AnalysisSummary, PreprocessOptions, PreprocessReport, Stage, TranscriptOutcome, preprocess,
+    AnalysisSummary, PreprocessOptions, PreprocessReport, ReuseOutcome, Stage, TranscriptOutcome,
+    preprocess,
 };
 pub use project::{
     CreateOptions, Created, Notice, OpenProject, ProjectSummary, UpgradeOptions, UpgradeOutcome,

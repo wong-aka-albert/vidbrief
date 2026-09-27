@@ -78,16 +78,17 @@ fn the_command_line_twin_writes_through_the_same_door() {
     assert_eq!(fixed.stats().clean, 1, "第 2 段是 reviewed 报上来的");
 
     // ② 门:命令行版**照样**拦 —— 这正是"同一条路"的意思
-    let (ok, _, stderr) = run(&["summary", &proj, "--md", "-"], "# 总结\n");
+    let (ok, _, stderr) = run(
+        &["summary", &proj, "--title", "总结", "--md", "-"],
+        "# 总结\n",
+    );
     assert!(!ok, "门没拦:命令行版绕过去了?");
     assert!(stderr.contains("补图候选"), "门该把三类入口都说出来:{stderr}");
 
     // ③ 报告也有门 —— 它是**步 3 那道**:总结还没写,报告不许出
     let (ok, _, stderr) = run(
         &["report", &proj, "--json", "-"],
-        r#"{"style":{"preset":"quick","granularity":"standard","tone":"大白话"},
-             "topics":[{"t":1.0,"title":"标题","body":"正文",
-             "sources":[{"kind":"external","title":"语法文档","url":"https://example.com"}]}]}"#,
+        r#"{"style":{"preset":"quick","granularity":"standard","tone":"大白话"}}"#,
     );
     assert!(!ok, "总结都没写,报告不该出得来");
     assert!(stderr.contains("还没有总结"), "{stderr}");
@@ -129,22 +130,21 @@ fn the_command_line_twin_builds_a_report_through_the_same_gate() {
     let (ok, _, stderr) = run(&["correct", &proj, "--json", "-"], r#"{"reviewed":[1,2]}"#);
     assert!(ok, "correct 失败了:\n{stderr}");
 
-    // 写总结 —— 走工具(命令行版),底账也就记上了
-    let (ok, _, stderr) = run(&["summary", &proj, "--md", "-"], "# 总述\n\n两句话讲完。\n");
+    // 写总结 —— 走工具(命令行版),一段一段交,底账也就记上了
+    let (ok, _, stderr) = run(
+        &["summary", &proj, "--title", "总述", "--md", "-"],
+        "# 总述\n\n两句话讲完。\n",
+    );
     assert!(ok, "summary 失败了:\n{stderr}");
+    let (ok, _, stderr) = run(
+        &["summary", &proj, "--title", "切到解释器主窗口", "--at", "2", "--md", "-"],
+        "讲者从大纲切到解释器主窗口。\n",
+    );
+    assert!(ok, "summary(带锚点的段)失败了:\n{stderr}");
 
-    // 出报告:数据 + 两个投影
+    // 出报告:只有口味 —— 内容由步 3 的段落组装
     let body = r#"{
-      "style": {"preset": "teaching", "granularity": "detailed", "tone": "大白话", "notes": "给刚入门的人看"},
-      "topics": [
-        {
-          "t": 2.0,
-          "title": "切到解释器主窗口",
-          "body": "讲者从大纲切到解释器主窗口。",
-          "shots": ["s001"],
-          "sources": [{"kind": "speaker", "quote": "看这一段结构图"}]
-        }
-      ]
+      "style": {"preset": "teaching", "granularity": "detailed", "tone": "大白话", "notes": "给刚入门的人看"}
     }"#;
     let (ok, stdout, stderr) = run(&["report", &proj, "--json", "-"], body);
     assert!(ok, "report 失败了:\n{stderr}");
@@ -159,7 +159,7 @@ fn the_command_line_twin_builds_a_report_through_the_same_gate() {
     let report = vidbrief_project::Report::load(&fake.layout().report_json()).unwrap();
     assert_eq!(report.topics.len(), 1);
     assert!(report.summary.contains("两句话讲完"), "{}", report.summary);
-    // 段号是工具从材料里找出来的
+    // 段号是工具**就近取的**(这条没给 `segments`)—— t=2.0 正落在第 2 段上
     assert_eq!(report.topics[0].segments, vec![2]);
     // 口味落在数据里(与 MCP 工具同一个字段、同一个必填口径)
     assert_eq!(

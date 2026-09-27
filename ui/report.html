@@ -126,7 +126,6 @@
     font-size: 12px; color: var(--warn); }
   .verify .k { font-weight: 600; }
   .verify ul { margin: 3px 0 0; padding-left: 18px; }
-  .no-src { color: var(--warn); font-size: 12px; margin-top: 6px; }
   .empty { color: var(--dim); padding: 4px 0; }
 
   /* 时间轴:锚点即知识点。
@@ -188,6 +187,7 @@
   <span class="chip" id="style" hidden></span>
   <span class="chip warn" id="verify" hidden></span>
   <span class="chip bad" id="stale" hidden></span>
+  <span class="chip warn" id="damaged" hidden></span>
   <span class="chip" id="single" hidden></span>
   <span class="spacer"></span>
   <button class="tool" id="toggleFloat">收起知识点</button>
@@ -316,8 +316,7 @@ if (DATA.style_text) {
 const single = document.getElementById("single");
 if (DATA.self_contained) {
   single.textContent = "单文件版";
-  single.title = "这一份的图是内嵌的,文件可以单独发给别人。
-" +
+  single.title = "这一份的图是内嵌的,文件可以单独发给别人。" +
     "视频不在里面(太大)—— 点锚点回跳那一半要本机素材 + 本机服务,别人机器上点不动。";
   single.hidden = false;
 }
@@ -332,6 +331,19 @@ if (stale.length) {
     stale.join("\n· ") + "\n\n材料在报告之后被改过(校准改了转录 / 截图被重抽)。" +
     "要修就让 agent 重出一份(`build_report` 整份替换)。";
   staleChip.hidden = false;
+}
+// 乱码字符:自由正文里有 U+FFFD(页面上显示成方块)。**照渲染不拦** ——
+// 它是上游把字节吃了一口,不是这份报告编排错了;但读者得知道哪句有洞,
+// 不然他会以为整句都不可信。判据在动作层(`damaged_in`,只报不拦)。
+const damaged = DATA.damaged || [];
+const damagedChip = document.getElementById("damaged");
+if (damaged.length) {
+  damagedChip.textContent = `⚠ ${damaged.length} 处乱码字符`;
+  damagedChip.title = "这些地方的正文里有方块(U+FFFD,编码坏掉留下的):\n· " +
+    damaged.join("\n· ") +
+    "\n\n它多半是传输层把字节吃了一口,不是 agent 写错;" +
+    "要干净版就说一声,让 agent 照原样重发一次(`build_report` 整份替换)。";
+  damagedChip.hidden = false;
 }
 document.getElementById("summary").innerHTML = md(report.summary) ||
   "<p class='empty'>（还没有全局总结）</p>";
@@ -368,10 +380,13 @@ function segsHtml(t) {
   return `<div class="segs">关联转录段:${t.segments.map(id => segChip(id, true)).join("")}</div>`;
 }
 
+// 外部背景(sources):有就列,没有就不说。
+// 讲者那侧的证据不在这儿 —— 「关联转录段」与截图是工具按时刻就近取的,不用谁去写。
+// 这里从前挂过一句「⚠ 这条还没有来源」,那是「每条都必须有来源」年代的判据:那时
+// 来源要模型自己交,缺了就说明它漏了。现在报告这一步只做组装(内容正确性由校准与
+// 总结那两步保证),`sources` 新报告里本来就是空的 —— 再逐条报警就只是噪声。
 function sourceHtml(t) {
-  if (!(t.sources || []).length) {
-    return `<div class="no-src">⚠ 这条还没有来源 —— 结论要能追到出处才算数。</div>`;
-  }
+  if (!(t.sources || []).length) return "";
   let html = `<div class="sources">`;
   for (const src of t.sources) {
     if (src.kind === "speaker") {
@@ -443,8 +458,6 @@ function topicHtml(t, i) {
       }
     }
     html += `</div>`;
-  } else {
-    html += `<p class="no-src">⚠ 这条还没有来源 —— 结论要能追到出处才算数。</p>`;
   }
   if ((t.verify || []).length) html += verifyHtml(t);
   html += segsHtml(t);

@@ -38,8 +38,26 @@ pub struct ReportPayload {
     /// 读者照着页面上的一句"讲者原话"回去核、转录里却没有,他至少要知道这件事。
     #[serde(default)]
     pub stale: Vec<String>,
+    /// **这页的乱码字符**:自由正文里的 U+FFFD(人读的一句条)。
+    ///
+    /// 判据在动作层(`vidbrief_ops::report::damaged_in`):**只报不拦** ——
+    /// 报告照落盘,但读者得知道哪句有洞。这里同样只负责让它**在页面上可见**。
+    #[serde(default)]
+    pub damaged: Vec<String>,
     /// 图是不是内嵌的(**单文件分享版**)—— 页面上标一句:图能带走,视频那一半带不走。
     pub self_contained: bool,
+}
+
+/// 页面上要留意的两行清单 —— 都由**动作层**算好传进来。
+///
+/// 分两个字段而不是两条 `&[String]`:两者语义不同(材料变过 / 文字有洞),
+/// 页面上也是两个标签;两个同类型的相邻参数太容易传反。
+#[derive(Debug, Default, Clone)]
+pub struct Notices {
+    /// **锚点过期**:判据见 `vidbrief_ops::report::stale_anchors`。
+    pub stale: Vec<String>,
+    /// **乱码字符**:判据见 `vidbrief_ops::report::damaged_in`。
+    pub damaged: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,12 +77,13 @@ pub struct SegmentBrief {
 
 /// 组一份自包含的前端数据(报告 + 它的锚点落在哪)。
 ///
-/// `stale` 由调用方算好了传进来(判据在动作层:`build_report` / `render_existing`
-/// 走的是同一份 `stale_anchors`)—— 这里不自己判,免得两处对材料的读法不一样。
+/// `notices` 由调用方算好了传进来(判据在动作层:`build_report` / `render_existing`
+/// 走的是同一份 `stale_anchors` 与 `damaged_in`)—— 这里不自己判,
+/// 免得两处对材料的读法不一样。
 pub fn build_payload(
     layout: &Layout,
     report: &Report,
-    stale: &[String],
+    notices: &Notices,
     images: ImageMode,
 ) -> Result<ReportPayload> {
     let rel_page = vidbrief_project::layout::REPORT_HTML_FILE;
@@ -119,7 +138,8 @@ pub fn build_payload(
         video_url,
         shots: shot_briefs,
         segments,
-        stale: stale.to_vec(),
+        stale: notices.stale.clone(),
+        damaged: notices.damaged.clone(),
         self_contained: images == ImageMode::Embedded,
     })
 }
@@ -137,18 +157,19 @@ pub fn render_report_html(payload: &ReportPayload) -> Result<String> {
 
 /// 从项目里的 `report.json` 渲染 `report.html`,返回写出的路径。
 ///
-/// `stale` 是**锚点过期**的清单(人读的一句条)—— 由调用方(`vidbrief-ops`)算好传进来,
-/// 页面把它顶在标题栏。判据只有一处,见 `vidbrief_ops::report::stale_anchors`。
+/// `notices` 是页面上那两行要留意的清单(锚点过期 / 乱码字符,都是人读的一句条)——
+/// 由调用方(`vidbrief-ops`)算好传进来,页面顶在标题栏。判据只有一处:
+/// `vidbrief_ops::report::stale_anchors` 与 `damaged_in`。
 ///
 /// `images` 决定图怎么进页面:相对路径(默认)还是内嵌 base64(单文件分享,见 [`ImageMode`])。
 pub fn render_report(
     layout: &Layout,
-    stale: &[String],
+    notices: &Notices,
     images: ImageMode,
 ) -> Result<std::path::PathBuf> {
     let report = Report::load(&layout.report_json())
         .with_context(|| format!("读取 {} 失败 —— 步 4 的输入是它", layout.report_json().display()))?;
-    let payload = build_payload(layout, &report, stale, images)?;
+    let payload = build_payload(layout, &report, notices, images)?;
     let html = render_report_html(&payload)?;
     let out = layout.report_html();
     vidbrief_project::write_atomic_str(&out, &html)
@@ -187,7 +208,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let layout = Layout::new(&dir);
 
-        let payload = build_payload(&layout, &sample_report(), &[], ImageMode::Relative).unwrap();
+        let payload = build_payload(&layout, &sample_report(), &Notices::default(), ImageMode::Relative).unwrap();
         let html = render_report_html(&payload).unwrap();
         assert!(html.contains("\"切主图\""), "数据该被注入");
         assert!(!html.contains(DATA_PLACEHOLDER), "占位符该被替换掉");
@@ -195,7 +216,7 @@ mod tests {
         // 数据里的 `</` 会被转义,免得提前结束 script 标签
         let mut tricky = sample_report();
         tricky.summary = "结束标签 </script> 在正文里".into();
-        let payload = build_payload(&layout, &tricky, &[], ImageMode::Relative).unwrap();
+        let payload = build_payload(&layout, &tricky, &Notices::default(), ImageMode::Relative).unwrap();
         let html = render_report_html(&payload).unwrap();
         assert!(!html.contains("</script> 在正文里"), "该转义 </:");
         let _ = std::fs::remove_dir_all(&dir);
@@ -210,7 +231,7 @@ mod tests {
         std::fs::create_dir_all(layout.report_dir()).unwrap();
         sample_report().save(&layout.report_json()).unwrap();
 
-        let path = render_report(&layout, &[], ImageMode::Relative).unwrap();
+        let path = render_report(&layout, &Notices::default(), ImageMode::Relative).unwrap();
         assert!(path.ends_with("report.html"), "{}", path.display());
         let html = std::fs::read_to_string(&path).unwrap();
         assert!(html.contains("\"切主图\""), "{html:.200}");
@@ -251,11 +272,11 @@ mod tests {
         let (_, file) = stage_one_shot(&layout);
         sample_report().save(&layout.report_json()).unwrap();
 
-        let relative = render_report(&layout, &[], ImageMode::Relative).unwrap();
+        let relative = render_report(&layout, &Notices::default(), ImageMode::Relative).unwrap();
         let html = std::fs::read_to_string(&relative).unwrap();
         assert!(html.contains(&file), "默认走相对路径:{html:.300}");
 
-        let embedded = render_report(&layout, &[], ImageMode::Embedded).unwrap();
+        let embedded = render_report(&layout, &Notices::default(), ImageMode::Embedded).unwrap();
         let html = std::fs::read_to_string(&embedded).unwrap();
         assert!(
             html.contains("data:image/jpeg;base64,"),
@@ -279,11 +300,47 @@ mod tests {
         sample_report().save(&layout.report_json()).unwrap();
 
         let stale = vec!["第 1 条(`切主图`)引的截图 `s001` 不在清单里了".to_string()];
-        let path = render_report(&layout, &stale, ImageMode::Relative).unwrap();
+        let path = render_report(
+            &layout,
+            &Notices {
+                stale,
+                ..Notices::default()
+            },
+            ImageMode::Relative,
+        )
+        .unwrap();
         let html = std::fs::read_to_string(&path).unwrap();
         assert!(html.contains("引的截图"), "过期的那句话该原样进页面:{html:.200}");
         assert!(
             html.contains("id=\"stale\""),
+            "标题栏得有那个位置(显不显示由前端按数据定)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 乱码那条:同一条路 —— 判据在动作层(只报不拦),这里只保证它**进得了页面**。
+    #[test]
+    fn damaged_spots_reach_the_page() {
+        let dir = std::env::temp_dir().join(format!("vidbrief-report-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        std::fs::create_dir_all(layout.report_dir()).unwrap();
+        sample_report().save(&layout.report_json()).unwrap();
+
+        let damaged = vec!["第 1 条知识点(`切主图`)的正文里有 1 处乱码字符".to_string()];
+        let path = render_report(
+            &layout,
+            &Notices {
+                damaged,
+                ..Notices::default()
+            },
+            ImageMode::Relative,
+        )
+        .unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("乱码字符"), "那句话该原样进页面:{html:.200}");
+        assert!(
+            html.contains("id=\"damaged\""),
             "标题栏得有那个位置(显不显示由前端按数据定)"
         );
         let _ = std::fs::remove_dir_all(&dir);

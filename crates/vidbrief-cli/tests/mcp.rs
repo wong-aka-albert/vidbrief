@@ -426,7 +426,10 @@ fn a_second_session_cannot_write_while_the_first_is_writing() {
     let layout = vidbrief_project::Layout::new(&project_dir);
     let held = vidbrief_project::acquire(&layout).expect("测试进程先拿住锁");
 
-    let blocked = second.call_tool("write_summary", json!({"project_id": "locked", "md": "# x"}));
+    let blocked = second.call_tool(
+        "write_summary",
+        json!({"project_id": "locked", "title": "一段", "md": "# x"}),
+    );
     assert!(tool_failed(&blocked), "锁在别人手上,这次写该被挡下:{blocked}");
     let text = first_text(&blocked);
     assert!(text.contains("另一个会话"), "要说清是被谁挡下的:{text}");
@@ -447,7 +450,10 @@ fn a_second_session_cannot_write_while_the_first_is_writing() {
     // 自己也无路可走。现在锁只活到一次调用结束;"两次调用之间被别人改过"
     // 由 `rev` 乐观并发兜(`OpenProject::save`,见 ops 里那条 stale 写的测试)。
     drop(held);
-    let after = second.call_tool("write_summary", json!({"project_id": "locked", "md": "# x"}));
+    let after = second.call_tool(
+        "write_summary",
+        json!({"project_id": "locked", "title": "一段", "md": "# x"}),
+    );
     assert!(
         !tool_failed(&after),
         "上一个会话已经收工,这个会话该能写:{}

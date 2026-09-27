@@ -53,6 +53,7 @@ pub struct DispositionSupplementsParams {
 
 /// 一条候选的结论。
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(deny_unknown_fields)]
 pub struct DispositionItem {
     /// 候选号(`find_supplement_candidates` 返回的那个 `id`)。

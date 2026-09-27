@@ -27,6 +27,7 @@ use crate::tools::attach_warning;
 
 /// 你对自己结论的把握程度。**不确定就用 `low`,不要猜。**
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum ConfidenceArg {
     High,
@@ -48,6 +49,7 @@ impl From<ConfidenceArg> for Confidence {
 ///
 /// **没有"存疑"这一档**:存疑是一种结论(定不了),不是一种错误的性质。
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum CorrectionTypeArg {
     /// 同音错字(实测:「达摩院」→「打墨院」)。
@@ -109,6 +111,7 @@ pub struct RecordShotCheckParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(deny_unknown_fields)]
 pub struct CorrectionItem {
     /// 转录段 id(`transcript.json` 里的序号,从 1 起)。
@@ -133,6 +136,7 @@ pub struct CorrectionItem {
 
 /// 一条结论是哪一种。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum CorrectionOutcomeArg {
     /// 改了正文。
@@ -186,6 +190,29 @@ pub struct WriteDocParams {
     pub project_id: String,
     /// Markdown 正文。
     pub md: String,
+}
+
+/// `write_summary` 的入参:**一段**总结(不是整篇)。
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SummarySectionParams {
+    #[schemars(description = "项目:项目目录的路径,或 `projects/` 下的项目名")]
+    pub project_id: String,
+    /// 这一节讲的是视频里**哪一刻**(秒)。
+    ///
+    /// **给了就上报告页的时间轴**(那一刻一个圆点,点开是这条的解析);
+    /// **不给 = 总述**(对整支视频的总起/收束),只进右侧面板,不上时间轴。
+    #[serde(default)]
+    pub t: Option<f64>,
+    /// 这一段叫什么。**它就是报告页上那条的标题**,也是改稿时认段的凭据
+    /// (同名 = 改写那一段)。
+    pub title: String,
+    /// 正文(markdown)。
+    pub md: String,
+    /// **待核验**:读的人该回头核一下的点(画面看不清但结论靠它的数字……)。
+    /// 一条一句,写清怎么核;没有就空着。
+    #[serde(default)]
+    pub verify: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -321,29 +348,47 @@ impl VidbriefServer {
     }
 
     #[tool(
-        description = "写 `03_summary/summary.md`,并标记步 3 完成。\
+        description = "交**一段**总结(一小节)—— 写完一段落一段,别攒着一次交整篇。\
+                       带 `t` 的段会上报告页的**时间轴**(一条一个圆点);不带 `t` 的作**总述**。\
+                       \n\n\
+                       **按段交是为了报告那一步**:报告页直接由这些段组装,\
+                       渲染时**不用再给任何内容数据** —— 你写下的就是读者看到的。\
+                       改哪段就再交一次同名的那段(同名 = 改写,顺序不动)。\
+                       \n\n\
                        **写完要停下来把内容呈现给用户**,等他说改哪儿。\
                        \n\n\
                        **这道门前置着步 2 的确认**:校准没被用户确认过、或者确认之后\
                        材料又变过,这里会被挡住 —— 那时别绕,把状态给用户看,他点头后\
                        调 `approve`。\
                        \n\n\
-                       写下的这一份会被记进**内容底账**:出报告时工具拿它对一遍,\
+                       落下的每一段都会被记进**内容底账**:出报告时工具拿它对一遍,\
                        确认「用户看到的那版总结,就是出报告用的那版」。",
-        annotations(title = "写总结", read_only_hint = false, idempotent_hint = true)
+        annotations(title = "写一段总结", read_only_hint = false, idempotent_hint = true)
     )]
     async fn write_summary(
         &self,
-        Parameters(p): Parameters<WriteDocParams>,
+        Parameters(p): Parameters<SummarySectionParams>,
     ) -> Result<CallToolResult, CallToolResult> {
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
-        let md = p.md;
-        let path = blocking(move || vidbrief_ops::write_summary(&mut opened, &md)).await?;
+        let input = vidbrief_ops::SectionInput {
+            t: p.t,
+            title: p.title,
+            md: p.md,
+            verify: p.verify,
+        };
+        let outcome = blocking(move || vidbrief_ops::write_summary(&mut opened, &input)).await?;
+        let action = if outcome.added { "新增一段" } else { "改写了一段" };
         Ok(attach_warning(
             text(format!(
-                "已写入 {}\n下一步是报告:把知识点整理好,用 `build_report` 落数据并出页面\
-                 (动手前取一次 `get_guide(step=\"build_report\")`)。",
-                path.display()
+                "{action}:`{}`\n现在共 {} 段(其中 {} 段上时间轴,{} 段是总述)。\n\
+                 文章落在 {}。\n\n\
+                 接着写下一段;全部写完、用户也满意了,再用 `build_report` 出页面 ——\
+                 报告直接由这些段组装,不用再交内容(动手前取一次 `get_guide(step=\"build_report\")`)。",
+                outcome.sections_path.display(),
+                outcome.sections,
+                outcome.anchored,
+                outcome.sections - outcome.anchored,
+                outcome.article_path.display(),
             )),
             slot.warning(),
         ))

@@ -98,17 +98,23 @@ Options:
 ";
 
 const SUMMARY_USAGE: &str = "\
-vidbrief summary —— 写总结(write_summary 的命令行版)
+vidbrief summary —— 交**一段**总结(write_summary 的命令行版)
 
-Usage: vidbrief summary <project> --md <FILE|->
+Usage: vidbrief summary <project> --title <标题> --md <FILE|-> [--at <秒>] [--verify <一句>]...
 
 Arguments:
   <project>                项目:项目目录的路径,或 projects/ 下的项目名
 
 Options:
+  --title <标题>           这一段叫什么(报告页上那条的标题;改稿按它认段:同名 = 改写)
   -m, --md <FILE|->        Markdown 正文(`-` = 从 stdin 读)
+      --at <秒>            这一节讲的是视频里哪一刻;**不给 = 总述**(不上时间轴)
+      --verify <一句>      待核验的点,可给多次
 
 说明:
+  一次交一段,写完一段落一段:段落落在 03_summary/sections.json,
+  summary.md 是拼好的文章(总述在前、其余按时刻)。
+  报告页直接由这些段组装 —— 出报告时**不用再交内容**。
   **这一步要过校准的门**:还有没核验的、或者有等用户拍板的,会被挡住并说清是哪些。
   门和 MCP 那边是同一道。
 ";
@@ -123,19 +129,16 @@ Arguments:
 
 Options:
   -j, --json <FILE|->      输入(`-` = 从 stdin 读)。形状与 MCP 工具 build_report
-                           的入参一致(少了 project_id):
-                           {\"style\":{\"granularity\":\"detailed\",\"tone\":\"大白话\",
-                                     \"notes\":\"给刚入门的人看(可选)\"},
-                            \"summary\":\"全局总结(markdown);不给就用 03_summary/summary.md\",
-                            \"topics\":[{\"t\":85.0,\"title\":\"切主图\",\"body\":\"解析正文(markdown)\",
-                              \"shots\":[\"s001\"],\"segments\":[4,5],
-                              \"sources\":[{\"kind\":\"speaker\",\"quote\":\"照抄的一句转录原文\"},
-                                          {\"kind\":\"external\",\"title\":\"语法文档\",
-                                           \"url\":\"https://example.com\"}]}],
+                           的入参一致(少了 project_id)—— **只有口味**:
+                           {\"style\":{\"preset\":\"teaching\",\"granularity\":\"detailed\",
+                                     \"tone\":\"大白话\",\"notes\":\"给刚入门的人看(可选)\"},
                             \"format\":\"both\",\"open_browser\":true}
-                           `style` 是必填的:granularity 只能是 brief(概括)/
-                           standard(标准)/ detailed(详细),tone 是自由文本(大白话 /
-                           诙谐 / 讲故事 / 行业腔……)。
+                           **内容不从这里进**:报告页由步 3 的分段
+                           (03_summary/sections.json)组装 —— 一条 = 一个带时刻的段。
+                           `style` 是必填的:preset 是 quick(快扫版)/ teaching(教学版)/
+                           story(故事版)/ review(元组版)/ exec(汇报版)/ custom,
+                           granularity 只能是 brief(概括)/ standard(标准)/ detailed(详细),
+                           tone 是自由文本(大白话 / 诙谐 / 讲故事 / 行业腔……)。
       --format <both|html|md>
                            出哪几份:both(默认,页面 + Markdown 导出)/ html / md。
                            给了就以它为准(压过输入里的 format)
@@ -276,6 +279,10 @@ Options:
   -w, --width <N>          参与打分的缩小宽度,默认 480
       --no-transcribe      跳过语音转文字(只出差帧图与截图)
       --no-shots           只出差帧图与密集区,不抽截图
+      --force              **无条件重跑**:不沿用上次的任何成果。默认相反 ——
+                           输入没变(源视频 sha256 + 参数 + 模型 + 口径版本逐项相同、
+                           材料还在、还是工具写出去的那一份)就沿用,不重算、也不作废
+                           那批看图结论与核验戳。怀疑上次那批材料时走这条。
       --run-id <ID>        给这一趟起个名字(内部契约:MCP 起作业时用,好让等它的人
                            在 run.json 里认得出「就是这一趟」)。不给就自己生成。
   -h, --help               显示本条用法
@@ -285,6 +292,8 @@ Options:
   dense_regions.json  变化密集区
   shots.json + shots/ 预筛选截图
   transcript.json     + .srt/.txt/.vtt(源视频没有音轨时跳过)
+  inputs.json         这一趟的**输入指纹**(增量重跑比的就是它:源视频 sha256、
+                      fps/width、模型/语言、口径版本)
   run.json            **运行记录**:谁在跑、跑到第几步、跑完的交代或失败原因
                       (给「别的会话想知道跑到哪儿了」用的;MCP 那三件套读的就是它)
 
@@ -293,6 +302,9 @@ Options:
     (`docs/DESIGN.md` §4.7)。查看视图不受影响。
   - 这个项目上已经有一趟在跑时**拒绝再开一趟**(两趟同时写会互相盖)。
     记录超过 2 分钟没有心跳就算那一趟断了,那时重跑不会撞上这条。
+  - **画面与转录分开判**:改 `--fps` 重跑只重算画面那一半,转录照旧留着
+    (它跟抽帧参数没关系);反过来也一样。判不准(没记录、材料动过)就重算 ——
+    重算只是多花几分钟,拿旧材料配新视频才是真出错。
 ";
 
 const UI_USAGE: &str = "\
@@ -578,6 +590,9 @@ fn parse_preprocess(args: &[String]) -> Result<(String, PreprocessOptions, Optio
             }
             "--no-transcribe" => opts.transcribe = false,
             "--no-shots" => opts.shots = false,
+            // 默认「能省则省」:输入没变就沿用上次那半成果(见 `vidbrief_ops::inputs`)。
+            // 想无条件重来一遍(怀疑材料 / 换了算法)走这条。
+            "--force" => opts.force = true,
             // 内部契约:MCP 起作业时用它给这一趟起名,好让等它的人认得出「就是这一趟」
             "--run-id" => run_id = Some(take_value(args, &mut i, inline, key)?),
             other if is_option(other) => {
@@ -825,18 +840,58 @@ fn cmd_summary(args: &[String]) -> Result<()> {
         print!("{SUMMARY_USAGE}");
         return Ok(());
     }
-    let name = positional_project(args, "summary", "--md", &[], &[])?;
+    // 这一段自己认识的选项:`--title` / `--at` / `--verify`(值)与 `--md`(值)
+    let mut title: Option<String> = None;
+    let mut at: Option<f64> = None;
+    let mut verify: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = split_option(&args[i]);
+        match key {
+            "--title" => title = Some(take_value(args, &mut i, inline, key)?),
+            "--at" => {
+                let raw = take_value(args, &mut i, inline, key)?;
+                at = Some(
+                    raw.parse::<f64>()
+                        .with_context(|| format!("--at 要一个秒数,收到 `{raw}`"))?,
+                );
+            }
+            "--verify" => verify.push(take_value(args, &mut i, inline, key)?),
+            _ => {}
+        }
+        i += 1;
+    }
+    let name = positional_project(args, "summary", "--md", &["--title", "--at", "--verify"], &[])?;
+    let title = title.context("要给 `--title`(这一段叫什么;报告页上那条的标题)")?;
     let md = take_input(args, "summary", "--md")?;
 
-    let (id, path) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
+    let (id, outcome) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
         if let Some(reason) = lock_note {
             eprintln!("警告:{reason}");
         }
-        let path = vidbrief_ops::write_summary(opened, &md)?;
-        Ok((opened.id().to_string(), path))
+        let input = vidbrief_ops::SectionInput {
+            t: at,
+            title: title.clone(),
+            md: md.clone(),
+            verify: verify.clone(),
+        };
+        let outcome = vidbrief_ops::write_summary(opened, &input)?;
+        Ok((opened.id().to_string(), outcome))
     })?;
     println!("项目     {id}");
-    println!("已写入   {}", path.display());
+    println!(
+        "{}   「{}」",
+        if outcome.added { "新增一段" } else { "改写一段" },
+        title
+    );
+    println!(
+        "现有     {} 段(其中 {} 段上时间轴,{} 段是总述)",
+        outcome.sections,
+        outcome.anchored,
+        outcome.sections - outcome.anchored
+    );
+    println!("段落     {}", outcome.sections_path.display());
+    println!("文章     {}", outcome.article_path.display());
     Ok(())
 }
 
@@ -885,34 +940,8 @@ fn cmd_report(args: &[String]) -> Result<()> {
         vidbrief_report::ImageMode::Relative
     };
 
-    let mut topics = Vec::with_capacity(body.topics.len());
-    for topic in body.topics {
-        topics.push(vidbrief_ops::TopicInput {
-            id: topic.id,
-            t: topic.t,
-            title: topic.title,
-            body: topic.body,
-            shots: topic.shots,
-            segments: topic.segments,
-            verify: topic.verify,
-            sources: topic
-                .sources
-                .into_iter()
-                .map(|source| match source {
-                    ReportSourceBody::Speaker { quote } => {
-                        vidbrief_ops::SourceInput::Speaker { quote }
-                    }
-                    ReportSourceBody::External { title, url } => {
-                        vidbrief_ops::SourceInput::External { title, url }
-                    }
-                })
-                .collect(),
-        });
-    }
     let input = vidbrief_ops::ReportInput {
         style: body.style.into_style()?,
-        summary: body.summary,
-        topics,
     };
 
     let (id, outcome) = vidbrief_ops::with_write(&name, None, |opened, lock_note| {
@@ -946,6 +975,22 @@ fn cmd_report(args: &[String]) -> Result<()> {
         println!("单文件   图已内嵌(页面可单独发出去;视频那一半仍要素材 + 本机服务)");
     }
     print_stale_anchors(&outcome.stale_anchors);
+    if !outcome.warnings.is_empty() {
+        println!();
+        println!(
+            "留意     这页有 {} 处乱码字符(页面上是方块)—— 不拦落盘,列出来给人核:",
+            outcome.warnings.len()
+        );
+        for one in &outcome.warnings {
+            println!("         · {one}");
+        }
+    }
+    if outcome.derived_segments > 0 {
+        println!(
+            "证据     {} 条的转录段是按锚点时刻就近取的(那一刻他说了什么)",
+            outcome.derived_segments
+        );
+    }
     match &outcome.url {
         Some(url) => {
             println!("打开     {url}");
@@ -1105,10 +1150,9 @@ struct SupplementItem {
 #[serde(deny_unknown_fields)]
 struct ReportBody {
     /// **这份报告按什么口味做** —— 用户提示词里那一份要求的落点。必填。
+    ///
+    /// **内容不从这里进**:报告页由步 3 的分段(`03_summary/sections.json`)组装。
     style: ReportStyleBody,
-    #[serde(default)]
-    summary: Option<String>,
-    topics: Vec<ReportTopicBody>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
@@ -1163,32 +1207,7 @@ impl ReportStyleBody {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReportTopicBody {
-    #[serde(default)]
-    id: Option<u32>,
-    t: f64,
-    title: String,
-    body: String,
-    #[serde(default)]
-    shots: Vec<String>,
-    #[serde(default)]
-    segments: Vec<u32>,
-    #[serde(default)]
-    sources: Vec<ReportSourceBody>,
-    #[serde(default)]
-    verify: Vec<String>,
-}
 
-#[derive(serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum ReportSourceBody {
-    /// 讲者原话:**照抄**的一句转录原文(工具去材料里搜段号)。
-    Speaker { quote: String },
-    /// 外部补充:标题 + 能点回去的链接。
-    External { title: String, url: String },
-}
 
 /// 截图 id:`s007` 或 `7`。
 ///
@@ -1445,6 +1464,10 @@ fn run_preprocess(
     }
 
     match &report.shots {
+        // 沿用上次那批:说清"一张没重抽" —— 它意味着那批看图结论一条没作废
+        Some(count) if report.reuse.visual => {
+            println!("截图     {count} 张(沿用上次那批,没有重抽)")
+        }
         Some(count) => {
             println!("截图     {count} 张 → {}", opened.layout().shots_dir().display());
             if !report.shots_skipped.is_empty() {
@@ -1463,7 +1486,13 @@ fn run_preprocess(
             model,
             language,
             ..
-        } => println!("转录     {segments} 段,模型 {model} ({language})"),
+        } => {
+            if report.reuse.transcript {
+                println!("转录     {segments} 段,模型 {model} ({language})(沿用上次那份,没有重跑)")
+            } else {
+                println!("转录     {segments} 段,模型 {model} ({language})")
+            }
+        }
         // 没有音轨是**合法**的空结果,不算失败
         TranscriptOutcome::NoAudio => println!("转录     源视频没有音轨,跳过"),
         TranscriptOutcome::Skipped => println!("转录     已跳过(--no-transcribe)"),
@@ -1481,6 +1510,30 @@ fn run_preprocess(
         (Some(path), _) => println!("视图     {}", path.display()),
         (None, Some(error)) => eprintln!("视图     渲染失败(材料不受影响):{error}"),
         (None, None) => {}
+    }
+
+    // 增量重跑:没沿用哪半、为什么。静默作废别人的活最不该干 —— 静默复用也一样,
+    // 所以两种结局都要摆出来。显式跳过(`--no-shots` / `--no-transcribe`)不必重复说。
+    if opts.shots {
+        if let Some(why) = &report.reuse.visual_why_not {
+            println!("         画面重算:{why}");
+        }
+    }
+    if opts.transcribe {
+        if let Some(why) = &report.reuse.transcript_why_not {
+            println!("         转录重跑:{why}");
+        }
+    }
+    if report.reuse.source_changed {
+        let short = report
+            .reuse
+            .source_sha256
+            .get(..16)
+            .unwrap_or(&report.reuse.source_sha256);
+        println!(
+            "         ⚠ 源视频内容跟 project.json 里记的对不上(现在算出来 sha256 {short}…)——\
+             硬链接的源文件被就地改过?材料该重算的都重算了,但这事得让你知道"
+        );
     }
 
     println!();

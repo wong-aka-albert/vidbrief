@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let layout = vidbrief_project::Layout::new(std::path::Path::new(&dir));
 
     // 锚点过期:这条实拍只看渲染,不复核(判据在 `vidbrief-ops::report::stale_anchors`)
-    let html = vidbrief_report::render_report(&layout, &[], vidbrief_report::ImageMode::Relative)?;
+    let html = vidbrief_report::render_report(&layout, &vidbrief_report::Notices::default(), vidbrief_report::ImageMode::Relative)?;
     println!("html: {}", html.display());
 
     let report = vidbrief_project::Report::load(&layout.report_json())?;

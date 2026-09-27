@@ -593,6 +593,14 @@ mod tests {
             segment_checks_cleared: 0,
             timeline: None,
             timeline_error: None,
+            reuse: crate::preprocess::ReuseOutcome {
+                visual: false,
+                transcript: false,
+                visual_why_not: Some("测试夹具:没跑过真东西".into()),
+                transcript_why_not: Some("测试夹具:没跑过真东西".into()),
+                source_sha256: "0".repeat(64),
+                source_changed: false,
+            },
             done: true,
             elapsed_seconds: 12.5,
         }

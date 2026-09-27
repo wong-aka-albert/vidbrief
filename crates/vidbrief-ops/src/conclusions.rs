@@ -577,27 +577,121 @@ pub fn write_note(
     Ok(full)
 }
 
-/// 写 `03_summary/summary.md` 并标记步 3 完成。
+/// 交上来的一段总结(见 [`write_summary`])。
+#[derive(Debug, Clone, Default)]
+pub struct SectionInput {
+    /// 这一节讲的是哪一刻(秒)。**不给 = 总述**(不上时间轴,只进右侧面板)。
+    pub t: Option<f64>,
+    /// 这一段的名字(页面上那条的标题;改稿时按它认段)。
+    pub title: String,
+    /// 正文(markdown)。
+    pub md: String,
+    /// 待核验的点(看不清但结论靠它的数字……)。没有就空着。
+    pub verify: Vec<String>,
+}
+
+/// 落一段之后回什么。
+#[derive(Debug, Clone)]
+pub struct SummaryOutcome {
+    /// 分段数据落点(`03_summary/sections.json`)—— 报告页从它组装。
+    pub sections_path: PathBuf,
+    /// 拼好的文章(`03_summary/summary.md`)。
+    pub article_path: PathBuf,
+    /// 现在一共几段。
+    pub sections: usize,
+    /// 其中上时间轴的几段(其余是总述)。
+    pub anchored: usize,
+    /// 这一次是新加的一段,还是改写了同名的那段。
+    pub added: bool,
+}
+
+/// 交**一段**总结(一小节)—— 分段提交,写完一段落一段。
 ///
-/// **先过步 2 的门**(`review::gate_calibrate`)。这是 M4 联调之后加的:
-/// 在那之前,一个一张图都没校准的项目可以直接写总结、把步 3 标成完成 ——
-/// "靠对话把关"等于没有把关。
+/// # 为什么是分段(2026-09-27 改)
 ///
-/// 顺带记下这份总结的**内容底账**([`vidbrief_project::doc_print`]):
-/// 步 3→4 那道门问的就是"出报告之前,这份总结还是工具写出去的那一份吗"
-/// (`crate::review::gate_summarize`)。没这一笔那句话就没法回答 ——
-/// 而它正是 M4 第三轮那次绕门的形状(手写 `summary.md` 把门绕过去)。
-pub fn write_summary(opened: &mut OpenProject, md: &str) -> Result<PathBuf> {
+/// 从前是一次交整篇 markdown(实测一次 15KB)。两个后果:①一发很大、断了要重来;
+/// ②**报告那一步没有结构可用** —— 报告页要往时间轴上挂点,而一篇散文里没有
+/// "哪一段对应哪一刻",于是步 4 只能回头再问模型要一遍结构化数据(又一发十几 KB)。
+/// 同一份内容写两遍,还逼着模型当打字机。
+///
+/// 现在:**写的时候就把结构带上**。一段 = 一个小节(讲哪一刻、什么标题、正文),
+/// 写完提交;报告只是把它摆到页面上。
+///
+/// # 认段
+///
+/// 按**标题**认:同名 = 改写那一段(原地,顺序不变),新标题 = 追加。
+/// 为什么不用序号:改稿时说「把《两种方案》那段改一下」比「把第 7 段改一下」稳。
+///
+/// # 门与底账
+///
+/// **先过步 2 的门**(`review::gate_calibrate`);每次落盘都刷新 `summary.md`
+/// (拼好的那篇文章,人读它)与它的**内容底账** —— 步 3→4 那道门问的就是
+/// "出报告之前,这份总结还是工具写出去的那一份吗"。
+pub fn write_summary(opened: &mut OpenProject, input: &SectionInput) -> Result<SummaryOutcome> {
     crate::review::gate_calibrate(opened)?;
-    let path = opened.layout().summary_md();
-    vidbrief_project::write_atomic_str(&path, md).context("写入 summary.md 失败")?;
+
+    let title = input.title.trim();
+    if title.is_empty() {
+        bail!("这一段没给标题 —— 它就是页面上那条的名字,也是以后改稿时认它的凭据");
+    }
+    let md = input.md.trim();
+    if md.is_empty() {
+        bail!("第「{title}」段没给正文 —— 一段空话交上去,页面上就是一片空白");
+    }
+    if let Some(t) = input.t {
+        if !t.is_finite() || t < 0.0 {
+            bail!("第「{title}」段的时刻 `t` 不合法:{t}");
+        }
+        let duration = opened.meta().duration;
+        if duration > 0.0 && t > duration + 1.0 {
+            bail!(
+                "第「{title}」段的时刻 {t} 落在视频之外(整支 {duration:.1}s)——\
+                 报告页上那个圆点会飘在时间轴外头。\n\
+                 想写总述那种不挂时刻的段,就别给 `t`。"
+            );
+        }
+    }
+
+    let path = opened.layout().summary_sections();
+    let mut sections = if path.is_file() {
+        vidbrief_project::Sections::load(&path)
+            .with_context(|| format!("读 {} 失败", path.display()))?
+    } else {
+        vidbrief_project::Sections::new()
+    };
+    let added = sections.upsert(vidbrief_project::Section {
+        t: input.t,
+        title: title.to_string(),
+        md: md.to_string(),
+        verify: input
+            .verify
+            .iter()
+            .map(|one| one.trim().to_string())
+            .filter(|one| !one.is_empty())
+            .collect(),
+    });
+    sections
+        .save(&path)
+        .with_context(|| format!("写 {} 失败", path.display()))?;
+
+    // `summary.md` 仍是"给人读的那篇文章":总述在前、其余按时刻 —— 每次落段都重拼
+    let article = sections.to_markdown();
+    let md_path = opened.layout().summary_md();
+    vidbrief_project::write_atomic_str(&md_path, &article).context("写入 summary.md 失败")?;
     opened.state_mut().note_content(
         vidbrief_project::layout::SUMMARY_FILE,
-        vidbrief_project::doc_print(md),
+        vidbrief_project::doc_print(&article),
     );
     opened.state_mut().progress.summarize.mark_done();
     opened.save()?;
-    Ok(path)
+
+    Ok(SummaryOutcome {
+        sections_path: path,
+        article_path: md_path,
+        sections: sections.sections.len(),
+        anchored: sections.anchored().len(),
+        added,
+    })
 }
 
 // ── 给测试用的小工具 ─────────────────────────────────────────────────
@@ -1066,6 +1160,49 @@ mod tests {
         assert_eq!(fake.state().progress.calibrate.rounds, 0);
     }
 
+    /// 步 2 的活干完(图核过、转录报过审)—— 写总结那道门的前置条件。
+    ///
+    /// 走的是**正经工具**(`record_shot_check` / `apply_corrections`),不是直接改状态:
+    /// 门读的就是工具写下的那一份(见 `testkit` 里那几个助手的说明)。
+    fn calibrated(tag: &str) -> Fake {
+        let fake = Fake::new(tag)
+            .with_transcript(&[(0.0, 2.0, "各位好"), (2.0, 4.0, "接着讲")])
+            .with_curve(5)
+            .with_shot(1, 2.0);
+        let mut opened = fake.open();
+        record_shot_check(
+            &mut opened,
+            vidbrief_project::ShotId::new(1).unwrap(),
+            &ShotCheckInput {
+                r#match: true,
+                audio_visual_sync: true,
+                type_read: "画面内容".into(),
+                issues: Vec::new(),
+                confidence: Confidence::High,
+                neighbor_text: None,
+                evidence_quote: Some("各位好".into()),
+            },
+        )
+        .unwrap();
+        apply_corrections(&mut opened, &[], &[1, 2]).unwrap();
+        fake
+    }
+
+    /// 一段总结的输入(标题 + 正文,可选锚点)。
+    fn a_section(t: Option<f64>, title: &str, md: &str) -> SectionInput {
+        SectionInput {
+            t,
+            title: title.into(),
+            md: md.into(),
+            verify: Vec::new(),
+        }
+    }
+
+    /// 落一段总结 —— 拿它的结果说事时不必每次都写一遍 `unwrap`。
+    fn write_one(opened: &mut OpenProject, input: SectionInput) -> SummaryOutcome {
+        write_summary(opened, &input).unwrap_or_else(|e| panic!("落分段失败:{e:#}"))
+    }
+
     #[test]
     fn summary_marks_its_step_and_leaves_a_ledger() {
         let fake = Fake::new("concl-steps")
@@ -1076,24 +1213,29 @@ mod tests {
 
         // 步 2 的门:这一步的活没干完就不许写总结。
         // 这里那张图还没核验,所以挡的是"还没核验完"那一档 —— 不需要任何人出面。
-        let blocked = write_summary(&mut opened, "# 总结\n").unwrap_err().to_string();
+        let blocked = write_summary(&mut opened, &a_section(None, "总述", "# 总结"))
+            .unwrap_err()
+            .to_string();
         assert!(blocked.contains("还没核验完"), "{blocked}");
         assert!(
             !fake.layout().summary_md().is_file(),
             "被挡住的时候**不该留下半成品**"
         );
+        assert!(
+            !fake.layout().summary_sections().is_file(),
+            "分段数据也一样:被挡住就一个字节都不落"
+        );
 
         // 把活干完 —— 走正经工具写回结论,**不用签字**,门自己就开
-        let id = vidbrief_project::ShotId::new(1).unwrap();
         record_shot_check(
             &mut opened,
-            id,
+            vidbrief_project::ShotId::new(1).unwrap(),
             &ShotCheckInput {
                 r#match: true,
                 audio_visual_sync: true,
                 type_read: "画面内容".into(),
                 issues: Vec::new(),
-                confidence: vidbrief_project::Confidence::High,
+                confidence: Confidence::High,
                 neighbor_text: None,
                 evidence_quote: Some("各位好".into()),
             },
@@ -1101,18 +1243,112 @@ mod tests {
         .unwrap();
         // 转录那一段也报一声"审过了" —— 门分不出"看过没问题"和"压根没看"
         apply_corrections(&mut opened, &[], &[1]).unwrap();
-        let _ = &mut opened;
-        write_summary(&mut opened, "# 总结\n").unwrap_or_else(|e| panic!("{e:#}"));
+        write_one(&mut opened, a_section(None, "总述", "# 总结"));
 
         let state = fake.state();
         assert!(state.progress.summarize.done);
         assert!(fake.layout().summary_md().is_file());
-        // 底账记的是**这一份正文** —— 步 3→4 那道门就靠它对账
+        assert!(
+            fake.layout().summary_sections().is_file(),
+            "分段数据要落 —— 报告页从它组装"
+        );
+        // 底账记的是**这一份正文**(拼好的那篇文章)—— 步 3→4 那道门就靠它对账
         assert_eq!(
             state.content.get(vidbrief_project::layout::SUMMARY_FILE),
             Some(&vidbrief_project::doc_print("# 总结\n")),
             "写总结要顺手记下它的内容底账"
         );
+    }
+
+    /// 分段落盘:一次交一段;同名 = 改写那一段,新标题 = 追加。
+    ///
+    /// 守的是"认段按标题"这条规矩(报告页按它认条):改稿时说「把《切到解释器主窗口》
+    /// 那段改一下」比说「把第 7 段改一下」稳 —— 人记标题,不记序号。
+    #[test]
+    fn sections_land_one_at_a_time_and_the_same_title_rewrites_that_one() {
+        let fake = calibrated("concl-sections");
+        let mut opened = fake.open();
+
+        let first = write_one(
+            &mut opened,
+            SectionInput {
+                t: Some(2.0),
+                title: "切到解释器主窗口".into(),
+                md: "讲者从大纲切到解释器主窗口。".into(),
+                verify: vec!["  画面左下角的版本号看不清,核一下 s001  ".into()],
+            },
+        );
+        assert!(first.added, "第一次是新加的一段");
+        assert_eq!((first.sections, first.anchored), (1, 1), "这一段上时间轴");
+        assert!(first.sections_path.is_file(), "分段文件要落");
+        assert!(
+            first.article_path.is_file(),
+            "给人读的那篇文章也要跟着重拼"
+        );
+
+        let second = write_one(&mut opened, a_section(None, "总述", "整支讲一件事。"));
+        assert_eq!(
+            (second.sections, second.anchored),
+            (2, 1),
+            "总述算一段,但不上时间轴"
+        );
+
+        // 同名再落一遍 = 改写那一段(段数不动)
+        let again = write_one(
+            &mut opened,
+            a_section(Some(2.0), "切到解释器主窗口", "改过一遍的正文。"),
+        );
+        assert!(!again.added, "同名该是改写,不是新增");
+        assert_eq!(again.sections, 2, "段数不该变");
+
+        let sections =
+            vidbrief_project::Sections::load(&fake.layout().summary_sections()).unwrap();
+        let one = sections
+            .sections
+            .iter()
+            .find(|s| s.title == "切到解释器主窗口")
+            .expect("那一段该在");
+        assert_eq!(one.md, "改过一遍的正文。");
+        assert!(
+            one.verify.is_empty(),
+            "改写是整段替换:上一次的待核验跟着走"
+        );
+
+        // `summary.md` 是给人读的那一篇:总述在前,其余按时刻
+        let article = std::fs::read_to_string(fake.layout().summary_md()).unwrap();
+        let overview = article.find("整支讲一件事").expect("总述要在");
+        let anchored = article.find("改过一遍的正文").expect("锚点段要在");
+        assert!(overview < anchored, "文章顺序该是 总述 → 时刻序:{article}");
+    }
+
+    /// **渲染不出来的形状问题挡在写入口**:标题或正文空着、时刻不合法或落在视频外。
+    ///
+    /// 从前这几条判在 `build_report` 那一侧(组装报告时才发现)。2026-09-27 改成分段之后,
+    /// 一段的形状在**写的时候**就定下了 —— 挡在这儿,坏数据根本进不了 `sections.json`,
+    /// 报告那一侧也就不必再判一遍。
+    #[test]
+    fn a_section_without_a_title_body_or_a_sane_anchor_is_refused() {
+        let fake = calibrated("concl-section-bad");
+        let mut opened = fake.open();
+
+        let bad: [(SectionInput, &str); 4] = [
+            (a_section(Some(2.0), "  ", "正文"), "没给标题"),
+            (a_section(Some(2.0), "标题", "   "), "没给正文"),
+            (a_section(Some(f64::NAN), "标题", "正文"), "不合法"),
+            (a_section(Some(10_000.0), "标题", "正文"), "落在视频之外"),
+        ];
+        for (input, needle) in bad {
+            let err = write_summary(&mut opened, &input).unwrap_err().to_string();
+            assert!(err.contains(needle), "该被拦下的是「{needle}」:{err}");
+            assert!(
+                !fake.layout().summary_sections().is_file(),
+                "整批退回时不该落下半个分段文件"
+            );
+            assert!(
+                !fake.layout().summary_md().is_file(),
+                "给人读的那篇文章也不该落"
+            );
+        }
     }
 
     #[test]

@@ -221,4 +221,71 @@ mod tests {
             assert!(names.iter().any(|n| n == expected), "缺工具 {expected}");
         }
     }
+
+    /// 收集一个 schema 里所有 `$ref`(带路径,报错时指得出是哪个参数)。
+    fn refs_in(node: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    let here = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if key == "$ref" {
+                        out.push(format!("{here} = {value}"));
+                    }
+                    refs_in(value, &here, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, value) in items.iter().enumerate() {
+                    refs_in(value, &format!("{path}[{index}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// **每件工具的入参 schema 都要自足:不许出现 `$ref` / `$defs`。**
+    ///
+    /// 这条判据是被一次真 agent 实测逼出来的(2026-09-27,agnes 3.0 flash):
+    /// `build_report.style` 的 schema 是 `{"$ref": "#/$defs/StyleParam"}` ——
+    /// **一个 `type` 都没有**。模型没有可依据的类型,就把那个对象写成了 JSON
+    /// 字符串,连试五次全废(`invalid type: string …, expected struct StyleParam`)。
+    ///
+    /// 当时全表 41 件工具 / 110 个属性里,只有**两个**属性是这样裸 `$ref`:
+    /// `style`(指向对象 → 猜错)和 `record_shot_check.confidence`
+    /// (指向字符串枚举 → 猜"string"猜对了,纯属运气)。带 `type` 的属性一个没错。
+    ///
+    /// 规矩取的是宽的那一头:**不假设宿主会解引用 `$ref`**(OpenAI 的 strict 模式
+    /// 干脆不收),更不假设模型会。内联的做法是 `#[schemars(inline)]` ——
+    /// 标在**被引用的类型**上(类型定义仍只有一处),生成的 schema 就不再长 `$defs`。
+    #[test]
+    fn tool_schemas_are_self_contained() {
+        let tools = VidbriefServer::new().tools_for_test();
+        assert!(tools.len() >= 15, "工具太少,是不是漏接了某组");
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut properties = 0usize;
+        for tool in &tools {
+            let schema = serde_json::Value::Object((*tool.input_schema).clone());
+            properties += schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|p| p.len())
+                .unwrap_or(0);
+            let mut refs = Vec::new();
+            refs_in(&schema, &tool.name, &mut refs);
+            offenders.extend(refs);
+        }
+
+        assert!(properties > 50, "属性太少({properties}),是不是工具表没接全");
+        assert!(
+            offenders.is_empty(),
+            "这些入参是裸 `$ref`(模型看不到类型,会照最省事的猜):\n{}\n\
+             修法:给被引用的类型标 `#[schemars(inline)]`。",
+            offenders.join("\n")
+        );
+    }
 }

@@ -61,15 +61,23 @@ pub fn serve_and_open_report(
     opened: &OpenProject,
     open_browser: bool,
 ) -> Result<(PathBuf, String, Vec<String>)> {
-    let stale = match vidbrief_project::Report::load(&opened.layout().report_json()) {
-        Ok(report) => crate::report::stale_anchors(opened, &report),
+    // 材料可能在报告之后被改过 —— 重渲染这条路**只报不拦**(页面是发现它的窗口);
+    // 乱码同一条道理(数据是上一轮落下的,但这一页现在要给人看)
+    let (stale, damaged) = match vidbrief_project::Report::load(&opened.layout().report_json()) {
+        Ok(report) => (
+            crate::report::stale_anchors(opened, &report),
+            crate::report::damaged_in(&report),
+        ),
         // 报告数据还没有/读不动 —— 下面渲染那步会给出更准的报错
-        Err(_) => Vec::new(),
+        Err(_) => (Vec::new(), Vec::new()),
     };
     // 这条路是"起服务 + 开着视频看页面",图用相对路径就够(素材就在项目里)
     let path = vidbrief_report::html::render_report(
         opened.layout(),
-        &stale,
+        &vidbrief_report::Notices {
+            stale: stale.clone(),
+            damaged,
+        },
         vidbrief_report::ImageMode::Relative,
     )?;
     let url = serve(

@@ -88,6 +88,13 @@ pub struct PreprocessParams {
     /// 要不要抽关键截图。默认 true。
     #[serde(default)]
     pub shots: Option<bool>,
+    /// **无条件重跑**:不沿用上次的任何成果。
+    ///
+    /// 默认相反 —— 输入没变(源视频指纹 + `fps`/`width` + 模型 + 口径版本逐项相同、
+    /// 材料还在且是工具写出去的那一份)时,画面与转录各自沿用上次的成果:
+    /// 不重算,**也不作废**那批看图结论与核验戳。怀疑上次那批材料有问题时传 true。
+    #[serde(default)]
+    pub force: Option<bool>,
     /// **这次调用最多等多久**(秒)。不给 = 180;给 0 = 起了就回,自己用
     /// `preprocess_progress` 看进度。
     ///
@@ -113,12 +120,17 @@ impl VidbriefServer {
                         默认最多等 180 秒,等够了它还在跑就把当前进度如实返回(**不重开**);\
                         再调一次 `preprocess` 是接着等,`preprocess_progress` 只看一眼,\
                         跑完了用 `preprocess_result` 取结果。\
+                        **输入没变就不重算**:源视频指纹、`fps`/`width`、模型逐项相同,\
+                        材料还在(且是工具写出去的那一份)时,画面与转录各自**沿用上次的成果** ——\
+                        不重跑、也不作废那批看图结论与核验戳;返回里 `reuse` 说清沿用了哪半、\
+                        没沿用的为什么。要无条件重来一遍就传 `force: true`。\
                         返回的 `done` 为 false 表示转录失败(材料保留、未标记完成),\
                         此时应把 `transcript.error` 转告用户,而不是继续往下走。",
-        // **不是幂等的**:跑完了再调就是**重跑**,而重跑会重算画面、作废看图结论
-        // (`shot_checks_cleared` 报的就是作废掉的条数)。还在跑时它只是搭车、不重开,
-        // 但别拿那一条当"重复调用没副作用" —— 客户端照着 idempotentHint 自动重试,
-        // 正好会在"跑完了"那一侧把人的校准成果抹掉。
+        // **不是幂等的**:跑完了再调就是**重跑**。输入没变时它不重算(见返回里的 `reuse`),
+        // 但输入变过(换了视频 / 改了 fps / 换了模型)就会重算,并作废那一半的成果
+        //(`shot_checks_cleared` / `segment_checks_cleared` 报的就是作废掉的条数)。
+        // 还在跑时它只是搭车、不重开;而客户端照着 idempotentHint 自动重试的话,
+        // 正好会在"跑完了且输入变过"那一侧把人的校准成果抹掉 —— 所以照旧标 false。
         annotations(title = "跑前处理", read_only_hint = false, idempotent_hint = false)
     )]
     async fn preprocess(
@@ -143,6 +155,9 @@ impl VidbriefServer {
         }
         if let Some(shots) = p.shots {
             options.shots = shots;
+        }
+        if let Some(force) = p.force {
+            options.force = force;
         }
 
         // 先说清「有没有人在跑、我等着谁」。这一步必须在起进程**之前**做:

@@ -15,7 +15,7 @@
 - **`approve`** — 记下「**用户拍板了悬着的那一批**」—— 只对'等人拍板'那一类有效。
   必填:`project_id`
 - **`build_report`** — 出**报告**(步 4 的产出):交一整份报告数据 —— 全局总结 + 局部知识点数组,每条知识点挂在**一个时刻**上(**视频里逐个讲的案例/步骤,每个各占一条**,别合并成一…
-  必填:`project_id`、`style`、`topics`
+  必填:`project_id`、`style`
 - **`create_project`** — 新建一个项目:建目录骨架、把源视频搬进来(硬链接→软链接→复制)、用 ffprobe 探测元数据。
   必填:`video_path`
 - **`disposition_supplements`** — 处置补图候选:**逐条给结论** —— 补(`need_shot`)或者不补(`no_shot`)。
@@ -59,5 +59,5 @@
   必填:`action`、`project_id`、`shot_id`
 - **`write_note`** — 往项目里写一份 Markdown:交叉印证结论(`02_calibrate/cross_validate.md`)、校准日志(`02_calibrate/calibration_l…
   必填:`md`、`path`、`project_id`
-- **`write_summary`** — 写 `03_summary/summary.md`,并标记步 3 完成。
-  必填:`md`、`project_id`
+- **`write_summary`** — 交**一段**总结(一小节)—— 写完一段落一段,别攒着一次交整篇。
+  必填:`md`、`project_id`、`title`
