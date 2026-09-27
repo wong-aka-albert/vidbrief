@@ -622,3 +622,32 @@ fn reuse_never_touches_what_the_model_decided() {
         "重算就该作废旧结论"
     );
 }
+
+/// **外挂版本也是输入**:换了 ffmpeg,抽出来的帧可能不一样 —— 不许沿用。
+///
+/// 这条钉的是"指纹里那一栏真的在起作用":把记录里的 ffmpeg 版本改掉
+/// (等价于这台机器换了 ffmpeg),下一趟就该重算,而不是继续拿旧帧当新帧。
+#[test]
+fn a_changed_ffmpeg_version_forces_a_recompute() {
+    let (tmp, layout) = prepared("reuse-ffmpeg");
+    let before = shot_stamps(&layout);
+
+    let path = layout.preprocess_inputs();
+    let text = std::fs::read_to_string(&path).expect("读输入指纹");
+    let mut inputs: serde_json::Value = serde_json::from_str(&text).expect("指纹该是 JSON");
+    assert!(
+        inputs["visual"]["ffmpeg_version"].is_string(),
+        "第一趟的记录里就该有外挂版本这一栏(没有的话这条测的是空气):{text}"
+    );
+    inputs["visual"]["ffmpeg_version"] = serde_json::Value::String("ffmpeg 另一个版本".into());
+    std::fs::write(&path, serde_json::to_string_pretty(&inputs).unwrap()).expect("写回指纹");
+
+    let out = run_in(&tmp.0, &["preprocess", "test-sample", "--no-transcribe"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(
+        printed.contains("ffmpeg"),
+        "重算的理由要指名 ffmpeg:\n{printed}"
+    );
+    assert_ne!(shot_stamps(&layout), before, "换了 ffmpeg 就该重抽");
+}

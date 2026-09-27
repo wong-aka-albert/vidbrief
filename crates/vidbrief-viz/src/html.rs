@@ -137,7 +137,6 @@ mod tests {
             rounds: Some(2),
             shots: vec![],
             segments: vec![],
-            log: Some("# 校准日志\n\n## 第 1 轮(2026-09-25 17:18–17:25)\n- 改了 4 段。".into()),
             timeline_url: "../01_preprocess/timeline.html".into(),
         }
     }
@@ -155,7 +154,10 @@ mod tests {
         let html = render_calibration_table_html(&calib_sample()).unwrap();
         assert!(!html.contains(DATA_PLACEHOLDER), "占位符应当被替换掉");
         assert!(html.contains("\"rounds\":2"));
-        assert!(html.contains("## 第 1 轮"), "校准日志要原样内嵌:{html}");
+        assert!(
+            !html.contains("校准日志"),
+            "页面上不该再有校准日志区块(它是 agent 的账,不是页面素材):{html}"
+        );
         assert!(
             !html.contains("</script><script>alert(1)"),
             "数据里的 </script> 必须被转义"

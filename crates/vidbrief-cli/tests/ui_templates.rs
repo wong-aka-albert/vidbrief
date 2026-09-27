@@ -225,3 +225,128 @@ fn the_scanner_catches_the_bug_that_emptied_the_report_page() {
         line_breaking_strings(tricky)
     );
 }
+
+
+/// 扫一段 JS,挑出**建了却没挂上去**的元素变量名。
+///
+/// 只认模板自己的 `el(…)` 辅助函数 —— 它建出来的一定是 DOM 节点,建了就该挂。
+/// **不认 `document.createElement`**:离屏 canvas 那种本来就不进 DOM
+/// (`timeline.html` 的 `off` 就是:它只用来 `getContext` / `drawImage`)。
+/// 挂法认 `appendChild(X)` / `append(X)`,**一行里挂几个都收**
+/// (`what.appendChild(old); what.appendChild(nw);` 这种写法模板里有);
+/// `return X` 也算用掉 —— 辅助函数内部正是这么把节点交出去的。
+fn unappended_elements(script: &str) -> Vec<String> {
+    fn ident(text: &str) -> String {
+        text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
+    }
+    let mut created: Vec<String> = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in script.lines() {
+        let text = line.trim();
+        if let Some(rest) = text.strip_prefix("const ") {
+            if let Some((name, rhs)) = rest.split_once('=') {
+                let name = name.trim();
+                if rhs.trim().starts_with("el(")
+                    && !name.is_empty()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    created.push(name.to_string());
+                }
+            }
+        }
+        for (at, _) in line.match_indices(".append") {
+            let after = &line[at + ".append".len()..];
+            let after = after
+                .strip_prefix("Child(")
+                .or_else(|| after.strip_prefix('('))
+                .unwrap_or(after);
+            let name = ident(after);
+            if !name.is_empty() {
+                used.insert(name);
+            }
+        }
+        if let Some(rest) = text.strip_prefix("return ") {
+            let name = ident(rest);
+            if !name.is_empty() {
+                used.insert(name);
+            }
+        }
+    }
+    created.into_iter().filter(|n| !used.contains(n)).collect()
+}
+
+/// **建出来的元素必须挂到某处。**
+///
+/// 2026-09-27 实测(`ui/calibrate.html`):截图卡片里 `const body = el("div", "body")`
+/// 建了、往里塞了 id / 时刻 / 来源 / 音画同步 / 画面读出 / 凭据 / 把握,
+/// **就是没 `card.appendChild(body)`** —— 卡片只剩一张缩略图,
+/// `record_shot_check` 存进去的看图结论在页面上一字不显示。
+/// 而且它一声不响:JS 不报错,Rust 侧也看不见(卡片是浏览器里建的),
+/// 只有人盯着页面数一数才发现。
+#[test]
+fn every_element_built_in_a_view_template_gets_mounted() {
+    let dir = repo_root().join("ui");
+    let mut checked = 0;
+    let mut problems: Vec<String> = Vec::new();
+
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("读不到模板目录 {}:{e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("目录项").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let html = std::fs::read_to_string(&path).expect("读模板");
+        checked += 1;
+        for body in script_bodies(&html) {
+            for orphan in unappended_elements(body) {
+                problems.push(format!("{name}: 建了 `{orphan}` 却没有任何 appendChild —— 它不会出现在页面上"));
+            }
+        }
+    }
+
+    assert!(checked >= 3, "只扫到 {checked} 个模板,`ui/` 是不是搬走了?");
+    assert!(problems.is_empty(), "建了元素没挂上去(静默丢失):
+{}", problems.join("
+"));
+}
+
+/// 判据自己得先站得住:事故现场必须报,补上那一行必须不报,
+/// 辅助函数本身与 `$` 拿现成节点的都不许误报。
+#[test]
+fn the_mounting_check_catches_the_calibration_card_bug() {
+    let broken = "const body = el('div', 'body');
+body.appendChild(head);
+grid.appendChild(card);
+";
+    assert_eq!(
+        unappended_elements(broken),
+        vec!["body".to_string()],
+        "少挂一行的必须报出来"
+    );
+
+    let fixed = "const body = el('div', 'body');
+card.appendChild(body);
+grid.appendChild(card);
+";
+    assert!(unappended_elements(fixed).is_empty(), "补上 appendChild 的就不该报");
+
+    // 三类真误报(都逐字来自模板):辅助函数本身、一行挂两个、离屏 canvas
+    let tricky = "const el = (tag, cls, text) => {
+  const n = document.createElement('div');
+  return n;
+};
+const grid = $('#shotGrid');
+grid.appendChild(el('div'));
+const nw = el('span', 'line new', s.effective);
+what.appendChild(old); what.appendChild(nw);
+const off = document.createElement('canvas');
+const c = off.getContext('2d');
+";
+    assert!(
+        unappended_elements(tricky).is_empty(),
+        "辅助函数 / 一行挂两个 / 离屏 canvas 都不该报:{:?}",
+        unappended_elements(tricky)
+    );
+}

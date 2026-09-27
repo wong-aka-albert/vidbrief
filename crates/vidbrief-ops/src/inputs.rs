@@ -48,7 +48,11 @@ use serde::{Deserialize, Serialize};
 use vidbrief_project::Layout;
 
 /// 这份记录的版本。加字段就 +1(旧版本按「没有记录」处理 → 重算,安全方向)。
-pub const INPUTS_SCHEMA_VERSION: u32 = 1;
+///
+/// - **v2**(2026-09-27):两半各加一栏**外挂版本**(`ffmpeg_version` / `whisper_version`)——
+///   换了 ffmpeg 或 whisper 二进制,同一份输入跑出来的东西可能不一样,不认这一栏就会误复用。
+///   代价是 v1 的记录读不动 → 现有项目下次跑会重算一遍(一次性)。
+pub const INPUTS_SCHEMA_VERSION: u32 = 2;
 
 /// 抽帧分析算法的**口径版本**:改了 `vidbrief-core` 那套算法(差帧评分、密集区、
 /// 抽帧落点)就 +1。
@@ -59,6 +63,12 @@ pub const VISUAL_ALGO_VERSION: u32 = 1;
 
 /// 转录的**口径版本**:改了 whisper 的调用方式(参数、后处理)就 +1。
 pub const TRANSCRIBE_ALGO_VERSION: u32 = 1;
+
+/// 外挂版本问不到时写进指纹的那一栏。
+///
+/// 为什么写 `unknown` 而不是留空:空字符串与"这一栏没有"难分;而这个值只要与
+/// "问得到的版本"不同,复用判据就会判成"输入变了"→ 重算 —— 方向是保守的那一头。
+pub const UNKNOWN_VERSION: &str = "unknown";
 
 /// 跑这一步的是哪个二进制版本(`0.1.0` 这种)。发布升版时它会变 → 那一半不复用。
 pub fn tool_version() -> String {
@@ -90,6 +100,11 @@ pub struct VisualInputs {
     pub width: u32,
     pub algo: u32,
     pub tool_version: String,
+    /// 抽帧那个 ffmpeg 的版本(`ffmpeg -version` 那一行;问不到写 `unknown`)。
+    ///
+    /// 为什么要认它:抽帧是 ffmpeg 干的,换了版本(编码器、缩放实现变了)
+    /// 抽出来的帧可能不一样 —— 不认它就会拿旧帧当新帧用。
+    pub ffmpeg_version: String,
 }
 
 /// 转录那半的输入。
@@ -103,6 +118,11 @@ pub struct TranscriptInputs {
     pub language: String,
     pub algo: u32,
     pub tool_version: String,
+    /// 跑转录那个 whisper 二进制的版本(`whisper-cli --version` 那一行;问不到写 `unknown`)。
+    ///
+    /// 与 `model` 是两件事:**换模型**会认出来(这一栏本来就比),但**同一个模型换了
+    /// whisper 的版本**(解码实现变了)也会转出不一样的字 —— 从前那一栏没人管。
+    pub whisper_version: String,
 }
 
 impl PreprocessInputs {
@@ -116,6 +136,37 @@ impl PreprocessInputs {
         (parsed.schema_version == INPUTS_SCHEMA_VERSION).then_some(parsed)
     }
 
+    /// **没有上次的记录**时,说清是哪一种 —— 给「为什么没沿用」那句用。
+    ///
+    /// 为什么要分开:`load_optional` 把"文件不在"和"版本对不上"都收成 `None`,
+    /// 而这两件事给人的下一步完全不同(一个是第一次跑,一个是升级之后的一次性重算)。
+    /// 实测过这条:版本从 v1 升到 v2 时若只说「记录不在」,人会去查文件 ——
+    /// 而文件明明在,只是旧。
+    ///
+    /// `None` = 有记录且版本对得上(或压根没这个文件 —— 那本来就是"第一次跑")。
+    pub fn unreadable_reason(layout: &Layout) -> Option<String> {
+        let text = std::fs::read_to_string(layout.preprocess_inputs()).ok()?;
+        // **先只读版本号**:版本不同的记录里字段也跟着不同(比如 v1 没有外挂版本那两栏),
+        // 直接反序列化会失败 —— 那时说"文件坏了"是错话,真实原因是"它是旧版本的"。
+        // 这条是实测抓出来的:升级之后第一次跑,屏幕上写着「读不动」,而文件好好的。
+        let version = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("schema_version").and_then(|n| n.as_u64()));
+        match version {
+            Some(v) if v as u32 != INPUTS_SCHEMA_VERSION => Some(format!(
+                "上次那份记录是第 {v} 版,现在认第 {INPUTS_SCHEMA_VERSION} 版 —— \
+                 按「没有记录」算,这一步要重算一次"
+            )),
+            Some(_) => match serde_json::from_str::<Self>(&text) {
+                Ok(_) => None,
+                Err(e) => Some(format!("上次那份记录读不动({e})")),
+            },
+            None => Some(
+                "上次那份记录读不动(不是 JSON,或者没有版本号 —— 被改过?)".to_string(),
+            ),
+        }
+    }
+
     /// 记下这一趟的输入(跑完之后叫)。
     pub fn save(&self, layout: &Layout) -> Result<()> {
         let path = layout.preprocess_inputs();
@@ -124,6 +175,10 @@ impl PreprocessInputs {
     }
 
     /// 画面那半「现在的输入」长什么样。
+    ///
+    /// ffmpeg 版本**当场问一次**(实测 63ms)—— 抽帧是它干的,换了版本抽出来的帧可能不一样。
+    /// 问不到就写 `unknown`:那是一个如实的值(这一栏说不清),而不是"没这回事";
+    /// 下次问到了就会与它不同 → 重算,方向对。
     pub fn visual_now(source_sha256: &str, fps: f64, width: u32) -> VisualInputs {
         VisualInputs {
             source_sha256: source_sha256.to_string(),
@@ -131,10 +186,12 @@ impl PreprocessInputs {
             width,
             algo: VISUAL_ALGO_VERSION,
             tool_version: tool_version(),
+            ffmpeg_version: vidbrief_core::ffmpeg::ffmpeg_version()
+                .unwrap_or_else(|| UNKNOWN_VERSION.to_string()),
         }
     }
 
-    /// 转录那半「现在的输入」长什么样。
+    /// 转录那半「现在的输入」长什么样(whisper 版本同样当场问一次)。
     pub fn transcript_now(source_sha256: &str, model: &str, language: &str) -> TranscriptInputs {
         TranscriptInputs {
             source_sha256: source_sha256.to_string(),
@@ -142,6 +199,8 @@ impl PreprocessInputs {
             language: language.to_string(),
             algo: TRANSCRIBE_ALGO_VERSION,
             tool_version: tool_version(),
+            whisper_version: vidbrief_asr::whisper::version()
+                .unwrap_or_else(|| UNKNOWN_VERSION.to_string()),
         }
     }
 }
@@ -237,5 +296,57 @@ mod tests {
     fn each_half_carries_its_own_video_fingerprint() {
         let text = serde_json::to_string(&PreprocessInputs::visual_now("ff", 1.0, 480)).unwrap();
         assert!(text.contains("\"source_sha256\":\"ff\""), "{text}");
+    }
+
+    /// 「没有记录」要说清是哪一种 —— **版本旧**与"文件不在"是两回事:
+    /// 前者是升级之后的一次性重算,后者是第一次跑。合成一句,人会去查一个明明在的文件。
+    #[test]
+    fn an_old_record_says_it_is_a_version_thing() {
+        let layout = temp_layout("old-version");
+
+        assert_eq!(
+            PreprocessInputs::unreadable_reason(&layout),
+            None,
+            "文件都不在的时候,这句话由调用方说(「第一次跑」)"
+        );
+
+        let older = PreprocessInputs {
+            schema_version: INPUTS_SCHEMA_VERSION - 1,
+            visual: Some(PreprocessInputs::visual_now(&"d".repeat(64), 1.0, 480)),
+            transcript: None,
+        };
+        older.save(&layout).unwrap();
+        let why = PreprocessInputs::unreadable_reason(&layout).expect("版本旧该说得出");
+        assert!(why.contains("第 1 版"), "{why}");
+        assert!(why.contains("重算"), "{why}");
+
+        // 真实的 v1 记录长这样:**没有**外挂版本那两栏 —— 升级时盘上真有的就是它。
+        // (上面那种"字段齐全只是版本号旧"的文件现实里不存在,所以这条不能省:
+        //  它当场抓出过"版本旧被说成读不动"。)
+        std::fs::write(
+            layout.preprocess_inputs(),
+            r#"{"schema_version":1,"visual":{"source_sha256":"dd","fps":1.0,"width":480,"algo":1,"tool_version":"0.1.0"}}"#,
+        )
+        .unwrap();
+        let why = PreprocessInputs::unreadable_reason(&layout).expect("真 v1 文件该说得出");
+        assert!(why.contains("第 1 版"), "旧版本不该被说成「读不动」:{why}");
+        assert!(!why.contains("读不动"), "{why}");
+
+        // 读不动是另一种说法
+        std::fs::write(layout.preprocess_inputs(), "{ 不是 json").unwrap();
+        let why = PreprocessInputs::unreadable_reason(&layout).expect("读不动该说得出");
+        assert!(why.contains("读不动"), "{why}");
+
+        // 版本对得上时没有废话可说
+        PreprocessInputs {
+            schema_version: INPUTS_SCHEMA_VERSION,
+            visual: Some(PreprocessInputs::visual_now(&"d".repeat(64), 1.0, 480)),
+            transcript: None,
+        }
+        .save(&layout)
+        .unwrap();
+        assert_eq!(PreprocessInputs::unreadable_reason(&layout), None);
+
+        let _ = std::fs::remove_dir_all(layout.root());
     }
 }

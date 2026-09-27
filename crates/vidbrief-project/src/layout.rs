@@ -48,7 +48,7 @@ pub const CALIBRATION_LOG_FILE: &str = "02_calibrate/calibration_log.md";
 /// 步 2 补图(origin ∈ {agent_request, manual})。
 pub const SHOTS_EXTRA_REL_DIR: &str = "02_calibrate/shots_extra";
 pub const CALIBRATE_TIMELINE_FILE: &str = "02_calibrate/timeline.html";
-/// 校准对照表视图(一屏看完:图 + 转录 + 结论 + 校准日志)。见 `docs/DESIGN.md` §9.3。
+/// 校准对照表视图(一屏看完:图 + 转录 + 结论)。见 `docs/DESIGN.md` §9.3。
 pub const CALIBRATE_TABLE_FILE: &str = "02_calibrate/calibrate.html";
 
 // ── 03_summary/ ─────────────────────────────────────────────────────

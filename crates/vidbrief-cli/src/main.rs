@@ -162,9 +162,9 @@ Options:
   要边看边拖时间轴(页面要播视频,`file://` 下拖不动),用 `vidbrief ui --view report`
   —— 那条命令本来就是常驻的。输入里给 `\"open_browser\": true` 等同于 `--open`。
 
-  每条知识点必须给全:时刻 `t`、标题、**完整解析正文**(浮层里放的是它)、**至少一条来源**。
-  来源两类:讲者原话 `speaker` + **照抄**的 `quote`(工具去转录里找段号,找不到拒收);
-  外部查到的 `external` + 标题与能点的链接。引的截图必须在 shots.json 里。
+  **每条内容都来自步 3 的段** —— 一条 = 一个带时刻的段(标题 + 正文 + 锚点),
+  它那一刻的转录段与截图由工具就近挂上 —— 来源与截图不用你在这给。
+  没给 `--at` 的那段是总述:进报告,但不上时间轴。
 
   **这道门前置着步 3**:没写过总结、或总结被绕过工具改过,会被挡住并说清怎么办。
 ";
@@ -317,7 +317,7 @@ Arguments:
 
 Options:
       --view <name>        渲染哪一页:timeline(默认,四层共轴时间线 + 视频回跳)、
-                           calibrate(校准对照表:图 + 转录 + 结论 + 校准日志)
+                           calibrate(校准对照表:图 + 转录 + 结论)
                            或 report(报告页:时间轴上的知识点锚点 + 浮动解析 +
                            右侧图文总结面板;数据来自 04_report/report.json)
       --no-open            只起服务并打印 URL,不打开浏览器
@@ -1652,6 +1652,12 @@ fn cmd_status(args: &[String]) -> Result<()> {
     println!("材料");
     print_materials(&report.materials);
 
+    // 外挂那一栏**不进硬伤判定**(见 `InspectReport::unhealthy` 的注释):
+    // 没装 ffmpeg 不该让"看项目状态"这件事失败 —— 只读材料照样能读。
+    println!();
+    println!("外挂");
+    print_tools(&report.tools);
+
     // 进度与产物对不上时点一句:④ 标着完成、而 04_report/ 里一份产物都没有。
     //
     // M6 联调实测的真场面:agent 看到这个组合,先说了句"报告 done 但文件不在",
@@ -1673,8 +1679,32 @@ fn cmd_status(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn print_health(health: &vidbrief_ops::HealthView) {
-    let mut lines = health.message.lines();
+/// 三个外挂(ffmpeg / ffprobe / whisper)现在什么样。
+///
+/// **为什么要打这一栏**:环境齐不齐,从前只有跑到 `init` / `preprocess` 才知道,
+/// 而"看项目现在什么状态"这条命令正是该说话的地方 ——
+/// 没装、装了个不认识的版本,是两条不同的修法。
+///
+/// 教训来自实测:一个过期二进制 / 没配好的 whisper,能让一整轮联调白跑掉,
+/// 而当时 `status` 一声不吭(它只看项目,不看环境)。
+fn print_tools(tools: &[vidbrief_ops::ToolView]) {
+    for tool in tools {
+        match &tool.version {
+            Some(version) => println!("  ✓ {version}"),
+            // 用 ⚠ 而不是 ✗:那是**环境缺件**,不是项目硬伤 —— 退出码也不因它变
+            //(只读材料照样读得动)。两个符号混着用,看的人会以为项目坏了。
+            None => println!(
+                "  ⚠ {} 跑不起来(会跑的是 `{}`)—— 设 {} 指向它,或把它放进 PATH",
+                tool.name, tool.path, tool.env
+            ),
+        }
+        if let Some(note) = &tool.note {
+            println!("      {note}");
+        }
+    }
+}
+
+fn print_health(health: &vidbrief_ops::HealthView) {    let mut lines = health.message.lines();
     if let Some(first) = lines.next() {
         println!("  {} {first}", health.marker());
     }

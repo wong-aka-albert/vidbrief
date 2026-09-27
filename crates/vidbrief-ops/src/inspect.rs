@@ -360,6 +360,63 @@ pub struct InspectOptions {
     pub verify: bool,
 }
 
+/// 一个**外挂**(子进程)现在什么样:找不找得到、在哪、什么版本。
+///
+/// 为什么放进体检:环境齐不齐,从前只有跑到 `init` / `preprocess` 才知道 ——
+/// 而 agent 进场的第一件事就是 `status`,那时候就该看见。
+/// "没装"与"装了但版本不对"是两条不同的修法,所以这里两样分开说。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolView {
+    pub name: &'static str,
+    /// 认哪个环境变量(要换一个就跑它)。
+    pub env: &'static str,
+    /// 实际会跑的那个:环境变量指的路径,或 `PATH` 上的名字。
+    pub path: String,
+    /// `--version` 的那一行;`None` = **跑不起来**(没装 / 路径不对)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// 额外的实话(whisper 那栏用它说模型找到了没有)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// 三个外挂现在什么样。**顺序固定**(ffmpeg / ffprobe / whisper),输出好对照。
+///
+/// 代价是三个子进程一起问一次 `--version`(实测合计不到 200ms)——
+/// 换来的是"环境不对当场看见",而不是跑五分钟在转录那一步才炸。
+fn external_tools() -> Vec<ToolView> {
+    let ffmpeg_bin = vidbrief_core::ffmpeg::ffmpeg_bin();
+    let ffprobe_bin = vidbrief_core::ffmpeg::ffprobe_bin();
+    let model = vidbrief_asr::whisper::model_display();
+    vec![
+        ToolView {
+            name: "ffmpeg",
+            env: "VIDBRIEF_FFMPEG",
+            path: ffmpeg_bin.to_string_lossy().into_owned(),
+            version: vidbrief_core::ffmpeg::ffmpeg_version(),
+            note: None,
+        },
+        ToolView {
+            name: "ffprobe",
+            env: "VIDBRIEF_FFPROBE",
+            path: ffprobe_bin.to_string_lossy().into_owned(),
+            version: vidbrief_core::ffmpeg::ffprobe_version_opt(),
+            note: None,
+        },
+        ToolView {
+            name: "whisper",
+            env: "VIDBRIEF_WHISPER_BIN",
+            path: vidbrief_asr::whisper::bin_display(),
+            version: vidbrief_asr::whisper::version(),
+            note: Some(match &model {
+                Some(m) => format!("模型 {m}"),
+                None => "模型没找到 —— 设 VIDBRIEF_WHISPER_MODEL,或把它放进 tools/whisper/models/"
+                    .to_string(),
+            }),
+        },
+    ]
+}
+
 /// 一次体检的完整结论。
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectReport {
@@ -380,6 +437,8 @@ pub struct InspectReport {
     /// 只有 `verify` 时才有的内容哈希比对。
     pub content_health: Option<HealthView>,
     pub materials: Materials,
+    /// 三个外挂(ffmpeg / ffprobe / whisper)现在什么样 —— 见 [`ToolView`]。
+    pub tools: Vec<ToolView>,
 }
 
 impl InspectReport {
@@ -448,6 +507,7 @@ pub fn inspect(arg: &str, opts: &InspectOptions) -> Result<InspectReport> {
         link_health,
         content_health,
         materials: scan_materials(&layout),
+        tools: external_tools(),
     })
 }
 
@@ -478,6 +538,7 @@ pub fn inspect_opened(opened: &OpenProject, opts: &InspectOptions) -> Result<Ins
         link_health: HealthView::from(link_health),
         content_health,
         materials: scan_materials(layout),
+        tools: external_tools(),
     })
 }
 
@@ -485,9 +546,26 @@ pub fn inspect_opened(opened: &OpenProject, opts: &InspectOptions) -> Result<Ins
 mod tests {
     use super::*;
 
+    /// 三个外挂都要在名单里,顺序固定 —— 这栏是人对着看的,少一行就少一条线索。
     #[test]
-    fn health_view_keeps_the_level() {
-        let ok = HealthView::from(Health::Ok("好".into()));
+    fn the_tool_list_covers_the_three_externals() {
+        let tools = external_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["ffmpeg", "ffprobe", "whisper"]);
+        for tool in &tools {
+            assert!(
+                tool.env.starts_with("VIDBRIEF_"),
+                "每一栏都要说清认哪个环境变量:{tool:?}"
+            );
+            assert!(!tool.path.is_empty(), "路径那一栏不能空:{tool:?}");
+        }
+        // whisper 那栏还要说模型 —— 那是这一栏最容易漏说的半件事
+        let whisper = tools.iter().find(|t| t.name == "whisper").unwrap();
+        assert!(whisper.note.is_some(), "{whisper:?}");
+    }
+
+    #[test]
+    fn health_view_keeps_the_level() {        let ok = HealthView::from(Health::Ok("好".into()));
         assert_eq!(ok.level, HealthLevel::Ok);
         assert_eq!(ok.marker(), "✓");
         assert!(!ok.is_problem());

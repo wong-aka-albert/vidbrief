@@ -97,9 +97,9 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
      判断用 record_shot_check 记下来,最后 render_calibration_table 把对照表给用户过目
      (图 + 转录 + 你的结论一屏看完;render_timeline 是带视频回跳的那页)。
   ③ 总结:search_transcript / get_shot 自主探索 → write_summary
-  ④ 报告:build_report —— 交一整份报告数据(全局总结 + 每条挂在时刻上的知识点,
-     **视频里逐个讲的案例/步骤/样本逐个成条**),工具落 `report.json` 并渲染出可点开的
-     `report.html` 与 `report.md` 导出。
+  ④ 报告:build_report —— **不用交内容**:内容就是步 3 写下的那些段
+     (**视频里逐个讲的案例/步骤/样本各自成条**),工具把它们组装成 `report.json`、
+     就近挂上那一刻的转录与画面,再渲染出可点开的 `report.html` 与 `report.md` 导出。
      **先过步 3 的门**:没写过总结、或总结被绕过工具改过,会被挡住。
 
 **每一步动手前,先取一次操作说明**:提示模板里有一套(prompts,本服务已声明 prompts 能力);

@@ -79,6 +79,49 @@ impl Config {
     }
 }
 
+/// whisper-cli 实际会跑哪一个 —— 给体检看(`VIDBRIEF_WHISPER_BIN` 指的路径,或 `PATH` 上的名字)。
+pub fn bin_display() -> String {
+    match std::env::var_os("VIDBRIEF_WHISPER_BIN") {
+        Some(p) => PathBuf::from(p).display().to_string(),
+        None => "whisper-cli(PATH 上找)".to_string(),
+    }
+}
+
+/// 模型会加载哪一个:`VIDBRIEF_WHISPER_MODEL` 指的,或约定目录里找到的第一个;
+/// 都找不到 → `None`。
+///
+/// 与 [`Config::resolve`] 分开写是**有意**的:体检得能说清"模型没装",
+/// 而 `resolve` 在那种情况下直接报错 —— 那恰恰是体检想报告的事实。
+pub fn model_display() -> Option<String> {
+    if let Some(p) = std::env::var_os("VIDBRIEF_WHISPER_MODEL") {
+        return Some(PathBuf::from(p).display().to_string());
+    }
+    MODEL_SEARCH
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
+/// 跑一次 `--version`,取带 `version` 的那一行;跑不起来 → `None`。
+///
+/// 为什么要问它:**换了 whisper 二进制,同一段音频转出来的字可能不一样** ——
+/// 它得进步 1 的输入指纹(见 `vidbrief-ops::inputs`),否则增量重跑会把旧转录当新的用。
+/// 版本行走 stdout(whisper.cpp 的 `load_backend:` 那几行走 stderr),两边都扫一遍更稳。
+pub fn version() -> Option<String> {
+    let bin = std::env::var_os("VIDBRIEF_WHISPER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("whisper-cli"));
+    let out = Command::new(bin).arg("--version").output().ok()?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text.lines()
+        .find(|line| line.contains("version"))
+        .map(|line| line.trim().to_string())
+}
+
 /// 跑 whisper,把结果写到 `<prefix>.srt` / `.txt` / `.vtt`。
 ///
 /// `prefix` 是**不含扩展名的完整路径**(whisper 的 `-of` 语义)。

@@ -210,9 +210,12 @@ pub fn collect(layout: &Layout, timeline_rel: &str) -> Result<TimelineData> {
 /// | 哪些图是空的 | 缩略图按时刻并排,空的肉眼即见;弃用标记与理由是 agent 写下的 |
 /// | 哪几张是同一张幻灯片 | 同上 —— 并排的小图,重复一眼可见;agent 的弃用理由也在这 |
 /// | 哪几段转录被动过 | 每段的结论(改了/决定不改/存疑未改)+ 原文与现读法并排 |
-/// | 这个结论是哪一轮写的 | 每条结论带 `checked_at`;页尾**原样内嵌**校准日志,轮次时间段在日志里 |
+/// | 这个结论是哪一轮写的 | **只答一半**:每条结论带 `checked_at`(写下的精确时刻)。轮号没记 ——
+///   从前靠页尾内嵌的校准日志原文让人自己对着看,那既要读者自己做对账、
+///   又押在 agent 手写的轮次时段上(实测对不上;要答满得让工具在落结论时记轮号) |
 ///
-/// 不做的事:**不解析日志**(它是 agent 的自由文本,工具不赌它的写法),
+/// 不做的事:**不取校准日志** —— 它是 agent 的自由文本(给下一轮与审计看),不是页面素材;
+/// 页尾贴一份原文,等于让读者拿一段手写时段去对上面每一行的时刻,而信息本该长在被需要的地方。
 /// 也不算"哪两张图像"(那是判断,判断归 agent;工具负责让人一眼能判)。
 #[derive(Debug, Serialize)]
 pub struct CalibrationData {
@@ -224,8 +227,6 @@ pub struct CalibrationData {
     pub rounds: Option<u32>,
     pub shots: Vec<CalibShot>,
     pub segments: Vec<CalibSegment>,
-    /// 校准日志原文(还没写过则为 `None`)。
-    pub log: Option<String>,
     /// 指向时间线视图的相对链接(那页有视频回跳)。
     pub timeline_url: String,
 }
@@ -307,11 +308,6 @@ pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<Calibratio
         Ok(None) | Err(_) => None,
     };
 
-    let log = match std::fs::read_to_string(layout.calibration_log()) {
-        Ok(text) if !text.trim().is_empty() => Some(text),
-        _ => None,
-    };
-
     Ok(CalibrationData {
         project: ProjectBrief {
             id: project.id.to_string(),
@@ -374,7 +370,6 @@ pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<Calibratio
                     .collect()
             })
             .unwrap_or_default(),
-        log,
         timeline_url: relative_url(view_rel, vidbrief_project::layout::PREPROCESS_TIMELINE_FILE)?,
     })
 }

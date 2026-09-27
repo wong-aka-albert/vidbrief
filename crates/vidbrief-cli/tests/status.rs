@@ -95,8 +95,7 @@ fn project(tag: &str, want: SourceLink) -> (TempDir, Layout) {
 }
 
 #[test]
-fn status_shows_identity_health_and_progress() {
-    let (tmp, _layout) = project("basic", SourceLink::Hardlink);
+fn status_shows_identity_health_and_progress() {    let (tmp, _layout) = project("basic", SourceLink::Hardlink);
     let out = run_in(&tmp.0, &["status", "proj"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
@@ -214,4 +213,52 @@ fn status_rejects_extra_arguments() {
     let out = run_in(&std::env::temp_dir(), &["status"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("用法"), "{}", stderr(&out));
+}
+
+// ── 外挂那一栏(2026-09-27):环境齐不齐,进场就该看见 ────────────────
+
+/// 三个外挂各有一行,**找不到也要有一行** —— 那正是它该说的话。
+///
+/// 为什么值得钉:实测里"过期二进制 / whisper 没配好"能让一整轮联调白跑,
+/// 而当时 `status` 一声不吭(它只看项目、不看环境)。
+#[test]
+fn status_reports_the_external_tools() {
+    let (tmp, _layout) = project("tools", SourceLink::Hardlink);
+    let out = run_in(&tmp.0, &["status", "proj"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+
+    assert!(text.contains("外挂"), "缺「外挂」那一栏:\n{text}");
+    // 本机 PATH 上就有 ffmpeg / ffprobe(整套前处理都靠它们),版本那行打得出来
+    assert!(text.contains("ffmpeg "), "{text}");
+    assert!(text.contains("ffprobe "), "{text}");
+    // whisper 没配也得出现,而且要说清模型那一层
+    assert!(text.contains("whisper"), "{text}");
+}
+
+/// 外挂找不到时这一栏要给**可照做的去路**,而且**不算项目硬伤**(退出码照旧 0)。
+///
+/// 两个都要钉住:只给一句"失败"等于让人自己猜;把它算成项目坏了,
+/// 会让"看项目状态"这件只读的事在没装 ffmpeg 的机器上直接失败。
+#[test]
+fn a_missing_tool_says_how_to_fix_it_without_failing_the_command() {
+    let (tmp, _layout) = project("missing-tool", SourceLink::Hardlink);
+    let out = Command::new(env!("CARGO_BIN_EXE_vidbrief"))
+        .current_dir(&tmp.0)
+        .env("VIDBRIEF_FFMPEG", "definitely-not-ffmpeg")
+        .args(["status", "proj"])
+        .output()
+        .expect("无法启动 vidbrief");
+
+    assert!(
+        out.status.success(),
+        "环境缺件不该让 status 失败(项目本身没毛病):\n{}",
+        stderr(&out)
+    );
+    let text = stdout(&out);
+    assert!(text.contains("ffmpeg 跑不起来"), "{text}");
+    assert!(
+        text.contains("VIDBRIEF_FFMPEG"),
+        "要指出改哪个环境变量:\n{text}"
+    );
 }

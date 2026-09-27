@@ -51,8 +51,8 @@ pub use conclusions::{
     apply_corrections, record_shot_check, write_note, write_summary,
 };
 pub use inspect::{
-    HealthLevel, HealthView, InspectOptions, InspectReport, Materials, ShotCounts, inspect,
-    inspect_opened,
+    HealthLevel, HealthView, InspectOptions, InspectReport, Materials, ShotCounts, ToolView,
+    inspect, inspect_opened,
 };
 pub use inputs::{
     INPUTS_SCHEMA_VERSION, PreprocessInputs, TRANSCRIBE_ALGO_VERSION, TranscriptInputs,

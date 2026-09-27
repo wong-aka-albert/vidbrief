@@ -128,11 +128,12 @@ mod tests {
         assert!(path.is_file());
     }
 
-    /// 对照表的四个必答问题(PLAN「近期待办」)都落在这一页上:
-    /// 空图/重复图靠并排的缩略图与弃用标记,动过的段靠结论,轮次靠 checked_at + 内嵌日志。
-    /// 这条测试钉住的是后两样 —— 结论、轮数、日志原文,一个都不许丢。
+    /// 对照表的必答问题(PLAN「近期待办」)都落在这一页上:空图/重复图靠并排的缩略图与
+    /// 弃用标记,动过的段靠结论,轮次靠 `checked_at`。
+    /// 这条测试钉住的是后两样 —— 结论、轮数。**日志是反面**:文件照旧写,但一个字节
+    /// 都不该进页面(见 devlog [260927-07])。
     #[test]
-    fn calibration_table_carries_conclusions_rounds_and_the_log() {
+    fn calibration_table_carries_conclusions_and_rounds() {
         let fake = Fake::new("view-calib")
             .with_curve(5)
             .with_shot(1, 9.0)
@@ -181,11 +182,16 @@ mod tests {
             "Python 列表结构",   // 改后
             "派森 → Python",  // 改动说明
             "\"rounds\":1",     // 轮数
-            "## 第 1 轮",       // 内嵌的校准日志
             "\"state\":\"checked\"", // 段 2 审过没话说,也得标出来
         ] {
             assert!(html.contains(needle), "对照表丢了 {needle}");
         }
+        // 日志文件在上面写过(就在这个测试里),它**一个字节都不该进页面** ——
+        // 拿它当素材,等于让读者拿一段手写的轮次时段去对每一行的时刻。
+        assert!(
+            !html.contains("第 1 轮") && !html.contains("校准日志"),
+            "校准日志不该进对照表:{html}"
+        );
     }
 
     /// 状态读不动时视图**照常渲染**(它是给人看的,不是判据),但要把

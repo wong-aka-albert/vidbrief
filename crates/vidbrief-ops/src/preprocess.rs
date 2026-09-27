@@ -413,6 +413,20 @@ fn asr_labels() -> Option<(String, String)> {
     Some((cfg.model_label(), cfg.language.clone()))
 }
 
+/// 「没有上次的记录」这句话的完整版。
+///
+/// 三种情况说法不一样:**文件不在**(第一次跑)、**读不动**(被改过或坏了)、
+/// **版本旧**(升级之后的一次性重算)—— 它们的下一步完全不同,合成一句就是误导。
+fn no_record_reason(opened: &OpenProject) -> String {
+    match PreprocessInputs::unreadable_reason(opened.layout()) {
+        Some(why) => why,
+        None => format!(
+            "没有上次的记录(`{}` 不在 —— 这是第一次跑)",
+            vidbrief_project::layout::PREPROCESS_INPUTS_FILE
+        ),
+    }
+}
+
 /// 画面那半能不能沿用上次的成果。`None` = 能;`Some(为什么不能)` = 不能。
 ///
 /// 每一条都要给出**照着能查的说法** —— 「没沿用」和「为什么」得一起说,
@@ -426,7 +440,7 @@ fn why_not_reuse_visual(
     now: &VisualInputs,
 ) -> Option<String> {
     let Some(previous) = previous else {
-        return Some("没有上次的记录(`01_preprocess/inputs.json` 不在或读不动)".to_string());
+        return Some(no_record_reason(opened));
     };
     let Some(before) = previous.visual.as_ref() else {
         return Some("上次没留下画面那半的记录".to_string());
@@ -489,7 +503,7 @@ fn why_not_reuse_transcript(
     now: Option<&TranscriptInputs>,
 ) -> Option<String> {
     let Some(previous) = previous else {
-        return Some("没有上次的记录(`01_preprocess/inputs.json` 不在或读不动)".to_string());
+        return Some(no_record_reason(opened));
     };
     let Some(before) = previous.transcript.as_ref() else {
         return Some("上次没留下转录那半的记录".to_string());
@@ -540,6 +554,9 @@ fn describe_visual_change(before: &VisualInputs, after: &VisualInputs) -> String
             before.tool_version, after.tool_version
         ));
     }
+    if before.ffmpeg_version != after.ffmpeg_version {
+        bits.push(format!("ffmpeg {} → {}", before.ffmpeg_version, after.ffmpeg_version));
+    }
     if bits.is_empty() {
         // 两套不相等,却说不出哪里不等 —— 不该发生,但绝不因此说"一样"
         "说不清哪里变了,保守起见按变了算".to_string()
@@ -567,6 +584,12 @@ fn describe_transcript_change(before: &TranscriptInputs, after: &TranscriptInput
         bits.push(format!(
             "工具版本 {} → {}",
             before.tool_version, after.tool_version
+        ));
+    }
+    if before.whisper_version != after.whisper_version {
+        bits.push(format!(
+            "whisper {} → {}",
+            before.whisper_version, after.whisper_version
         ));
     }
     if bits.is_empty() {

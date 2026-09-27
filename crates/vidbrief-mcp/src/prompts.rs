@@ -227,9 +227,9 @@ pub(crate) fn guide_index(project_id: &str) -> String {
            `disposition_supplements`(补的报 need_shot、不补的报 no_shot)。\n\
          - `summarize_video` —— 图文总结:`list_regions` + `list_shots` + 转录通读建结构,\n\
            逐张看图互证,溯源(截图 id + 时间戳),`write_summary` 落盘。\n\
-         - `build_report` —— 报告(步 4 的产出):把总结与材料整理成**每条挂在时刻上的\n\
-           知识点**(完整解析 + 关联截图/转录段 + 至少一条来源),**视频里逐个讲的\n\
-           内容逐个成条**(一个个案例/步骤/样本各占一条,别合成一张表);\n\
+         - `build_report` —— 报告(步 4 的产出):**不用交内容** —— 内容就是步 3 交过的段\n\
+           (**视频里逐个讲的内容各自成条**:一个个案例/步骤/样本各占一条),\n\
+           工具把它们组装成**每条挂在时刻上的知识点**,那一刻的转录与画面就近挂上;\n\
            **先交代风格**(`style`:轮廓 preset + 粒度 + 语气 + 补充要求),\n\
            一次 `build_report` 落数据并出页面(时间轴锚点 + 浮动解析 + 图文总结面板,\n\
            可回跳视频)。\n\
@@ -285,7 +285,7 @@ impl VidbriefServer {
     /// 对协议暴露的名字由 `name` 定,仍然是 `build_report`。)
     #[prompt(
         name = "build_report",
-        description = "出报告:每条知识点挂在一个时刻上(完整解析 + 来源),落数据并渲染页面"
+        description = "出报告:把步 3 那些段摆成能对着视频看的一页(只交代口味),落数据并渲染页面"
     )]
     async fn build_report_guide(
         &self,

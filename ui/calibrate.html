@@ -96,11 +96,6 @@
   .seg.needs_user { background: color-mix(in srgb, var(--warn) 8%, transparent); }
   .seg .what { min-width: 0; overflow-wrap: anywhere; }
 
-  /* ── 校准日志 ── */
-  #log { white-space: pre-wrap; word-break: break-word; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
-    font: 12px/1.7 ui-monospace, Consolas, monospace; color: var(--fg); margin: 0; }
-
   /* ── 点图放大 ── */
   #zoom { position: fixed; inset: 0; background: #000c; display: none;
     place-items: center; z-index: 50; cursor: zoom-out; }
@@ -136,12 +131,6 @@
     <p class="hint">原文与现在的读法并排;改过 / 决定不改 / 存疑未改各有标记,还没核验的淡显。</p>
     <div class="filters" id="segFilters"></div>
     <div id="segList"></div>
-  </section>
-
-  <section id="logSec">
-    <h2>校准日志</h2>
-    <p class="hint">每条结论上都标了写下的时刻;对照这里每轮的时间段,就知道那条结论是哪一轮写的。同一处的结论被后轮改写时,旧的那句只在这份日志里。</p>
-    <pre id="log"></pre>
   </section>
 </main>
 
@@ -278,6 +267,7 @@ for (const s of D.shots) {
     const tail = el("div", "at", `${CONF[c.confidence] || c.confidence} · 写于 ${shortAt(c.checked_at)}`);
     body.appendChild(tail);
   }
+  card.appendChild(body);   // ← 从前漏了这一行:结论一条都没挂上去,卡片只剩缩略图
   grid.appendChild(card);
   cards.push(card);
 }
@@ -304,7 +294,9 @@ const segList = $("#segList");
 const rows = [];
 for (const s of D.segments) {
   const row = el("div", "seg" + (s.state === "unchecked" ? " unchecked" : "") + (s.state === "needs_user" ? " needs_user" : ""));
-  row.dataset.f = s.conclusion ? "touched" : s.state;
+  // 多标签(空格分隔):有结论的段**同时**归入它自己的 state 分类 —— 单值装不下
+  // 重叠分类,否则「存疑未改」这类带 conclusion 的段会被 "touched" 吃掉,按钮点不出来。
+  row.dataset.f = `${s.conclusion ? "touched " : ""}${s.state || ""}`;
 
   const where = el("div", "where", `#${s.id} ${fmtT(s.start)}–${fmtT(s.end)}`);
   row.appendChild(where);
@@ -356,14 +348,11 @@ makeFilters($("#segFilters"), [
   { key: "unchecked", label: "未核验" },
 ], (cur) => {
   for (const r of rows) {
-    r.style.display = cur === "all"
-      || (cur === "touched" && r.dataset.f === "touched")
-      || (cur !== "all" && cur !== "touched" && r.dataset.f === cur) ? "" : "none";
+    // 多标签包含判定:与计数行同一份口径(state 与 conclusion 各算各的)。
+    const tags = (r.dataset.f || "").split(/\s+/);
+    r.style.display = cur === "all" || tags.includes(cur) ? "" : "none";
   }
 });
-
-// ── 校准日志(原文内嵌,不解析) ──
-$("#log").textContent = D.log || "还没有校准日志 —— 每轮校准结束时,用 write_note 记一轮(带 count_round)。";
 
 // ── 放大层 ──
 $("#zoom").onclick = () => $("#zoom").classList.remove("show");

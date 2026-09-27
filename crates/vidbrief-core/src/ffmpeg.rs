@@ -106,24 +106,45 @@ fn missing_binary_error(bin: &std::ffi::OsStr, which: &str) -> String {
 }
 
 /// `ffprobe -version` 的第一行,整理成 `ffprobe <版本>`。
+///
+/// 这一栏会写进 `video.meta.json` 的 `prober`(谁探测的这份元数据),
+/// 所以"跑不起来"也得给一句话,而不是 `None`。
 pub fn ffprobe_version() -> String {
-    let line = Command::new(ffprobe_bin())
+    ffprobe_version_opt().unwrap_or_else(|| "ffprobe (版本未知)".to_string())
+}
+
+/// 同 [`ffprobe_version`],但跑不起来时如实给 `None` —— **体检要的正是这个区别**
+/// ("没装"与"装了但版本未知"是两件事)。
+pub fn ffprobe_version_opt() -> Option<String> {
+    version_of(&ffprobe_bin())
+}
+
+/// `ffmpeg -version` 整理成 `ffmpeg <版本>`;跑不起来 → `None`。
+///
+/// 为什么要单独问它:抽帧是 ffmpeg 干的,**换了 ffmpeg 版本抽出来的帧可能不一样** ——
+/// 它得进步 1 的输入指纹(见 `vidbrief-ops::inputs`),否则增量重跑会拿旧帧当新帧用。
+pub fn ffmpeg_version() -> Option<String> {
+    version_of(&ffmpeg_bin())
+}
+
+/// 跑一次 `<bin> -version`,把第一行整理成 `<工具> <版本>`。
+///
+/// ffmpeg 与 ffprobe 的输出格式一样,一处够用;不为此再抽一层类型 ——
+/// 两个可执行文件的位置是**分别**由环境变量指的,公共部分只有这几行
+/// (同一条道理:没有第二个真需求就不抽象)。
+fn version_of(bin: &OsString) -> Option<String> {
+    let line = Command::new(bin)
         .arg("-version")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.lines().next().map(str::to_string));
+        .and_then(|s| s.lines().next().map(str::to_string))?;
 
-    match line {
-        Some(line) => {
-            let mut words = line.split_whitespace();
-            match (words.next(), words.next(), words.next()) {
-                (Some(tool), Some(kw), Some(ver)) if kw == "version" => format!("{tool} {ver}"),
-                _ => line,
-            }
-        }
-        None => "ffprobe (版本未知)".to_string(),
-    }
+    let mut words = line.split_whitespace();
+    Some(match (words.next(), words.next(), words.next()) {
+        (Some(tool), Some(kw), Some(ver)) if kw == "version" => format!("{tool} {ver}"),
+        _ => line,
+    })
 }
 
 /// ffmpeg 的 stderr 常常几十行,只留末尾几行 —— 真正的错误在最后。
