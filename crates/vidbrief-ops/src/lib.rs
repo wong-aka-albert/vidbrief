@@ -86,10 +86,7 @@ pub use shots::{
     SupplementOutcome, disposition_supplements, extract_shot, find_supplement_candidates,
     parse_shot_id, supplement_window, update_shot,
 };
-pub use view::{
-    render_calibration_table, render_timeline, serve_and_open, serve_and_open_report,
-    serve_and_open_table,
-};
+pub use view::{render_workbench, serve_and_open_report, serve_and_open_workbench};
 pub use write::{lock_note_if_taken, with_write};
 
 /// 页面动作的转发 —— **`vidbrief-mcp` 不必直接依赖 `vidbrief-viz`**。

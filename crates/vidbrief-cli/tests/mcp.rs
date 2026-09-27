@@ -58,7 +58,7 @@ fn tools_list_covers_every_group_of_the_design() {
         "get_shot",                 // C
         "record_shot_check",        // D
         "extract_shot",             // E
-        "render_timeline",          // F
+        "render_workbench",         // F
     ] {
         assert!(names.iter().any(|n| n == expected), "缺工具 {expected}:{names:?}");
     }
@@ -201,11 +201,11 @@ fn create_preprocess_look_and_write_back() {
     let shots = report["shots"].as_u64().expect("该有截图数");
     assert!(shots > 0, "60 秒的样例视频该抽出图来:{report_text}");
     assert_eq!(
-        report["timeline_error"], Value::Null,
+        report["workbench_error"], Value::Null,
         "视图没渲染出来:{report_text}"
     );
     assert!(
-        project_root.join("01_preprocess/timeline.html").is_file(),
+        project_root.join("01_preprocess/workbench.html").is_file(),
         "渲染说成功了,文件却不在:{}",
         project_root.display()
     );
@@ -295,13 +295,13 @@ fn create_preprocess_look_and_write_back() {
     assert_eq!(status["materials"]["shots"]["total"].as_u64().unwrap(), shots);
 
     // ⑧ 刷新视图(不弹浏览器),拿到给用户点的地址
-    let timeline = client.call_tool(
-        "render_timeline",
+    let page = client.call_tool(
+        "render_workbench",
         json!({"project_id": "e2e", "open_browser": false}),
     );
-    assert!(!tool_failed(&timeline), "渲染失败:{}", first_text(&timeline));
-    let timeline: Value = serde_json::from_str(&first_text(&timeline)).unwrap();
-    let url = timeline["url"].as_str().unwrap();
+    assert!(!tool_failed(&page), "渲染失败:{}", first_text(&page));
+    let page: Value = serde_json::from_str(&first_text(&page)).unwrap();
+    let url = page["url"].as_str().unwrap();
     assert!(url.starts_with("http://127.0.0.1:"), "服务该只绑回环地址:{url}");
 
     // **查看服务跑在另一个进程里**(2026-09-26):从前它是本进程的一条线程,

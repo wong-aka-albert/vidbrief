@@ -316,18 +316,17 @@ Arguments:
   <project>                项目目录,或 projects/ 下的项目名
 
 Options:
-      --view <name>        渲染哪一页:timeline(默认,四层共轴时间线 + 视频回跳)、
-                           calibrate(校准对照表:图 + 转录 + 结论)
-                           或 report(报告页:时间轴上的知识点锚点 + 浮动解析 +
-                           右侧图文总结面板;数据来自 04_report/report.json)
+      --view <name>        渲染哪一页:workbench(工作台:视频 + 五层共轴时间轴 +
+                           轴上浮层,右边抽屉里截图/转录/报告三块 —— 一页看全部,
+                           步 2 起可用)或 report(纯图文报告页,能单独保存/发给别人;
+                           数据来自 04_report/report.json,得先跑过步 4)
       --no-open            只起服务并打印 URL,不打开浏览器
   -h, --help               显示本条用法
 
 说明:
-  - 渲染 01_preprocess/timeline.html(--view calibrate 是 02_calibrate/calibrate.html,
-    --view report 是 04_report/report.html —— 它需要先跑过 `vidbrief report`)
+  - 渲染 01_preprocess/workbench.html(--view report 是 04_report/report.html)
   - 起一个绑在 127.0.0.1 的静态服务把项目目录发布出去 —— **必须有它浏览器才能 seek**
-    (`file://` 打开时对本地媒体有跨域限制,时间轴点了不跳)
+    (`file://` 打开时对本地媒体有跨域限制,轴上点了不跳)
   - 端口由操作系统分配,不会和别的东西撞车;只监听回环地址,局域网访问不到
   - 不取写锁:它写的是**派生视图**不是材料,两个会话同时渲染也不会坏事
 ";
@@ -1506,9 +1505,9 @@ fn run_preprocess(
         }
     }
 
-    match (&report.timeline, &report.timeline_error) {
-        (Some(path), _) => println!("视图     {}", path.display()),
-        (None, Some(error)) => eprintln!("视图     渲染失败(材料不受影响):{error}"),
+    match (&report.workbench, &report.workbench_error) {
+        (Some(path), _) => println!("工作台   {}", path.display()),
+        (None, Some(error)) => eprintln!("工作台   渲染失败(材料不受影响):{error}"),
         (None, None) => {}
     }
 
@@ -1743,8 +1742,8 @@ fn print_materials(m: &vidbrief_ops::Materials) {
         );
     }
     println!(
-        "  视图     {}",
-        if m.timeline_html { "已渲染" } else { "—" }
+        "  工作台   {}",
+        if m.workbench_html { "已渲染" } else { "—" }
     );
 
     // 报告:判据(report.json)与两个投影分开数 —— "出过报告"与"文件还在不在"是两件事
@@ -1817,7 +1816,7 @@ fn cmd_ui(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let mut open_browser = true;
-    let mut view = "timeline";
+    let mut view = "workbench";
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -1826,13 +1825,12 @@ fn cmd_ui(args: &[String]) -> Result<()> {
             "--view" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    bail!("--view 后面要跟视图名(timeline / calibrate / report)");
+                    bail!("--view 后面要跟视图名(workbench / report)");
                 };
                 view = match v.as_str() {
-                    "timeline" => "timeline",
-                    "calibrate" => "calibrate",
+                    "workbench" => "workbench",
                     "report" => "report",
-                    other => bail!("不认识视图 `{other}` —— 可选:timeline(默认)/ calibrate / report"),
+                    other => bail!("不认识视图 `{other}` —— 可选:workbench(工作台,一页看全部)/ report(纯图文报告页)"),
                 };
             }
             other => positional.push(other.to_string()),
@@ -1843,13 +1841,9 @@ fn cmd_ui(args: &[String]) -> Result<()> {
 
     let opened = OpenProject::open(&name)?;
     let (path, url, stale) = match view {
-        "calibrate" => {
-            let (path, url) = vidbrief_ops::serve_and_open_table(&opened, open_browser)?;
-            (path, url, Vec::new())
-        }
         "report" => vidbrief_ops::serve_and_open_report(&opened, open_browser)?,
         _ => {
-            let (path, url) = vidbrief_ops::serve_and_open(&opened, open_browser)?;
+            let (path, url) = vidbrief_ops::serve_and_open_workbench(&opened, open_browser)?;
             (path, url, Vec::new())
         }
     };
@@ -1862,10 +1856,9 @@ fn cmd_ui(args: &[String]) -> Result<()> {
     print_stale_anchors(&stale);
     println!();
     match view {
-        "calibrate" => println!("顶部可按「还没核验 / 没把握 / 已弃用 / 有结论」筛选;点缩略图看大图。"),
         "report" => println!(
-            "左边是视频与时间轴(轴上的圆点是知识点,播放头走到哪就显示哪一条),\
-             右边是图文总结面板 —— 点右上角按钮滑出。点圆点转到视频对应位置。"
+            "纯图文总结:每条知识点带时刻、正文、来源与关联的转录原话 —— \
+             这一页可以单独保存 / 发给别人(视频那一半带不走)。"
         ),
         _ => println!("时间轴上点/拖任意位置即可跳转视频;空格播放暂停,←→ ±1 秒(Shift ±10 秒)。"),
     }

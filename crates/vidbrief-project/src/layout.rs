@@ -30,7 +30,12 @@ pub const TRANSCRIPT_FILE: &str = "01_preprocess/transcript.json";
 /// 步 1 算法抽出的截图(origin ∈ {dense_region, isolated_peak})。
 pub const SHOTS_REL_DIR: &str = "01_preprocess/shots";
 pub const SHOTS_FILE: &str = "01_preprocess/shots.json";
-pub const PREPROCESS_TIMELINE_FILE: &str = "01_preprocess/timeline.html";
+/// **工作台**:一个页面看全部 —— 左边视频与五层共轴时间轴、轴上锚点就近展开浮层,
+/// 右边抽屉里三块(截图 / 转录 / 报告)。
+///
+/// 放在步 1 这一层,是因为它要引 `source/`(视频)和 `shots/`(截图),
+/// 相对路径在这一层最短、也最不容易写错。
+pub const WORKBENCH_FILE: &str = "01_preprocess/workbench.html";
 /// 步 1 的**输入指纹**(源视频 sha256 + 抽帧参数 + 模型 + 口径版本)。
 ///
 /// 增量重跑靠它判断"这一步要不要重算":指纹逐项相同 → 不重算、也不作废成果
@@ -47,9 +52,6 @@ pub const CROSS_VALIDATE_FILE: &str = "02_calibrate/cross_validate.md";
 pub const CALIBRATION_LOG_FILE: &str = "02_calibrate/calibration_log.md";
 /// 步 2 补图(origin ∈ {agent_request, manual})。
 pub const SHOTS_EXTRA_REL_DIR: &str = "02_calibrate/shots_extra";
-pub const CALIBRATE_TIMELINE_FILE: &str = "02_calibrate/timeline.html";
-/// 校准对照表视图(一屏看完:图 + 转录 + 结论)。见 `docs/DESIGN.md` §9.3。
-pub const CALIBRATE_TABLE_FILE: &str = "02_calibrate/calibrate.html";
 
 // ── 03_summary/ ─────────────────────────────────────────────────────
 pub const SUMMARY_DIR: &str = "03_summary";
@@ -150,8 +152,9 @@ impl Layout {
     pub fn shots_json(&self) -> PathBuf {
         self.rel(SHOTS_FILE)
     }
-    pub fn preprocess_timeline(&self) -> PathBuf {
-        self.rel(PREPROCESS_TIMELINE_FILE)
+    /// 工作台页面(视频 + 共轴 + 抽屉,一个页面看全部)。
+    pub fn workbench(&self) -> PathBuf {
+        self.rel(WORKBENCH_FILE)
     }
     /// 步 1 的输入指纹(增量重跑的比较对象)。
     pub fn preprocess_inputs(&self) -> PathBuf {
@@ -179,12 +182,6 @@ impl Layout {
     }
     pub fn shots_extra_dir(&self) -> PathBuf {
         self.rel(SHOTS_EXTRA_REL_DIR)
-    }
-    pub fn calibrate_timeline(&self) -> PathBuf {
-        self.rel(CALIBRATE_TIMELINE_FILE)
-    }
-    pub fn calibrate_table(&self) -> PathBuf {
-        self.rel(CALIBRATE_TABLE_FILE)
     }
 
     // ── 03_summary/ ─────────────────────────────────────────────────
@@ -314,15 +311,13 @@ mod tests {
             DENSE_REGIONS_FILE,
             TRANSCRIPT_FILE,
             SHOTS_FILE,
-            PREPROCESS_TIMELINE_FILE,
+            WORKBENCH_FILE,
             PREPROCESS_INPUTS_FILE,
             TRANSCRIPT_FIXED_FILE,
             TRANSCRIPT_DIFF_FILE,
             SUPPLEMENT_REQUESTS_FILE,
             CROSS_VALIDATE_FILE,
             CALIBRATION_LOG_FILE,
-            CALIBRATE_TIMELINE_FILE,
-            CALIBRATE_TABLE_FILE,
             AGENT_LOG_FILE,
             SUMMARY_FILE,
             REPORT_MD_FILE,

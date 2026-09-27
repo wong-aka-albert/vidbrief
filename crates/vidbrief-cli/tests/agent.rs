@@ -160,7 +160,7 @@ fn p1_calibrate_shots_runs_the_whole_way() {
         "list_shots",
         "get_shot",
         "record_shot_check",
-        "render_timeline",
+        "render_workbench",
     ] {
         assert!(text.contains(tool), "模板该把 {tool} 说清楚:{text}");
     }
@@ -251,7 +251,7 @@ fn p1_calibrate_shots_runs_the_whole_way() {
 
     // ⑥ 出视图给用户看
     let rendered = as_json(&client.tool_text(
-        "render_timeline",
+        "render_workbench",
         json!({"project_id": proj, "open_browser": false}),
     ));
     let url = rendered["url"].as_str().expect("模板让人把 url 给用户");

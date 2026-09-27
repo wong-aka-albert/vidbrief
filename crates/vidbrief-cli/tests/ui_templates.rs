@@ -1,4 +1,4 @@
-//! `ui/*.html` 的**模板体检**:内联脚本里不许有跨行的普通字符串。
+//! `ui/` 下模板(**与共用片段**)的**体检**:内联脚本里不许有跨行的普通字符串。
 //!
 //! 为什么值得单开一条:这类错**没有任何运行时报错能看出来**。
 //! 2026-09-27 实测(`ui/report.html`,`清账(二)` 带进来的):
@@ -165,34 +165,53 @@ fn script_bodies(html: &str) -> Vec<&str> {
     out
 }
 
-/// **`ui/` 下每个模板的内联脚本都要过词法这一关。**
+/// `ui/` 下要被体检的脚本:`(文件名, 一段段脚本)`。
 ///
-/// 扫的是目录不是清单:以后加一个视图,它自动被这条测试罩住 ——
+/// **`.js` 那一份必须一起扫**:`_shared.js` 是被注入进两个页面的片段,
+/// 它出问题的症状与模板一模一样(整段编译不过 → 页面空壳),
+/// 而它自己不是 `.html` —— 按扩展名筛会正好漏掉它。
+///
+/// 扫的是**目录**不是清单:以后加一个视图,它自动被这套测试罩住 ——
 /// 靠人记得往清单里补名字,总有一天会漏。
-#[test]
-fn inline_scripts_have_no_line_breaking_strings() {
+fn ui_scripts() -> Vec<(String, Vec<String>)> {
     let dir = repo_root().join("ui");
-    let mut checked = 0;
-    let mut problems: Vec<String> = Vec::new();
-
+    let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("读不到模板目录 {}:{e}", dir.display()));
     for entry in entries {
         let path = entry.expect("目录项").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("html") {
-            continue;
-        }
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let html = std::fs::read_to_string(&path).expect("读模板");
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("js") => {
+                let text = std::fs::read_to_string(&path).expect("读片段");
+                out.push((name, vec![text]));
+            }
+            Some("html") => {
+                let html = std::fs::read_to_string(&path).expect("读模板");
+                out.push((name, script_bodies(&html).into_iter().map(str::to_string).collect()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// **`ui/` 下每个模板的内联脚本 + 共用片段都要过词法这一关。**
+#[test]
+fn inline_scripts_have_no_line_breaking_strings() {
+    let mut checked = 0;
+    let mut problems: Vec<String> = Vec::new();
+
+    for (name, scripts) in ui_scripts() {
         checked += 1;
-        for body in script_bodies(&html) {
-            for (line, text) in line_breaking_strings(body) {
+        for body in scripts {
+            for (line, text) in line_breaking_strings(&body) {
                 problems.push(format!("{name}:{line} {text}"));
             }
         }
     }
 
-    assert!(checked >= 3, "只扫到 {checked} 个模板,`ui/` 是不是搬走了?");
+    assert!(checked >= 3, "只扫到 {checked} 个文件,`ui/` 是不是搬走了?");
     assert!(
         problems.is_empty(),
         "内联脚本里有**跨行字符串** —— 整段 JS 会编译不过,页面变成空壳:\n{}\n\
@@ -231,7 +250,7 @@ fn the_scanner_catches_the_bug_that_emptied_the_report_page() {
 ///
 /// 只认模板自己的 `el(…)` 辅助函数 —— 它建出来的一定是 DOM 节点,建了就该挂。
 /// **不认 `document.createElement`**:离屏 canvas 那种本来就不进 DOM
-/// (`timeline.html` 的 `off` 就是:它只用来 `getContext` / `drawImage`)。
+/// (`workbench.html` 里轴那块的离屏 canvas 就是:它只用来 `getContext` / `drawImage`)。
 /// 挂法认 `appendChild(X)` / `append(X)`,**一行里挂几个都收**
 /// (`what.appendChild(old); what.appendChild(nw);` 这种写法模板里有);
 /// `return X` 也算用掉 —— 辅助函数内部正是这么把节点交出去的。
@@ -277,36 +296,27 @@ fn unappended_elements(script: &str) -> Vec<String> {
 
 /// **建出来的元素必须挂到某处。**
 ///
-/// 2026-09-27 实测(`ui/calibrate.html`):截图卡片里 `const body = el("div", "body")`
-/// 建了、往里塞了 id / 时刻 / 来源 / 音画同步 / 画面读出 / 凭据 / 把握,
-/// **就是没 `card.appendChild(body)`** —— 卡片只剩一张缩略图,
+/// 2026-09-27 实测(`ui/calibrate.html`,那一页后来并进了工作台):截图卡片里
+/// `const body = el("div", "body")` 建了、往里塞了 id / 时刻 / 来源 / 音画同步 /
+/// 画面读出 / 凭据 / 把握,**就是没 `card.appendChild(body)`** —— 卡片只剩一张缩略图,
 /// `record_shot_check` 存进去的看图结论在页面上一字不显示。
 /// 而且它一声不响:JS 不报错,Rust 侧也看不见(卡片是浏览器里建的),
 /// 只有人盯着页面数一数才发现。
 #[test]
 fn every_element_built_in_a_view_template_gets_mounted() {
-    let dir = repo_root().join("ui");
     let mut checked = 0;
     let mut problems: Vec<String> = Vec::new();
 
-    let entries = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("读不到模板目录 {}:{e}", dir.display()));
-    for entry in entries {
-        let path = entry.expect("目录项").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("html") {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let html = std::fs::read_to_string(&path).expect("读模板");
+    for (name, scripts) in ui_scripts() {
         checked += 1;
-        for body in script_bodies(&html) {
-            for orphan in unappended_elements(body) {
+        for body in scripts {
+            for orphan in unappended_elements(&body) {
                 problems.push(format!("{name}: 建了 `{orphan}` 却没有任何 appendChild —— 它不会出现在页面上"));
             }
         }
     }
 
-    assert!(checked >= 3, "只扫到 {checked} 个模板,`ui/` 是不是搬走了?");
+    assert!(checked >= 3, "只扫到 {checked} 个文件,`ui/` 是不是搬走了?");
     assert!(problems.is_empty(), "建了元素没挂上去(静默丢失):
 {}", problems.join("
 "));
@@ -315,7 +325,7 @@ fn every_element_built_in_a_view_template_gets_mounted() {
 /// 判据自己得先站得住:事故现场必须报,补上那一行必须不报,
 /// 辅助函数本身与 `$` 拿现成节点的都不许误报。
 #[test]
-fn the_mounting_check_catches_the_calibration_card_bug() {
+fn the_mounting_check_catches_the_silently_dropped_card() {
     let broken = "const body = el('div', 'body');
 body.appendChild(head);
 grid.appendChild(card);

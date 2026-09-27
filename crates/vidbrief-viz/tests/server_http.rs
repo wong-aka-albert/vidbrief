@@ -29,7 +29,7 @@ fn stage(tag: &str) -> PathBuf {
     // 1000 字节,内容 = 字节值 % 251,便于逐字节校验 Range
     let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(dir.join("source.mp4"), &payload).unwrap();
-    std::fs::write(dir.join("01_preprocess/timeline.html"), "<html>hi</html>").unwrap();
+    std::fs::write(dir.join("01_preprocess/workbench.html"), "<html>hi</html>").unwrap();
     std::fs::write(dir.join("01_preprocess/shots/a.jpg"), b"jpeg").unwrap();
     // 挂载根之外的一个文件,用来验证第二道关卡。
     // 内容用一个**不会出现在任何错误信息里**的标记 —— 否则"回显了路径"会被误判成"泄露了内容"。
@@ -151,7 +151,7 @@ fn content_types_are_right_for_everything_the_view_needs() {
 
     for (path, want) in [
         ("/project.json", "application/json; charset=utf-8"),
-        ("/01_preprocess/timeline.html", "text/html; charset=utf-8"),
+        ("/01_preprocess/workbench.html", "text/html; charset=utf-8"),
         ("/01_preprocess/shots/a.jpg", "image/jpeg"),
         ("/source.mp4", "video/mp4"),
     ] {
@@ -247,9 +247,9 @@ fn url_for_builds_a_loopback_url() {
     let id = format!("url-{}", std::process::id());
     vidbrief_viz::mount(&id, &dir).unwrap();
 
-    let url = vidbrief_viz::url_for(&id, "01_preprocess/timeline.html").unwrap();
+    let url = vidbrief_viz::url_for(&id, "01_preprocess/workbench.html").unwrap();
     assert!(url.starts_with("http://127.0.0.1:"), "{url}");
-    assert!(url.ends_with(&format!("/{id}/01_preprocess/timeline.html")), "{url}");
+    assert!(url.ends_with(&format!("/{id}/01_preprocess/workbench.html")), "{url}");
 
     // 非法相对路径要被拒
     assert!(vidbrief_viz::url_for(&id, "../x").is_err());

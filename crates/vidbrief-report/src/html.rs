@@ -10,12 +10,19 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use vidbrief_project::{Layout, Report, Segment, Shots, Transcript};
+use vidbrief_project::{Layout, Project, Report, Segment, Shots, Transcript};
 
 use crate::ImageMode;
 
 const REPORT_TEMPLATE: &str = include_str!("../../../ui/report.html");
 const DATA_PLACEHOLDER: &str = "/*__VIDBRIEF_DATA__*/null";
+
+/// **共用片段**:工具 + 报告正文的渲染。纯图文报告页与工作台注入的是同一份 ——
+/// 两边显示的是同一批东西,抄两份必然漂(头注见 `ui/_shared.js`)。
+const SHARED_JS: &str = include_str!("../../../ui/_shared.js");
+
+/// 片段占位符。
+const SHARED_PLACEHOLDER: &str = "/*__SHARED_JS__*/";
 
 /// 前端要的全部数据。
 #[derive(Debug, Serialize)]
@@ -25,8 +32,6 @@ pub struct ReportPayload {
     /// 这份报告按什么口味做的(「详细 · 大白话」)—— 中文档位名在 Rust 侧算,
     /// 免得模板与导出各写一份映射。旧数据没这一栏时为 `None`,页面就不显示。
     pub style_text: Option<String>,
-    /// 视频的相对 URL(相对 `report.html` 所在目录),用于回跳。
-    pub video_url: String,
     /// 知识点可能引用的截图:id → 文件(相对 URL)。
     pub shots: Vec<ShotBrief>,
     /// 知识点可能关联的转录段:id → 文本(点回原文用)。
@@ -46,6 +51,15 @@ pub struct ReportPayload {
     pub damaged: Vec<String>,
     /// 图是不是内嵌的(**单文件分享版**)—— 页面上标一句:图能带走,视频那一半带不走。
     pub self_contained: bool,
+    /// 页头那行字:项目名与 id(报告 json 里没有它们,而页面上要显示)。
+    pub project: ProjectBrief,
+}
+
+/// 页头一行字。
+#[derive(Debug, Serialize)]
+pub struct ProjectBrief {
+    pub id: String,
+    pub name: String,
 }
 
 /// 页面上要留意的两行清单 —— 都由**动作层**算好传进来。
@@ -88,13 +102,6 @@ pub fn build_payload(
 ) -> Result<ReportPayload> {
     let rel_page = vidbrief_project::layout::REPORT_HTML_FILE;
 
-    // 视频:项目里那一份。meta 不在就当没有(报告照样能渲染,只是没有回跳)
-    let video_url = match vidbrief_project::VideoMeta::load(&layout.video_meta()) {
-        Ok(meta) => vidbrief_viz::relative_url(rel_page, meta.path.as_str())
-            .context("算视频相对 URL 失败")?,
-        Err(_) => String::new(),
-    };
-
     let shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
     let shot_briefs = shots
         .shots
@@ -132,15 +139,17 @@ pub fn build_payload(
         })
         .collect();
 
+    let project = Project::load(&layout.project_json()).context("读 project.json 失败")?;
+
     Ok(ReportPayload {
         report: report.clone(),
         style_text: report.style.as_ref().map(|s| s.describe()),
-        video_url,
         shots: shot_briefs,
         segments,
         stale: notices.stale.clone(),
         damaged: notices.damaged.clone(),
         self_contained: images == ImageMode::Embedded,
+        project: ProjectBrief { id: project.id.to_string(), name: project.name.clone() },
     })
 }
 
@@ -152,7 +161,12 @@ pub fn render_report_html(payload: &ReportPayload) -> Result<String> {
     if !REPORT_TEMPLATE.contains(DATA_PLACEHOLDER) {
         anyhow::bail!("报告模板里找不到数据占位符 `{DATA_PLACEHOLDER}` —— 模板被改坏了?");
     }
-    Ok(REPORT_TEMPLATE.replace(DATA_PLACEHOLDER, &json))
+    if !REPORT_TEMPLATE.contains(SHARED_PLACEHOLDER) {
+        anyhow::bail!("报告模板里找不到共用片段占位符 `{SHARED_PLACEHOLDER}` —— 模板被改坏了?");
+    }
+    Ok(REPORT_TEMPLATE
+        .replace(SHARED_PLACEHOLDER, SHARED_JS)
+        .replace(DATA_PLACEHOLDER, &json))
 }
 
 /// 从项目里的 `report.json` 渲染 `report.html`,返回写出的路径。
@@ -201,12 +215,29 @@ mod tests {
         r
     }
 
+    /// 摆一份最小的 `project.json` —— 报告页头那行字要项目名与 id,它读的是这个文件。
+    ///
+    /// 没它也能渲染吗?不能:页头会缺一半。真实项目里它由 `vidbrief init` 写出来,
+    /// 所以这里照真实形状摆一份(而不是让 `build_payload` 去容错一个不存在的项目)。
+    fn stage_project(layout: &Layout) {
+        use vidbrief_project::{Project, ProjectId, RelPath, SourceLink};
+        let project = Project::new(
+            ProjectId::new("demo").unwrap(),
+            "样例项目",
+            RelPath::new("source/video.mp4").unwrap(),
+            "E:/别处/video.mp4",
+            SourceLink::Copy,
+        );
+        project.save(&layout.project_json()).unwrap();
+    }
+
     #[test]
     fn template_gets_data_injected_and_keeps_its_css() {
         let dir = std::env::temp_dir().join(format!("vidbrief-report-html-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let layout = Layout::new(&dir);
+        stage_project(&layout);
 
         let payload = build_payload(&layout, &sample_report(), &Notices::default(), ImageMode::Relative).unwrap();
         let html = render_report_html(&payload).unwrap();
@@ -228,6 +259,7 @@ mod tests {
             std::env::temp_dir().join(format!("vidbrief-report-page-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::new(&dir);
+        stage_project(&layout);
         std::fs::create_dir_all(layout.report_dir()).unwrap();
         sample_report().save(&layout.report_json()).unwrap();
 
@@ -268,6 +300,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vidbrief-report-embed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::new(&dir);
+        stage_project(&layout);
         std::fs::create_dir_all(layout.report_dir()).unwrap();
         let (_, file) = stage_one_shot(&layout);
         sample_report().save(&layout.report_json()).unwrap();
@@ -296,6 +329,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vidbrief-report-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::new(&dir);
+        stage_project(&layout);
         std::fs::create_dir_all(layout.report_dir()).unwrap();
         sample_report().save(&layout.report_json()).unwrap();
 
@@ -312,8 +346,8 @@ mod tests {
         let html = std::fs::read_to_string(&path).unwrap();
         assert!(html.contains("引的截图"), "过期的那句话该原样进页面:{html:.200}");
         assert!(
-            html.contains("id=\"stale\""),
-            "标题栏得有那个位置(显不显示由前端按数据定)"
+            html.contains("id=\"notices\""),
+            "页眉下面得有那个位置(显不显示、亮不亮,由前端按数据定)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -324,6 +358,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vidbrief-report-damaged-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::new(&dir);
+        stage_project(&layout);
         std::fs::create_dir_all(layout.report_dir()).unwrap();
         sample_report().save(&layout.report_json()).unwrap();
 
@@ -340,8 +375,8 @@ mod tests {
         let html = std::fs::read_to_string(&path).unwrap();
         assert!(html.contains("乱码字符"), "那句话该原样进页面:{html:.200}");
         assert!(
-            html.contains("id=\"damaged\""),
-            "标题栏得有那个位置(显不显示由前端按数据定)"
+            html.contains("id=\"notices\""),
+            "页眉下面得有那个位置(显不显示、亮不亮,由前端按数据定)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

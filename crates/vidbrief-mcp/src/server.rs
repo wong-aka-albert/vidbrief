@@ -94,8 +94,8 @@ vidbrief:把长视频变成图文总结的**材料供给与结论落盘**工具�
      (或 `preprocess_progress` 看一眼),好了用 `preprocess_result` 取结果。
   ② 校准:list_shots → get_shot 逐张看图,然后**把材料改对** ——
      错的改对(apply_corrections)、缺的补上(extract_shot)、多余的删掉(update_shot);
-     判断用 record_shot_check 记下来,最后 render_calibration_table 把对照表给用户过目
-     (图 + 转录 + 你的结论一屏看完;render_timeline 是带视频回跳的那页)。
+     判断用 record_shot_check 记下来,最后 render_workbench 让用户过目 ——
+     **一个页面看全部**:轴上点一下就展开那一条的解析,右边抽屉里截图/转录/报告三块。
   ③ 总结:search_transcript / get_shot 自主探索 → write_summary
   ④ 报告:build_report —— **不用交内容**:内容就是步 3 写下的那些段
      (**视频里逐个讲的案例/步骤/样本各自成条**),工具把它们组装成 `report.json`、

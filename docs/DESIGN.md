@@ -130,7 +130,7 @@ projects/<project-name>/
 │   │   └── s001_0086.0.jpg
 │   ├── run.json                 # **运行记录**:这一趟跑到哪一步了(§5.4)
 │   │                            #   —— 过程投影,不是材料:没有 schema、没有内容底账
-│   └── timeline.html            # 四层时间线视图(含视频回跳,§9)
+│   └── workbench.html           # **工作台**:视频 + 五层共轴 + 抽屉三块(一页看全部,§9.3)
 │
 ├── 02_calibrate/
 │   ├── transcript.fixed.json    # 经 agent 纠错后的转录(全量副本,§4.5)
@@ -138,8 +138,6 @@ projects/<project-name>/
 │   ├── supplement_requests.json # 补图候选 + agent 的取舍(§4.9)
 │   ├── cross_validate.md        # 图文交叉印证的矛盾点清单
 │   ├── shots_extra/             # 补图产出
-│   ├── timeline.html            # 校准后时间线视图(可重渲染)
-│   ├── calibrate.html           # 校准对照表:图 + 转录 + 结论一屏看完(§9.3)
 │   └── calibration_log.md       # 迭代轨迹
 │
 ├── 03_summary/
@@ -149,8 +147,9 @@ projects/<project-name>/
 │   └── shots_extra2/            # agent 二次补图
 │
 └── 04_report/
-    ├── report.md
-    ├── report.html
+    ├── report.json              # 报告的**判据**(渲染器与导出的输入)
+    ├── report.md                # 导出:Markdown(给人贴到别处)
+    ├── report.html              # 纯图文报告页(能单独保存/发给别人,§9.3)
     └── assets/
 ```
 
@@ -486,7 +485,7 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
   两件事:`preprocess` 那种"开头读、跑几分钟、最后整份写回"的活正好落在缝里。
   CLI 仍然每个命令取一次、命令结束即放(**同一个口径**)。
 - **锁只保护材料与结论**(`project.json` / `shots.json` / `transcript.fixed.json` / 报告),
-  **不保护派生视图**(`timeline.html`)—— 后者由材料推出来,两个会话同时渲染也不会有坏结果,
+  **不保护派生视图**(`workbench.html` / `report.html`)—— 它们由材料推出来,两个会话同时渲染也不会有坏结果,
   而"另一个会话正开着项目"不该让查看也变成不可能。**只读的活完全不取锁。**
 - **建项目阶段用目录本身当锁。** 那一刻项目目录还不存在,没有 `project.lock` 可以锁 ——
   于是拿 `fs::create_dir` 的**原子性**占位(已存在即失败),父目录(`projects/`)照旧
@@ -753,7 +752,7 @@ vidbrief upgrade <项目> --fresh   # 什么都不收,状态清零(材料原样�
 
 ### 5.3 完成即产出可视化
 
-`preprocess()` 结束前自动调 `render_timeline()` 生成 `01_preprocess/timeline.html`(§9,含视频回跳)。agent 可把该文件呈现给用户作为步 1 的"检查界面"。用户不满意就对话让 agent 调 `extract_shot` / `update_shot` 增删,或显式重跑 `preprocess`。
+`preprocess()` 结束前自动调 `render_workbench()` 生成 `01_preprocess/workbench.html`(§9,含视频回跳)。agent 可把该文件呈现给用户作为步 1 的"检查界面"。用户不满意就对话让 agent 调 `extract_shot` / `update_shot` 增删,或显式重跑 `preprocess`。
 
 ### 5.4 作业与调用分离(2026-09-26,清账五)
 
@@ -1091,7 +1090,7 @@ agent: → create_project → preprocess          （纯算法,一次做完,几�
          → list_shots → get_shot(逐张)【自己看图对照】
          → 把材料改对:apply_corrections / extract_shot / update_shot
          → record_shot_check(每张) 记下判断
-         → render_timeline() 把链接给用户
+         → render_workbench() 把链接给用户
          "11 张看完,改了 4 处转录;链接在这儿,你看一眼"
 用户: 第6张重新截 602 附近;另外"派森"应该是"Python"
 agent: → extract_shot(602) → get_shot(新)【再看】→ 呈现
@@ -1317,7 +1316,7 @@ skill/
 
 ### 9.1 形态与"弹出 UI"
 
-- MCP 工具 `render_timeline(project_id, open_browser?)` → 生成 HTML,**并顺带启动本地查看服务 + 自动打开默认浏览器**(即"弹出 UI")。`render_calibration_table` 同形态(§9.3)。
+- MCP 工具 `render_workbench(project_id, open_browser?)` → 生成 HTML,**并顺带启动本地查看服务 + 自动打开默认浏览器**(即"弹出 UI")。`build_report` 起服务那半同形态(§9.3)。
 - 这是每一步的"图形化检查界面"。
 - **本地查看服务是什么**:一个绑在 `127.0.0.1` 的极简 HTTP 静态服务,把项目目录当站点发布(`http://127.0.0.1:<port>/<项目 id>/…`),由工具按需拉起。**(已实现,见 `vidbrief-viz::server`)**
   - **为什么需要**:浏览器直接 `file://` 打开 HTML 时,`<video>` 常因跨域/安全限制无法加载本地视频,"拖时间轴→视频回跳"就会失效;走 `http://127.0.0.1` 后,视图/图片/视频同源,`<video>` 的 seek/播放正常。
@@ -1367,13 +1366,19 @@ skill/
 
 **加载本地视频的前提**:浏览器直接 `file://` 打开时对本地媒体有跨域/权限限制,稳妥做法是由本地查看服务提供视频与视图(§9.1)。
 
-### 9.3 其他视图
+### 9.3 视图:两个页面
 
 | 视图 | 内容 | 步 |
 |------|------|----|
-| 校准对照表 `calibrate.html` | 一屏看完:每张截图的缩略图与结论(图文不符/没把握高亮,弃用带理由)+ 每段转录的原文/现读法/结论(未核验淡显)。要替人答四个问题(M4 联调提出):**哪些图是空的**(缩略图并排)、**哪几张是同一张幻灯片**(同上)、**哪几段转录被动过**(结论并排)、**结论是哪一轮写的**(每条带 `checked_at`)。**不内嵌校准日志** —— 它是 agent 的自由文本(给下一轮与审计看),贴上页面等于让读者拿一段手写的轮次时段去对上面每一行的时刻;要让第四问答满,得让工具在落结论时记轮号 | 2 |
-| 补图清单 | 补图请求 + 已补图 | 2 |
-| 报告预览 | `report.html`(同样含视频回跳) | 4 |
+| **工作台** `01_preprocess/workbench.html` | **一个页面看全部**:左边视频 + 五层共轴(差帧图 / 密集区 / 截图 / 转录 / 知识点),轴上点一下就地展开那一条的解析(浮层);右边抽屉三块(截图 / 转录 / 报告)。截图那一块要替人答四个问题(M4 联调提出):**哪些图是空的**(缩略图并排)、**哪几张是同一张幻灯片**(同上)、**哪几段转录被动过**(原文与现读法并排 + 结论)、**结论是哪一轮写的**(每条带 `checked_at`)。**不内嵌校准日志** —— 它是 agent 的自由文本(给下一轮与审计看),贴上页面等于让读者拿一段手写的轮次时段去对上面每一行的时刻 | 1 起(2 起有内容,4 后报告栏也满) |
+| **报告页** `04_report/report.html` | **纯图文**:每条知识点带时刻、正文、来源、待核验、关联的转录原话与图。**能单独保存 / 发给别人** —— 这也是它必须独立成文件、不靠 `#doc` 换壳的原因。视频那一半带不走(单文件版把图内嵌进页面,页面上会说明这件事) | 4 |
+
+两页**共用一份正文渲染**(`ui/_shared.js`,两边各自注入):知识点条在哪儿都长一样,
+抄两份必然漂 —— 一边改了措辞另一边不知道,用户看到两个说法。
+
+从前那两页(`01_preprocess/timeline.html` / `02_calibrate/calibrate.html`)已经并进工作台:
+**同一批材料的三份页面,只会让人猜「该看哪一页」**。退役时一并删掉的还有
+`render_timeline` / `render_calibration_table` 两个工具 —— 现在只剩 `render_workbench`。
 
 ---
 
@@ -1491,8 +1496,8 @@ project  ←  core  ←  asr          project  ←  viz          project  ←  r
 >
 > | 模板 | 依赖 | 状态 |
 > |------|------|------|
-> | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ M3 |
-> | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ M4 |
+> | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_workbench | ✅ M3 |
+> | P2 `fix_transcript` | apply_corrections / render_workbench | ✅ M4 |
 > | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ M3 |
 > | P4 `summarize_video` | get_transcript / list_regions / list_shots / get_shot / search_transcript / request_shot / write_summary / write_note | ✅ M5 实战打磨 |
 > | P5 `build_report` | build_report / get_transcript / list_shots / write_summary | ✅ M6 |
@@ -1552,7 +1557,7 @@ vidbrief help                                       # 用法
 > 所以 `ui` 不取写锁:两个会话同时渲染也不会有坏结果,
 > 而"另一个会话正开着项目"不该让查看也变成不可能。
 
-`ui` 会渲染 `01_preprocess/timeline.html`、把项目目录挂到本地服务上、打开默认浏览器。
+`ui` 会渲染 `01_preprocess/workbench.html`、把项目目录挂到本地服务上、打开默认浏览器。
 **服务是必须的**:浏览器用 `file://` 打开时对本地媒体有跨域限制,时间轴点了不跳。
 
 `preprocess` 的选项:`-f/--fps`(采样帧率,默认 1.0)、`-w/--width`(参与打分的缩小宽度,
@@ -1633,7 +1638,7 @@ vidbrief help                                       # 用法
 ### B. 步 1 前处理(一件作业,三个入口 —— §5.4)
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
-| `preprocess` | 算 | `project_id, [fps, width, transcribe, shots, wait_seconds]` | 跑完了 = 完整交代(差帧图/转录/截图/`timeline.html` 的路径与摘要);还在跑 = 当前进度(不重开) |
+| `preprocess` | 算 | `project_id, [fps, width, transcribe, shots, wait_seconds]` | 跑完了 = 完整交代(差帧图/转录/截图/`workbench.html` 的路径与摘要);还在跑 = 当前进度(不重开) |
 | `preprocess_progress` | 供 | `project_id` | 那一趟的状态(running/interrupted/done/failed)+ 走到哪一步 + 抽帧张数 + 已用时 |
 | `preprocess_result` | 供 | `project_id` | 跑完的那份交代;没跑完就说「还没好」(不是错误);失败/断了说清原因与重跑的路 |
 
@@ -1676,8 +1681,7 @@ vidbrief help                                       # 用法
 ### F. 可视化
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
-| `render_timeline` | 算 | `project_id, open_browser?` | `html_path, url` |
-| `render_calibration_table` | 算 | `project_id, open_browser?` | `html_path, url`(对照表内容见 §9.3) |
+| `render_workbench` | 算 | `project_id, open_browser?` | `html_path, url`(工作台内容见 §9.3) |
 
 ### G. 说明书(不属于 A–F)
 | 工具 | 类型 | 入参 | 出参 |
@@ -1700,10 +1704,10 @@ vidbrief help                                       # 用法
 agent: → create_project → preprocess                       # 步1 起作业并等它(纯算法)
        # 长视频等不够就再调一次:preprocess(接着等)/ preprocess_progress(看一眼)
        # 跑完了 preprocess_result 取结果
-       → 呈现 timeline.html 摘要("12 个变化密集区,12 张图,转录 985s")
+       → 呈现 workbench.html 摘要("12 个变化密集区,12 张图,转录 985s")
 用户: 看看图对不对
 agent: → list_shots → 对每张 get_shot 【agent 自己看图 + 对照转录】
-       → record_shot_check(每张) → render_timeline()
+       → record_shot_check(每张) → render_workbench()
        "11 张匹配;第 6 张(t=602)画面像结构,同期语音说结构图,存疑"
 用户: 第6张重新截 602 附近;"派森"应为"Python"
 agent: → extract_shot(602) → get_shot(新图)【再看】
@@ -1733,9 +1737,9 @@ agent: → 带新数据再调一次 build_report(整份替换)→ 重渲染 → 
 |------|------|------|
 | **M0 schema 定稿** ✅ | §4 的 JSON schema + 目录结构落成真实文件 | 本文评审 |
 | **M1 vidbrief-core + 步1** ✅ | 差帧 + 密集区 + 截图 + ASR,CLI 可跑 | 算法思路见 §15;ASR 用 `tools/whisper/` |
-| **M2 时间线视图** ✅ | `render_timeline` 四层 + 视频回跳 + 本地服务 | M1 |
+| **M2 时间线视图** ✅ | 四层共轴 + 视频回跳 + 本地服务(2026-09-27 并进工作台) | M1 |
 | **M3 MCP 骨架** ✅ | `vidbrief-mcp` stdio 服务 + A–F 组工具(除两个渲染器)+ 写锁 + P1/P3/P4 | M1,M2 |
-| **M4 步2 循环** ✅ | `render_calibration_table` 对照表视图 + 提示模板 P2 + 联调(真 agent 五轮;门的判据三轮定稿) | M3 |
+| **M4 步2 循环** ✅ | 校准视图(2026-09-27 并进工作台)+ 提示模板 P2 + 联调(真 agent 五轮;门的判据三轮定稿) | M3 |
 | **M5 步3 总结** ✅ | 自主探索联调 + 提示模板 P4 的实战打磨 + `get_guide` 说明书出口 | M4 |
 | **M6 步4 报告** ✅ | `vidbrief-report` + `build_report` + 提示模板 P5;报告页(两级内容 + 时间轴浮层)、`report.md` 导出、技能目录 `skill/` | M5 |
 | **M7 加固** | 增量重跑、失败重试、批量、性能、进度通知、外挂接口 | 全部 |

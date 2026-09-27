@@ -8,7 +8,7 @@
 > 参数怎么填、门的规矩、报错怎么解,**以 `get_guide(step=…)` 为准** ——
 > 那份会展开讲;这里只有「有哪些工具、干什么、必须给什么」。
 
-一共 26 件工具。
+一共 25 件工具。
 
 - **`apply_corrections`** — 把转录纠错写回 `02_calibrate/transcript.fixed.json`(原始转录永不就地改写),并刷新人可核对的 `transcript.diff.md`。
   必填:`corrections`、`project_id`
@@ -47,9 +47,7 @@
   必填:`project_id`
 - **`record_shot_check`** — 把**你对一张截图的判断**写回 shots.json(全量替换,复核后重写一次即以最后一次为准)。
   必填:`audio_visual_sync`、`confidence`、`match`、`project_id`、`shot_id`、`type_read`
-- **`render_calibration_table`** — 把校准结果渲染成对照表(`02_calibrate/calibrate.html`),起本地查看服务,并打开用户浏览器。
-  必填:`project_id`
-- **`render_timeline`** — 把最新材料渲染成四层共轴时间线(`01_preprocess/timeline.html`),起本地查看服务,并打开用户浏览器。
+- **`render_workbench`** — 把项目渲染成**工作台**(`01_preprocess/workbench.html`)—— 一个页面看全部:左边视频 + 五层共轴时间轴(差帧图/密集区/截图/转录/知识点),…
   必填:`project_id`
 - **`request_shot`** — 同 extract_shot:在指定时刻补截一张图。
   必填:`project_id`、`reason`、`t`

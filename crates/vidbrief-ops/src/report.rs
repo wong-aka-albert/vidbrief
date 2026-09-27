@@ -439,7 +439,7 @@ pub fn build_report(
 /// 拿现有的 `report.json` 重渲染一遍(不碰数据、不动进度)。
 ///
 /// 给"只想再看一眼"用:数据没变、样式改了、或者就是想把服务再起起来。
-/// 渲染不取写锁 —— 它写的是派生视图(`timeline` / `calibrate` 同一个道理)。
+/// 渲染不取写锁 —— 它写的是派生视图(工作台那一页同一个道理)。
 pub fn render_existing(
     opened: &OpenProject,
     format: ReportFormat,
@@ -673,7 +673,7 @@ fn build_topic(
         .collect();
 
     Ok(ReportTopic {
-        id: 0, // 由 build_topics 按时刻编
+        id: at as u32, // 按时刻编(1..n)—— `at` 就是 build_topics 递进来的序号
         t,
         title: title.to_string(),
         body: body.to_string(),
@@ -813,14 +813,9 @@ mod tests {
         assert_eq!(report.topics.len(), 1);
 
         let topic = &report.topics[0];
-        // **编号这一栏现在是坏的**:`build_topic` 里写着「由 build_topics 按时刻编」,
-        // 而 `build_topics` 从头到尾没给 `id` 赋过值 —— 落下来的都是 0。
-        // 这里按现状断言,是为了让"没编上号"看得见,而不是被一句 `id == 0` 轻轻带过
-        // (该编的是 1..n —— 见交付说明里的生产代码疑点)。
-        assert_eq!(
-            topic.id, 0,
-            "该编的是 1(按时刻 1..n),而落下来的是 0:已知的生产代码缺口"
-        );
+        // 编号按时刻从 1 起(与 `docs/schema/report.schema.json` 的 `minimum: 1` 对齐)。
+        // 这一条只有一段,连续性由 `topic_ids_are_numbered_from_one` 钉。
+        assert_eq!(topic.id, 1, "第 1 条就该编 1");
         assert_eq!(topic.t, 2.0, "锚点原样");
         assert_eq!(topic.title, "切到解释器主窗口", "标题原样");
         assert_eq!(
@@ -848,9 +843,43 @@ mod tests {
         assert!(fake.state().progress.report.done, "步 4 该标完成");
     }
 
-    /// 没有 `t` 的段只作**总述**:进 `report.summary`,不上时间轴。
+    /// 编号一栏:**按时刻从 1 连续编**。这条栏位从前恒为 0(注释写着「由 build_topics
+    /// 按时刻编」而实际没编),`stale_anchors` 报诊断时就会打「第 0 条」指不准是谁;
+    /// schema 里它是 `minimum: 1`。多段才看得出"连续",所以单独立一条。
     #[test]
-    fn unanchored_sections_go_to_the_overview_and_not_the_timeline() {
+    fn topic_ids_are_numbered_from_one() {
+        let fake = Fake::new("report-topic-ids")
+            .with_transcript(&[
+                (0.0, 2.0, "各位好,今天讲 Python 列表"),
+                (2.0, 4.0, "看这一段结构图"),
+            ])
+            .with_curve(5)
+            .with_shot(1, 2.0);
+        let mut opened = fake.open();
+        finish_calibration(&mut opened);
+        write_section(&mut opened, a_section(Some(0.5), "第一节", "第一节的正文。"));
+        write_section(&mut opened, a_section(Some(1.5), "第二节", "第二节的正文。"));
+        write_section(&mut opened, a_section(Some(2.5), "第三节", "第三节的正文。"));
+
+        let outcome = build(&mut opened, ReportFormat::Html).unwrap();
+        assert_eq!(outcome.topics, 3);
+
+        let report = Report::load(&fake.layout().report_json()).unwrap();
+        let ids: Vec<u32> = report.topics.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "id 按时刻从 1 连续编,不许留 0");
+
+        // 总述段(没有 `t`)不占号 —— 编号跟着上时间轴的那些走。
+        write_section(&mut opened, a_section(None, "收束", "回头看,讲的是同一件事。"));
+        let outcome = build(&mut opened, ReportFormat::Html).unwrap();
+        assert_eq!(outcome.topics, 3, "没锚点的段不上时间轴");
+        let report = Report::load(&fake.layout().report_json()).unwrap();
+        let ids: Vec<u32> = report.topics.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "多一段总述不该把编号撑出空号");
+    }
+
+    /// 没有 `t` 的段只作**总述**:进 `report.summary`,不当成一条知识点。
+    #[test]
+    fn unanchored_sections_go_to_the_overview_and_not_the_topic_list() {
         let fake = ready("report-overview");
         let mut opened = fake.open();
         write_section(
@@ -860,7 +889,7 @@ mod tests {
 
         let outcome = build(&mut opened, ReportFormat::Html).unwrap();
 
-        assert_eq!(outcome.topics, 1, "总述不上时间轴");
+        assert_eq!(outcome.topics, 1, "总述不是知识点");
         let report = Report::load(&fake.layout().report_json()).unwrap();
         assert!(report.summary.contains("两句话讲完"), "{}", report.summary);
         assert!(
@@ -914,8 +943,8 @@ mod tests {
         assert_eq!(times, vec![2.0, 30.0], "顺序按时刻,不按提交顺序");
         assert_eq!(
             report.topics.iter().map(|t| t.id).collect::<Vec<u32>>(),
-            vec![0, 0],
-            "id 该按时刻编成 1、2,而生产代码没编 —— 落下来都是 0(见交付说明的疑点)"
+            vec![1, 2],
+            "id 按时刻编:第一条是 2.0 那一节,第二条是 30.0 那一节"
         );
 
         let first = &report.topics[0];
@@ -1137,9 +1166,8 @@ mod tests {
 
         let joined = outcome.warnings.join("\n");
         assert_eq!(outcome.warnings.len(), 3, "三处坏点各报一条:{joined}");
-        // 编号那一栏现在恒为 0(见交付说明的疑点),所以这里不认"第 1 条"这个号,
-        // 只认它点了名 —— 报出来的话里那句是「第 0 条知识点(`切到解释器主窗口`)的正文……」。
-        for needle in ["全局总结", "style.notes", "知识点", "正文"] {
+        // 报了坏点就要点得准 —— 包括编号(它从前恒为 0,报出来是「第 0 条」,指不准是谁)。
+        for needle in ["全局总结", "style.notes", "第 1 条", "知识点", "正文"] {
             assert!(
                 joined.contains(needle),
                 "报出来的话要点到「{needle}」:{joined}"

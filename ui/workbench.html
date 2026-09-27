@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>vidbrief</title>
+<!--
+  工作台:视频区 + 共轴 + 抽屉,一个页面看全部。
+  内容组件(截图卡 / 转录行 / 知识点 / 浮层)只认自己的类名,不认识容器 ——
+  所以同一个 topicNodes() 能挂进抽屉与浮层两处,不写第二份渲染。
+  图文报告页(`report.html`)是**另一个文件**:它要能单独分享,所以不靠 `#doc` 换壳,
+  而是与这一页共用 `ui/_shared.js` 里的正文渲染。
+  CSS 四层:令牌 → 基座 → 组件 → 壳。底色只在令牌层决定,壳不碰它。
+-->
+<style>
+/* ══ 1 令牌 ══ 只放变量。底色、前景、线、强调色都在这儿定死,别处只引用。
+   color-scheme 不只是给表单控件的:它决定 canvas 的默认底色(不写它,深色页滚动边界外会露白)。 */
+:root {
+  color-scheme: dark;
+  --bg:#14161a; --panel:#1c1f26; --panel2:#171a1f; --line:#2b3038; --fg:#d8dee9; --dim:#7b8494;
+  --accent:#4aa3ff; --keep:#3fb950; --drop:#6e7681; --warn:#d29922; --bad:#f85149;
+  --hover:#ffffff08; --ctl-bg:#232830; --ctl-bg-hover:#2e343d;
+  --shadow:0 10px 34px #000a; --drawer-w:620px;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:#f6f7f9; --panel:#fff; --panel2:#fbfcfd; --line:#e3e6ea; --fg:#1f2328; --dim:#656d76;
+  --accent:#0969da; --keep:#1a7f37; --drop:#8c959f; --warn:#9a6700; --bad:#cf222e;
+  --hover:#0000000a; --ctl-bg:#eef0f3; --ctl-bg-hover:#e3e6ea;
+  --shadow:0 10px 34px #00000026;
+}
+
+/* ══ 2 基座 ══ reset + 元素默认。**底色只在这里出现一次**。 */
+* { box-sizing:border-box; }
+html, body { height:100%; margin:0; overflow:hidden; }
+body {
+  background:var(--bg); color:var(--fg);
+  font:13px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+}
+button { font:inherit; }
+h2 { font-size:14px; margin:0 0 4px; }
+h2 .counts { color:var(--dim); font-weight:400; font-size:12px; margin-left:8px; }
+.hint { color:var(--dim); font-size:12px; margin:0 0 10px; }
+.empty { color:var(--dim); padding:4px 0; }
+/* 滚动条:系统默认那根又粗又亮,贴在深色面板边上一眼就是「没管过」 */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
+}
+::-webkit-scrollbar { width:11px; height:11px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background:transparent; }
+::-webkit-scrollbar-thumb { background:color-mix(in srgb, var(--dim) 60%, transparent);
+  border-radius:8px; border:3px solid transparent; background-clip:content-box; }
+::-webkit-scrollbar-thumb:hover { background:var(--dim); background-clip:content-box; }
+
+/* ══ 3 组件 ══ 与容器无关:只认自己的类名,抽屉里、浮层里、报告页里都能放。 */
+
+/* ── 按钮 / 筛选器 ── */
+button.tool { font:inherit; font-size:12px; color:var(--fg); background:var(--ctl-bg);
+  border:1px solid var(--line); border-radius:5px; padding:3px 9px; cursor:pointer; }
+button.tool:hover { background:var(--ctl-bg-hover); }
+button.tool:disabled { opacity:.4; cursor:default; }
+.filters { display:flex; gap:6px; margin:0 0 12px; flex-wrap:wrap; }
+.filters button.on { border-color:var(--accent); color:var(--accent); }
+
+/* ── 小标记 ── */
+.badge { display:inline-block; font-size:11px; padding:0 7px; border-radius:9px;
+  border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+.badge.ok { color:var(--keep); border-color:var(--keep); }
+.badge.warn { color:var(--warn); border-color:var(--warn); }
+.badge.bad { color:var(--bad); border-color:var(--bad); }
+.badge.dim { color:var(--dim); }
+.kv { font-size:12px; color:var(--fg); }
+.kv .k { color:var(--dim); }
+.issues { margin:0; padding:0 0 0 18px; font-size:12px; color:var(--warn); }
+.quote { font-size:12px; color:var(--dim); border-left:2px solid var(--line); padding-left:8px; }
+.at { color:var(--dim); font-size:11px; }
+
+/* ── 报告正文的 markdown ── */
+.md p { margin:0 0 9px; }
+.md h2, .md h3, .md h4 { font-size:14px; margin:12px 0 6px; }
+.md ul { margin:0 0 9px; padding-left:20px; }
+.md table { border-collapse:collapse; margin:0 0 10px; font-size:12.5px; }
+.md th, .md td { border:1px solid var(--line); padding:3px 8px; text-align:left; vertical-align:top; }
+.md blockquote { margin:0 0 9px; padding-left:10px; border-left:2px solid var(--line); color:var(--dim); }
+.md code { background:var(--hover); padding:1px 4px; border-radius:4px; }
+/* 长串(编号区间、链接、没有空格的长中文)不许把表格撑宽 —— 撑宽 = 内容被裁 */
+.md td, .md th, .md code { overflow-wrap:anywhere; }
+
+/* ── 知识点:抽屉 / 浮层两处共用(报告页里那份在 `_shared.js` 里长这样)── */
+.topic-item { border-top:1px dashed var(--line); padding:12px 0 4px; }
+.topic-item h4 { margin:0 0 4px; font-size:14px; }
+.topic-item h4 .t { color:var(--accent); font-size:12px; margin-right:8px;
+  font-variant-numeric:tabular-nums; }
+.topic-item.now { background:var(--hover); border-radius:6px; }
+.topic-item img { max-width:100%; border:1px solid var(--line); border-radius:6px;
+  margin:8px 0; display:block; }
+.sources { margin-top:9px; border-top:1px dashed var(--line); padding-top:6px;
+  font-size:12px; color:var(--dim); }
+.sources .k { color:var(--warn); }
+.sources a { color:var(--accent); }
+/* 待核验:读的人该回头核一下的点。**必须在页面上显眼** ——
+   静默略过这种数字,结论就少一块而读者不知道。 */
+.verify { margin-top:7px; border-top:1px dashed var(--warn); padding-top:5px;
+  font-size:12px; color:var(--warn); }
+.verify .k { font-weight:600; }
+.verify ul { margin:3px 0 0; padding-left:18px; }
+/* 转录段不是一个号码,是**一句话**:点一下视频跳到那一刻,悬停看原文。
+   类名是 .segchip 而不是 .seg —— 转录列表已经占了 .seg(那是 grid 三列的一行)。 */
+.segs { font-size:12px; color:var(--dim); margin-top:5px; line-height:2; }
+.segchip { display:inline-block; margin:1px 5px 1px 0; padding:0 7px; font-size:11.5px;
+  border:1px solid var(--line); border-radius:999px; color:var(--dim);
+  text-decoration:none; cursor:pointer; white-space:nowrap; }
+.segchip:hover { color:var(--fg); border-color:var(--accent); background:var(--hover); }
+.segchip .t { color:var(--accent); margin-left:5px; }
+.segchip:hover .t { text-decoration:underline; }
+.segchip.missing { cursor:default; opacity:.6; }
+.segchip.missing:hover { color:var(--dim); border-color:var(--line); background:none; }
+.sources a, .segchip, .segs { overflow-wrap:anywhere; }
+/* 点了能跳的,才摆出能点的样子 */
+.jumpable { cursor:pointer; }
+
+/* ── 截图卡 ── */
+.shot-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
+.shot { border:1px solid var(--line); border-radius:6px; background:var(--panel); overflow:hidden;
+  display:flex; flex-direction:column; }
+.shot .thumb { height:128px; background:#000; display:grid; place-items:center; cursor:zoom-in; }
+.shot .thumb img { max-width:100%; max-height:128px; display:block; }
+.shot .body { padding:8px 10px 10px; display:flex; flex-direction:column; gap:5px; }
+.shot .head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.shot .head .id { font-weight:600; }
+.shot .head .t { color:var(--accent); font-variant-numeric:tabular-nums; }
+.shot .head .origin { color:var(--dim); font-size:11px; }
+.shot.dropped { border-color:var(--drop); opacity:.78; }
+.shot.dropped .thumb { filter:grayscale(.5); }
+.shot.low { border-color:var(--warn); }
+.shot.nomatch { border-color:var(--bad); }
+
+/* ── 转录行 ── */
+.seg-list { display:flex; flex-direction:column; border-top:1px solid var(--line); }
+.seg { display:grid; grid-template-columns:118px 86px 1fr; gap:10px; padding:7px 4px;
+  border-bottom:1px solid var(--line); align-items:baseline; }
+.seg:hover { background:var(--hover); }
+.seg .where { color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; }
+.seg .tags { display:flex; gap:4px; flex-wrap:wrap; }
+.seg .what { min-width:0; overflow-wrap:anywhere; }
+.seg .what .line { display:block; }
+.seg .old { color:var(--dim); text-decoration:line-through; }
+.seg .new { color:var(--keep); }
+.seg .why { color:var(--dim); font-size:12px; margin-top:2px; }
+.seg .at { margin-top:2px; display:block; }
+.seg.unchecked { opacity:.55; }
+.seg.needs_user { background:color-mix(in srgb, var(--warn) 8%, transparent); }
+.focusline { outline:2px solid var(--warn); outline-offset:2px; }
+
+/* ── 浮动层:轴上点中的那一条就近展开。引线是独立元素(浮层自己 overflow,伪元素会被裁掉)── */
+.float { position:absolute; left:50%; transform:translateX(-50%);
+  width:min(460px, 92%); max-height:46vh;
+  overflow-y:auto; overflow-x:hidden;          /* 横向不滚:竖直条会挤内容,底下就多一根横条 */
+  background:color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter:blur(6px);
+  border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow);
+  padding:10px 15px 12px; z-index:6; }
+.float[hidden], .stem[hidden] { display:none; }
+.float .head { display:flex; align-items:center; gap:6px; }
+.float .idx { color:var(--dim); font-size:12px; }
+.float .head .spacer { flex:1; }
+.float h3 { margin:6px 0 4px; font-size:15.5px; }
+.float h3 .t { color:var(--accent); font-size:12.5px; margin-left:8px; }
+.stem { position:absolute; width:1px; background:var(--accent); opacity:.85; z-index:5; }
+.stem::after { content:""; position:absolute; top:100%; left:50%; transform:translateX(-50%);
+  border:5px solid transparent; border-top-color:var(--accent); opacity:.95; }
+
+/* ── 放大层 ── */
+#zoom { position:fixed; inset:0; background:#000c; display:none; place-items:center;
+  z-index:50; cursor:zoom-out; }
+#zoom.on { display:grid; }
+#zoom img { max-width:94vw; max-height:90vh; }
+#zoom .cap { color:#fff; font-size:12px; margin-top:8px; text-align:center; }
+
+/* ── 图标按钮 ── */
+.iconbtn { display:grid; place-items:center; width:32px; height:26px; border-radius:7px; font-size:13px;
+  border:1px solid var(--line); background:none; color:var(--dim); cursor:pointer; }
+.iconbtn:hover { background:var(--hover); color:var(--fg); }
+
+/* ══ 4 壳 ══ 只管自己的布局,不碰令牌(底色)。 */
+
+/* ── 4.1 工作台壳 ── */
+.app { display:grid; grid-template-rows:auto 1fr; height:100%; }
+.app .top { display:flex; align-items:center; gap:10px; padding:7px 12px; flex-wrap:wrap;
+  border-bottom:1px solid var(--line); background:var(--panel); }
+.app .top .name { font-weight:600; font-size:14px; white-space:nowrap; }
+.app .top .meta { color:var(--dim); font-size:12px; white-space:nowrap; }
+.app .top .sp { flex:1; }
+.app .top .layers { display:flex; gap:5px; flex-wrap:wrap; }
+.app .top .layers label { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; font-size:12px;
+  border:1px solid var(--line); border-radius:99px; color:var(--dim); cursor:pointer; user-select:none; }
+.app .top .layers label.on { color:var(--fg); border-color:var(--accent); }
+.app .top .layers input { accent-color:var(--accent); margin:0; }
+
+/* 抽屉开合靠列宽过渡;本体宽度不变(内容不重排)。overflow:hidden ——
+   收起时抽屉本体挂在 0 宽列外,不裁的话它会把主区撑宽 608px。 */
+.main { display:grid; grid-template-columns:1fr var(--drawer-w); column-gap:12px;
+  padding:12px; min-height:0; overflow:hidden;
+  transition:grid-template-columns .24s ease, column-gap .24s ease; }
+.main.no-drawer { grid-template-columns:1fr 0px; column-gap:0; }
+.stage { position:relative; display:flex; flex-direction:column; gap:10px; min-width:0; min-height:0; }
+/* 用 flex 不用 grid:grid area 的高度算作 auto,`max-height:100%` 会解析不出来
+   (元素顶着片源的 640 高、容器只有 652,底部 56px 就被 overflow 裁掉了 —— 实测踩过)。 */
+.screen { position:relative; flex:1 1 auto; min-height:0; overflow:hidden;
+  background:#000; border-radius:10px; display:flex; align-items:center; justify-content:center; }
+/* 不写 width/height:100% —— 那会让元素等于容器,宽窗口下把画面**放大**到铺满。
+   max-* 让它最多长到片源大小,object-fit 保证任何尺寸下都不裁。 */
+.screen video { max-width:100%; max-height:100%; display:block; object-fit:contain; }
+.screen .badge { position:absolute; left:8px; top:8px; background:#000000b0; color:#fff; font-size:12px;
+  padding:2px 8px; border-radius:6px; font-variant-numeric:tabular-nums; }
+.axiswrap { flex:0 0 auto; background:var(--panel2); border:1px solid var(--line);
+  border-radius:10px; padding:6px 10px 8px; }
+.axhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px; }
+.axhead .hint { margin:0; }
+.jump { display:flex; gap:6px; flex-wrap:wrap; }
+.jump button { border:1px solid var(--line); border-radius:7px; padding:3px 9px; font-size:12px;
+  color:var(--dim); background:none; cursor:pointer; }
+.jump button:hover { background:var(--hover); color:var(--fg); }
+#cv { width:100%; height:126px; display:block; cursor:crosshair; border-radius:8px; }
+
+.drawer { width:var(--drawer-w); display:flex; flex-direction:column; min-height:0; overflow:hidden;
+  background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+.drawer-head { display:flex; align-items:center; gap:8px; padding:7px 10px; border-bottom:1px solid var(--line); }
+.tabs { display:flex; gap:4px; }
+.tabs button { border:1px solid var(--line); border-radius:7px; padding:3px 13px; font-size:12.5px;
+  color:var(--dim); background:none; cursor:pointer; }
+.tabs button.on { color:var(--fg); border-color:var(--accent); background:var(--hover); }
+.view { flex:1 1 auto; overflow:auto; min-height:0; padding:12px 14px 40px; }
+.view section { display:none; }
+.view section.on { display:block; }
+
+/* ══ 5 打印 ══ 暗底打到白纸上就是一片黑,所以纸面上一律换成浅色。 */
+@media print {
+  :root { color-scheme: light;
+    --bg:#fff; --panel:#fff; --panel2:#fff; --line:#cfd4da; --fg:#111; --dim:#555;
+    --accent:#0645ad; --keep:#1a7f37; --warn:#8a5a00; --drop:#888; --hover:transparent; }
+  .toc, .topic-item img { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<!-- ══ 工作台壳 ══ 出厂就是可见的:这一页只有一个壳,没有"换壳"这回事了
+     (从前它带 `hidden`,靠换壳的 JS 摘掉;那行 JS 删了、属性忘了摘 → 页面全白,只有数据在) -->
+<div class="app" id="app">
+  <div class="top">
+    <span class="name" id="pname">—</span>
+    <span class="meta" id="pmeta"></span>
+    <span class="sp"></span>
+    <span class="layers" id="layerbox"></span>
+    <button class="iconbtn" id="themebtn" title="亮色/暗色">🌙</button>
+    <button class="iconbtn" id="drawerToggle" title="收起抽屉">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           stroke-width="1.4" stroke-linecap="round">
+        <rect x="1.7" y="2.7" width="12.6" height="10.6" rx="2.2"/>
+        <line x1="10.1" y1="2.7" x2="10.1" y2="13.3"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="main" id="main">
+    <div class="stage" id="stage">
+      <div class="screen"><video id="v" controls preload="metadata" playsinline></video>
+        <div class="badge" id="badge">0:00</div></div>
+      <div class="axiswrap">
+        <div class="axhead">
+          <div class="jump" id="jump"></div>
+          <span class="hint">点轴上的标记 → 抽屉里定位那一条;点轴空白处 → 跳到那一刻。抽屉开合只归右上角那个按钮。</span>
+        </div>
+        <canvas id="cv"></canvas>
+      </div>
+      <div class="float" id="float" hidden></div>
+      <div class="stem" id="stem" hidden></div>
+    </div>
+
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head"><span class="tabs" id="tabs"></span></div>
+      <div class="view" id="view">
+        <section id="shotsSec">
+          <h2>截图<span class="counts" id="shotCounts"></span></h2>
+          <p class="hint">按时刻并排 —— 哪张是空的、哪几张是同一张幻灯片,直接看缩略图;弃用与没把握的已标出。</p>
+          <div class="filters" id="shotFilters"></div>
+          <div class="shot-grid" id="shotGrid"></div>
+        </section>
+        <section id="segsSec">
+          <h2>转录<span class="counts" id="segCounts"></span></h2>
+          <p class="hint">原文与现在的读法并排;改过 / 决定不改 / 存疑未改各有标记,还没核验的淡显。</p>
+          <div class="filters" id="segFilters"></div>
+          <div class="seg-list" id="segList"></div>
+        </section>
+        <section id="repSec">
+          <h2>报告<span class="counts" id="repCounts"></span></h2>
+          <p class="hint">整篇就在这儿 —— 点轴上的锚点定位到那一条,点条上的时刻或段芯片跳到视频那一刻。<a href="../04_report/report.html" target="_blank">单独打开图文报告页 →</a>(跑步 4 之后才有)</p>
+          <div class="md" id="repSummary"></div>
+          <div class="sep">知识点</div>
+          <div id="repList"></div>
+        </section>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div id="zoom"><div><img id="zoomImg" alt=""><div class="cap" id="zoomCap"></div></div></div>
+<script id="vidbrief-data" type="application/json">/*__VIDBRIEF_DATA__*/null</script>
+<script>
+"use strict";
+/* ══════════ 0 常量与工具 ══════════ */
+const D = JSON.parse(document.getElementById("vidbrief-data").textContent);
+const DUR = D.project.duration;
+/*__SHARED_JS__*/
+const ORIGIN = { dense_region: "密集区", isolated_peak: "孤立峰", agent_request: "补截", manual: "人工" };
+const CONF = { high: "有把握", medium: "一般", low: "没把握" };
+const KIND = { homophone: "同音字", terminology: "术语", number: "数字", other: "其他" };
+
+/* ══════════ 1 state ══════════ 一处状态。effects 只读它、只从这儿改。 */
+const S = {
+  t: 0,
+  sel: null,                 // { kind:'shot'|'seg'|'topic', id }
+  view: "shots",
+  layers: { curve: true, regions: true, shots: true, subs: true, topics: true },
+  filter: { shots: "all", segs: "all" },
+  drawer: true,
+  follow: true,              // 浮层跟不跟播放头
+  floatOn: true,
+  curTopic: -1,
+};
+const shotById = new Map(D.shots.map((s) => [s.id, s]));
+const segById = new Map(D.segments.map((s) => [s.id, s]));
+// 报告是 `Option` —— 步 4 之前没有。没有就空着,别让整页跟着挂。
+const REPORT = D.report || null;
+const TOPICS = (REPORT ? REPORT.topics : []).slice().sort((a, b) => a.t - b.t);   // 正文与轴上的编号共用这一份顺序
+
+/* ══════════ 2 render(纯) ══════════ 吃数据吐节点,不认识容器 —— 抽屉 / 浮层两处共用。 */
+
+function shotNode(s) {
+  const dropped = s.status === "drop";
+  const low = !!(s.check && s.check.confidence === "low");
+  const nomatch = !!(s.check && !s.check.match);
+  const unchecked = !s.check && !dropped;
+  const card = el("div", "shot" + (dropped ? " dropped" : "") +
+    (low && !dropped ? " low" : "") + (nomatch && !dropped ? " nomatch" : ""));
+  card.dataset.f = dropped ? "dropped" : unchecked ? "unchecked" : low ? "low" : "ok";
+
+  const thumb = el("div", "thumb");
+  const img = el("img");
+  img.loading = "lazy"; img.src = s.url; img.alt = s.id;
+  thumb.appendChild(img);
+  thumb.dataset.zoom = s.id;
+  card.appendChild(thumb);
+
+  const body = el("div", "body");
+  const head = el("div", "head");
+  head.appendChild(el("span", "id", s.id));
+  head.appendChild(el("span", "t", fmtT(s.t)));
+  head.appendChild(el("span", "origin", ORIGIN[s.origin] || s.origin));
+  if (dropped) head.appendChild(el("span", "badge dim", "已弃用"));
+  if (unchecked) head.appendChild(el("span", "badge", "还没核验"));
+  if (low) head.appendChild(el("span", "badge warn", "没把握"));
+  if (nomatch) head.appendChild(el("span", "badge bad", "图文不符"));
+  body.appendChild(head);
+
+  if (dropped && s.reason) body.appendChild(el("div", "kv", `弃用理由:${s.reason}`));
+  if (!dropped && s.reason) body.appendChild(el("div", "kv", `补图理由:${s.reason}`));
+
+  if (s.check) {
+    const c = s.check;
+    const sync = el("div", "kv");
+    sync.appendChild(el("span", "k", "音画同步:"));
+    sync.appendChild(el("span", null, c.audio_visual_sync ? "对得上" : "对不上"));
+    body.appendChild(sync);
+    const read = el("div", "kv");
+    read.appendChild(el("span", "k", "画面读出:"));
+    read.appendChild(el("span", null, c.type_read));
+    body.appendChild(read);
+    if (c.issues.length) {
+      const ul = el("ul", "issues");
+      for (const i of c.issues) ul.appendChild(el("li", null, i));
+      body.appendChild(ul);
+    }
+    if (c.evidence) body.appendChild(el("div", "quote", `凭据(段 ${c.evidence.segment}):${c.evidence.quote}`));
+    body.appendChild(el("div", "at", `${CONF[c.confidence] || c.confidence} · 写于 ${shortAt(c.checked_at)}`));
+  }
+  card.appendChild(body);
+  return card;
+}
+
+function segNode(s) {
+  const row = el("div", "seg" + (s.state === "unchecked" ? " unchecked" : "") +
+    (s.state === "needs_user" ? " needs_user" : ""));
+  row.dataset.f = s.conclusion ? "touched" : s.state;
+  row.id = "seg-" + s.id;
+  row.appendChild(el("div", "where", `#${s.id} ${fmtT(s.start)}–${fmtT(s.end)}`));
+
+  const tags = el("div", "tags");
+  if (s.conclusion) {
+    const cls = s.state === "needs_user" ? "warn" : s.conclusion.label === "改了" ? "ok" : "dim";
+    tags.appendChild(el("span", "badge " + cls, s.conclusion.label));
+    if (s.conclusion.kind) tags.appendChild(el("span", "badge dim", KIND[s.conclusion.kind] || s.conclusion.kind));
+  } else if (s.state === "unchecked") {
+    tags.appendChild(el("span", "badge", "未核验"));
+  } else {
+    tags.appendChild(el("span", "badge ok", "核验过"));
+  }
+  row.appendChild(tags);
+
+  const what = el("div", "what");
+  if (s.conclusion && s.conclusion.label === "改了") {
+    what.appendChild(el("span", "line old", s.text));
+    what.appendChild(el("span", "line new", s.effective));
+  } else {
+    what.appendChild(el("span", "line", s.effective));
+  }
+  if (s.conclusion) {
+    what.appendChild(el("div", "why",
+      `${s.conclusion.note}${s.conclusion.reason ? " —— " + s.conclusion.reason : ""}`));
+  }
+  if (s.checked_at) what.appendChild(el("span", "at", `写于 ${shortAt(s.checked_at)}`));
+  row.appendChild(what);
+  return row;
+}
+
+// 筛选器:一组按钮 + 一个 cur,apply 只负责按 cur 显示/隐藏
+// (这一套是原来的校准对照表页带来的 —— 那一页现在就是这块抽屉)
+function filterNode(defs, onPick) {
+  const mount = el("div", "filters");
+  let cur = defs[0].key;
+  const buttons = defs.map((d) => {
+    const b = el("button", "tool" + (d.key === cur ? " on" : ""), d.label);
+    b.onclick = () => {
+      cur = d.key;
+      buttons.forEach((x) => x.classList.toggle("on", x === b));
+      onPick(cur);
+    };
+    mount.appendChild(b);
+    return b;
+  });
+  return mount;
+}
+
+/* ══════════ 3 effects ══════════ 听 state:播放器 / 轴 / 浮层 / 抽屉 / 主题 / 挂载。 */
+const cv = $("#cv"), ctx = cv.getContext("2d");
+const floatEl = $("#float"), stemEl = $("#stem");
+const stageEl = $("#stage"), axiswrapEl = document.querySelector(".axiswrap");
+const viewEl = $("#view"), mainEl = $("#main");
+const video = $("#v");
+const cardById = new Map(), rowById = new Map();
+
+// ── 3.1 主题:偏好存 localStorage;没存过就跟系统走 ──
+const THEME_KEY = "vidbrief-theme";
+function savedTheme() { try { return localStorage.getItem(THEME_KEY); } catch (e) { return null; } }
+function saveTheme(v) { try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* file:// 下可能不给存 */ } }
+function syncThemeButtons() {
+  const light = document.documentElement.dataset.theme === "light";
+  $("#themebtn").textContent = light ? "☀️" : "🌙";
+}
+function toggleTheme() {
+  const root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === "light" ? "" : "light";
+  saveTheme(root.dataset.theme === "light" ? "light" : "dark");
+  syncThemeButtons();
+  drawAxis();
+}
+{
+  const saved = savedTheme();
+  if (saved) document.documentElement.dataset.theme = saved;
+  else if (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches)
+    document.documentElement.dataset.theme = "light";
+}
+
+// ── 3.2 视图切换(抽屉里的三块)──
+const VIEWS = [["shots", "截图", "shotsSec"], ["segs", "转录", "segsSec"], ["rep", "报告", "repSec"]];
+function showView(which) {
+  S.view = which;
+  for (const v of VIEWS) $("#" + v[2]).classList.toggle("on", v[0] === which);
+  for (const b of $("#tabs").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === which);
+}
+
+// ── 3.3 共轴:五层 ──
+const LAYERS = [["curve", "差帧图"], ["regions", "密集区"], ["shots", "截图"], ["subs", "转录"], ["topics", "知识点"]];
+const Y = { curve: [2, 34], regions: [36, 44], shots: [46, 74], subs: [76, 90], topics: [92, 110], ruler: [112, 126] };
+let HITS = [];
+const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const SEG_STATE = (sg) => {
+  if (sg.state === "needs_user") return "uncertain";
+  if (sg.conclusion && sg.conclusion.label === "改了") return "changed";
+  if (!sg.checked_at && !sg.conclusion) return "none";
+  return "ok";
+};
+function drawAxis() {
+  const W = cv.clientWidth, H = 126, dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  HITS = [];
+  if (!W) return;
+  const X = (t) => (t / DUR) * W;
+  const line = cssv("--line"), dim = cssv("--dim"), acc = cssv("--accent");
+  const keep = cssv("--keep"), warn = cssv("--warn"), drop = cssv("--drop");
+
+  if (S.layers.curve) {
+    const y1 = Y.curve[1], h = y1 - Y.curve[0];
+    ctx.globalAlpha = 0.5; ctx.fillStyle = dim;
+    const step = Math.max(1, Math.floor(D.curve.scores.length / W));
+    for (let i = 0; i < D.curve.scores.length; i += step) {
+      const bh = Math.min(1, D.curve.scores[i] / (D.curve.max_score || 1)) * h;
+      ctx.fillRect(X(i * (1 / (D.curve.step || 1))), y1 - bh,
+                   Math.max(1, (W / D.curve.scores.length) * step), bh);
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (S.layers.regions) {
+    ctx.globalAlpha = 0.18; ctx.fillStyle = acc;
+    for (const r of D.regions) ctx.fillRect(X(r.start), Y.regions[0], Math.max(2, X(r.end) - X(r.start)), 8);
+    ctx.globalAlpha = 1;
+  }
+  if (S.layers.shots) {
+    for (const sh of D.shots) {
+      const x = X(sh.t), sel = S.sel && S.sel.kind === "shot" && S.sel.id === sh.id;
+      ctx.fillStyle = sh.status === "drop" ? drop : sh.check ? keep : warn;
+      ctx.fillRect(x - 4, Y.shots[0] + 2, 8, 24);
+      if (sel) { ctx.strokeStyle = warn; ctx.lineWidth = 2; ctx.strokeRect(x - 6, Y.shots[0], 12, 28); ctx.lineWidth = 1; }
+      ctx.fillStyle = dim; ctx.font = "9.5px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(sh.id, x, Y.shots[1] - 3);
+      HITS.push([x - 7, x + 7, "shot", sh.id]);
+    }
+  }
+  if (S.layers.subs) {
+    for (const sg of D.segments) {
+      const st = SEG_STATE(sg);
+      const x0 = X(sg.start), x1 = Math.max(x0 + 0.7, X(sg.end) - 0.4);
+      ctx.globalAlpha = st === "changed" ? 0.95 : 0.55;
+      ctx.fillStyle = st === "changed" ? keep : st === "uncertain" ? warn : st === "none" ? drop : dim;
+      ctx.fillRect(x0, Y.subs[0], x1 - x0, Y.subs[1] - Y.subs[0]);
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (S.layers.topics) {
+    TOPICS.forEach((tp, i) => {
+      const x = X(tp.t), sel = S.sel && S.sel.kind === "topic" && S.sel.id === i;
+      ctx.beginPath(); ctx.arc(x, (Y.topics[0] + Y.topics[1]) / 2, sel ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = sel ? warn : acc; ctx.fill();
+      ctx.fillStyle = sel ? warn : dim; ctx.font = "10px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(String(i + 1), x, Y.topics[0] + 9);
+      HITS.push([x - 7, x + 7, "topic", i]);
+    });
+  }
+  ctx.strokeStyle = line;
+  ctx.beginPath(); ctx.moveTo(0, Y.ruler[0] + 1.5); ctx.lineTo(W, Y.ruler[0] + 1.5); ctx.stroke();
+  ctx.fillStyle = dim; ctx.font = "11px system-ui"; ctx.textAlign = "center";
+  const stepT = DUR > 1800 ? 300 : DUR > 600 ? 120 : 60;
+  for (let t = 0; t <= DUR; t += stepT) {
+    const x = X(t);
+    ctx.beginPath(); ctx.moveTo(x, Y.ruler[0]); ctx.lineTo(x, Y.ruler[0] + 4); ctx.stroke();
+    if (t + stepT <= DUR) ctx.fillText(fmtT(t), Math.min(Math.max(x, 16), W - 16), Y.ruler[0] + 15);
+  }
+  ctx.strokeStyle = warn; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(X(S.t), 0); ctx.lineTo(X(S.t), Y.ruler[0]); ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+// ── 3.4 播放器与时刻 ──
+function setT(t, fromVideo) {
+  S.t = Math.min(Math.max(t, 0), DUR);
+  if (fromVideo !== true && video.readyState >= 1) video.currentTime = S.t;
+  $("#badge").textContent = fmtT(S.t);
+  drawAxis();
+}
+const intervalIndex = (t) => {
+  let idx = 0;
+  for (let i = 0; i < TOPICS.length; i++) if (TOPICS[i].t <= t) idx = i;
+  return idx;
+};
+
+// ── 3.5 浮层:轴上点中的那一条就近展开。**唯一出口** —— 轴上的锚点、前后翻、
+//        左栏按钮、播放头跟随都从这儿走,免得某条路径只同步了一半。 ──
+function placeFloat(t) {
+  // 锚点在 canvas 里、浮层在 stage 里 —— 换到同一个基准再对齐(两者左边界相同)
+  const sr = stageEl.getBoundingClientRect(), cr = cv.getBoundingClientRect();
+  const w = sr.width || 1;
+  const pct = Math.min(1, Math.max(0, t.t / DUR));
+  const half = Math.min(230, w * 0.46);
+  floatEl.style.left = Math.min(Math.max((cr.left - sr.left) + pct * cr.width, half + 8), w - half - 8) + "px";
+  floatEl.style.bottom = (axiswrapEl.offsetHeight + 6) + "px";   // 贴在轴区上沿
+  requestAnimationFrame(() => {                                  // 等布局落定再量引线
+    if (!S.floatOn) return;
+    const fr = floatEl.getBoundingClientRect();
+    const ay = (cr.top - sr.top) + (Y.topics[0] + Y.topics[1]) / 2;
+    stemEl.style.left = (cr.left - sr.left + pct * cr.width) + "px";
+    stemEl.style.top = (fr.bottom - sr.top) + "px";
+    stemEl.style.height = Math.max(0, ay - (fr.bottom - sr.top)) + "px";
+  });
+}
+function setFloatOn(on) {
+  S.floatOn = on;
+  floatEl.hidden = !on;
+  stemEl.hidden = !on;
+}
+function showTopic(i, opts) {
+  const o = opts || {};
+  if (i < 0 || i >= TOPICS.length) return;
+  if (o.lock) S.follow = false;          // 手动翻过页就不再跟播放头
+  S.curTopic = i;
+  const tp = TOPICS[i];
+  setFloatOn(true);
+  floatEl.innerHTML = "";
+  const head = el("div", "head");
+  head.appendChild(el("span", "idx", `${i + 1} / ${TOPICS.length}`));
+  head.appendChild(el("span", "spacer"));
+  const prev = el("button", "tool", "←"); prev.disabled = i === 0;
+  const next = el("button", "tool", "→"); next.disabled = i === TOPICS.length - 1;
+  const close = el("button", "tool", "✕");
+  close.title = "收起这条(轴上的圆点还在,点一下再看)";
+  prev.onclick = () => showTopic(i - 1, { lock: true, scroll: true });
+  next.onclick = () => showTopic(i + 1, { lock: true, scroll: true });
+  close.onclick = () => setFloatOn(false);
+  head.appendChild(prev); head.appendChild(next); head.appendChild(close);
+  floatEl.appendChild(head);
+  const h3 = el("h3", null, tp.title);
+  h3.appendChild(el("span", "t", fmtT(tp.t)));
+  floatEl.appendChild(h3);
+  const body = el("div", "md");
+  body.innerHTML = md(tp.body) + sourceHtml(tp) + verifyHtml(tp) + segsHtml(tp);
+  floatEl.appendChild(body);
+  floatEl.scrollTop = 0;
+  placeFloat(tp);
+  S.sel = { kind: "topic", id: i };
+  drawAxis();
+  syncTopicNow();
+  if (o.scroll) scrollViewTo(document.getElementById("ti-" + i));
+}
+function syncTopicNow() {
+  for (const n of $("#repList").querySelectorAll(".topic-item"))
+    n.classList.toggle("now", n.id === "ti-" + S.curTopic);
+}
+
+// ── 3.6 定位:只滚抽屉内部。**绝不用 scrollIntoView** —— 抽屉收起时卡片还在 DOM 里
+//        (在被裁的列外),浏览器为了「让它可见」会把整个 html 横向滚过去,
+//        左栏的视频就被推出视口。实测:点一下,scrollX 从 0 跳到 762。 ──
+function scrollViewTo(node) {
+  if (!node) return;
+  const r = node.getBoundingClientRect(), vr = viewEl.getBoundingClientRect();
+  viewEl.scrollTop = Math.max(0, r.top - vr.top + viewEl.scrollTop - 60);
+}
+function clearFocus() { for (const e of viewEl.querySelectorAll(".focusline")) e.classList.remove("focusline"); }
+function focusShot(id) {
+  showView("shots");
+  const card = cardById.get(id);
+  if (!card) return;
+  clearFocus(); card.classList.add("focusline");
+  scrollViewTo(card);
+}
+function focusSeg(id) {
+  showView("segs");
+  const row = rowById.get(id);
+  if (!row) return;
+  clearFocus(); row.classList.add("focusline");
+  scrollViewTo(row);
+}
+function focusTopic(i) {
+  showView("rep");
+  clearFocus();
+  S.follow = true;                       // 用户亲手点的那一条 = 跟随重新打开
+  showTopic(i, { scroll: true });
+}
+
+// ── 3.7 轴上点击:先按纵向落在哪一层定「点的是什么」,再在层内找 ──
+const shotT = (id) => (shotById.get(id) || {}).t;
+const segT = (id) => (segById.get(id) || {}).start;
+function pick(kind, id, t) {
+  S.sel = { kind, id };
+  const at = kind === "shot" ? shotT(id) : kind === "seg" ? segT(id) : TOPICS[id].t;
+  setT(at == null ? t : at);
+  if (kind === "shot") focusShot(id);
+  else if (kind === "seg") focusSeg(id);
+  else focusTopic(id);
+  drawAxis();
+}
+cv.addEventListener("click", (e) => {
+  const r = cv.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  const t = (x / r.width) * DUR;
+  const inBand = (b) => y >= b[0] && y <= b[1];
+  if (inBand(Y.topics)) {
+    for (const h of HITS) if (h[2] === "topic" && x >= h[0] && x <= h[1]) return pick("topic", h[3], t);
+    let best = null, bd = DUR * 0.02;
+    TOPICS.forEach((tp, i) => { const d = Math.abs(tp.t - t); if (d <= bd) { bd = d; best = i; } });
+    if (best !== null) return pick("topic", best, t);
+  } else if (inBand(Y.shots)) {
+    let best = null, bd = 1e9;
+    for (const sh of D.shots) { const d = Math.abs(sh.t - t); if (d < bd) { bd = d; best = sh; } }
+    if (best) return pick("shot", best.id, t);
+  } else if (inBand(Y.subs)) {
+    const sg = D.segments.find((s) => t >= s.start && t < s.end);
+    if (sg) return pick("seg", sg.id, t);
+  }
+  S.sel = null; setT(t);
+  drawAxis();
+});
+
+// ── 3.8 抽屉:只有顶栏那个按钮能改它。列宽过渡,本体宽度不动(内容不重排)──
+function setDrawer(open) {
+  S.drawer = open;
+  mainEl.classList.toggle("no-drawer", !open);
+  $("#drawerToggle").title = open ? "收起抽屉" : "展开抽屉";
+  drawAxis();
+  realign();
+}
+function realign() { if (TOPICS[S.curTopic]) placeFloat(TOPICS[S.curTopic]); }
+mainEl.addEventListener("transitionend", realign);   // 过渡当中量到的是中间值,落定后再对一次
+
+// ── 3.9 放大层 ──
+function zoomTo(id) {
+  const s = shotById.get(id);
+  if (!s) return;
+  $("#zoomImg").src = s.url;
+  $("#zoomCap").textContent = `${s.id} · ${fmtT(s.t)}`;
+  $("#zoom").classList.add("on");
+}
+
+/* ══════════ 4 挂载与事件 ══════════ */
+function mount() {
+  // 顶栏 / 页眉
+  document.title = "vidbrief 工作台 · " + D.project.name;
+  $("#pname").textContent = D.project.name;
+  $("#pmeta").textContent = D.project.id + " · " + fmtT(DUR) + " · " + D.shots.length + " 张图 · " +
+    D.segments.length + " 段转录 · " + TOPICS.length + " 条知识点" +
+    (D.rounds != null ? " · 校准 " + D.rounds + " 轮" : "");
+  // 口味那一栏是 `describe()` 过的一句话(「教学版 · 详细 · 大白话」),不是预设的零件。
+  // 带上「生成于」:材料改过之后,这一栏是**报告有没有过期**的第一眼线索
+  // (页面上的结论与材料之间的差,由报告页那行提示细说)。
+  $("#repCounts").textContent = REPORT
+    ? `共 ${TOPICS.length} 条${REPORT.style ? " · " + REPORT.style : ""}` +
+      (REPORT.generated_at ? " · 生成于 " + shortAt(REPORT.generated_at) : "")
+    : "还没有报告 —— 步 4 之后这儿才有内容";
+
+  // 层开关
+  const layerBox = $("#layerbox");
+  for (const kv of LAYERS) {
+    const lab = el("label", "on");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = true;
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(kv[1]));
+    cb.addEventListener("change", () => {
+      S.layers[kv[0]] = cb.checked;
+      lab.classList.toggle("on", cb.checked);
+      drawAxis();
+    });
+    layerBox.appendChild(lab);
+  }
+
+  // 抽屉 tab
+  const tabs = $("#tabs");
+  for (const v of VIEWS) {
+    const b = el("button", null, v[1]);
+    b.dataset.v = v[0];
+    b.onclick = () => { S.sel = null; showView(v[0]); drawAxis(); };
+    tabs.appendChild(b);
+  }
+
+  // 截图:计数 + 筛选 + 卡片
+  {
+    const total = D.shots.length;
+    const dropped = D.shots.filter((s) => s.status === "drop").length;
+    const unchecked = D.shots.filter((s) => !s.check && s.status !== "drop").length;
+    const low = D.shots.filter((s) => s.check && s.check.confidence === "low").length;
+    $("#shotCounts").textContent = `共 ${total} 张 · 弃用 ${dropped} · 未核验 ${unchecked} · 没把握 ${low}`;
+  }
+  const grid = $("#shotGrid");
+  const cards = [];
+  for (const s of D.shots) {
+    const card = shotNode(s);
+    grid.appendChild(card);
+    cards.push(card);
+    cardById.set(s.id, card);
+  }
+  if (!D.shots.length) grid.appendChild(el("p", "hint", "还没有截图 —— 先跑 preprocess。"));
+  $("#shotFilters").replaceWith(mountShotsFilter(cards));
+
+  // 转录:计数 + 筛选 + 行
+  {
+    const total = D.segments.length;
+    const changed = D.segments.filter((s) => s.conclusion && s.conclusion.label === "改了").length;
+    const kept = D.segments.filter((s) => s.conclusion && s.conclusion.label === "决定不改").length;
+    const uncertain = D.segments.filter((s) => s.state === "needs_user").length;
+    const unchecked = D.segments.filter((s) => s.state === "unchecked").length;
+    $("#segCounts").textContent =
+      `共 ${total} 段 · 改过 ${changed} · 决定不改 ${kept} · 存疑 ${uncertain} · 未核验 ${unchecked}`;
+  }
+  const list = $("#segList");
+  const rows = [];
+  for (const s of D.segments) {
+    const row = segNode(s);
+    list.appendChild(row);
+    rows.push(row);
+    rowById.set(s.id, row);
+  }
+  if (!D.segments.length) list.appendChild(el("p", "hint", "还没有转录(源视频可能没有音轨,或还没跑 preprocess)。"));
+  $("#segFilters").replaceWith(mountSegsFilter(rows));
+
+  // 报告:同一份渲染(在 `_shared.js` 里),抽屉里挂一次;浮层里那份由 showTopic 挂。
+  $("#repSummary").innerHTML = (REPORT && md(REPORT.summary)) || "<p class='empty'>（还没有全局总结）</p>";
+  $("#repList").appendChild(topicNodes(TOPICS, { jumpable: true }));
+
+  // 左栏快捷入口:校准那几条工作流
+  const jump = $("#jump");
+  const jumpBtn = (text, fn) => { const b = el("button", null, text); b.onclick = fn; return b; };
+  const un = D.shots.filter((s) => !s.check && s.status !== "drop").length;
+  const low = D.shots.filter((s) => s.check && s.check.confidence === "low").length;
+  const dq = D.segments.filter((s) => s.state === "needs_user").length;
+  const dm = D.segments.filter((s) => s.conclusion && s.conclusion.label === "改了").length;
+  const vt = TOPICS.reduce((n, t) => n + (t.verify || []).length, 0);
+  jump.appendChild(jumpBtn(`还没核验的图 ${un}`, () => {
+    const s = D.shots.find((x) => !x.check && x.status !== "drop"); if (s) pick("shot", s.id);
+  }));
+  jump.appendChild(jumpBtn(`没把握的图 ${low}`, () => {
+    const s = D.shots.find((x) => x.check && x.check.confidence === "low"); if (s) pick("shot", s.id);
+  }));
+  jump.appendChild(jumpBtn(`存疑的转录 ${dq}`, () => {
+    const s = D.segments.find((x) => x.state === "needs_user"); if (s) pick("seg", s.id);
+  }));
+  jump.appendChild(jumpBtn(`改过的转录 ${dm}`, () => {
+    const s = D.segments.find((x) => x.conclusion && x.conclusion.label === "改了"); if (s) pick("seg", s.id);
+  }));
+  jump.appendChild(jumpBtn(`待核验的点 ${vt}`, () => {
+    const i = TOPICS.findIndex((t) => (t.verify || []).length);
+    if (i >= 0) pick("topic", i);
+  }));
+}
+
+function mountShotsFilter(cards) {
+  return filterNode([
+    { key: "all", label: "全部" },
+    { key: "unchecked", label: "还没核验" },
+    { key: "low", label: "没把握" },
+    { key: "dropped", label: "已弃用" },
+  ], (cur) => {
+    for (const c of cards) c.style.display = cur === "all" || c.dataset.f === cur ? "" : "none";
+  });
+}
+function mountSegsFilter(rows) {
+  return filterNode([
+    { key: "all", label: "全部" },
+    { key: "touched", label: "有结论的" },
+    { key: "needs_user", label: "存疑未改" },
+    { key: "unchecked", label: "未核验" },
+  ], (cur) => {
+    for (const r of rows) {
+      r.style.display = cur === "all"
+        || (cur === "touched" && r.dataset.f === "touched")
+        || (cur !== "all" && cur !== "touched" && r.dataset.f === cur) ? "" : "none";
+    }
+  });
+}
+
+function wireEvents() {
+  // 顶栏
+  $("#drawerToggle").onclick = () => setDrawer(mainEl.classList.contains("no-drawer"));
+  $("#themebtn").onclick = toggleTheme;
+
+  // 抽屉里的一次性委托:放大 / 跳时刻 / 跳转录段
+  $("#shotGrid").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-zoom]");
+    if (t) zoomTo(t.dataset.zoom);
+  });
+  $("#view").addEventListener("click", (e) => {
+    const stamp = e.target.closest(".topic-item h4 .t[data-at]");
+    if (stamp) { setT(Number(stamp.dataset.at)); video.play().catch(() => {}); return; }
+    const chip = e.target.closest(".segchip[data-start]");
+    if (chip) {
+      e.preventDefault();
+      const at = Number(chip.dataset.start);
+      if (Number.isFinite(at)) { setT(at); video.play().catch(() => {}); }
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (e.target.id === "zoom" || e.target.closest("#zoom")) $("#zoom").classList.remove("on");
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#zoom").classList.remove("on"); });
+
+  // 播放器:一路看一路读(手动翻过页就不跟),拖进度条同理
+  video.addEventListener("timeupdate", () => {
+    if (Math.abs(video.currentTime - S.t) > 0.4) setT(video.currentTime, true);
+    if (!S.follow || !S.floatOn) return;
+    const i = intervalIndex(video.currentTime);
+    if (i !== S.curTopic) showTopic(i);
+  });
+  video.addEventListener("seeked", () => {
+    if (!S.follow || !S.floatOn) return;
+    const i = intervalIndex(video.currentTime);
+    if (i !== S.curTopic) showTopic(i);
+  });
+
+  // 窗口尺寸变了,轴与浮层都要重新对齐
+  window.addEventListener("resize", () => { drawAxis(); realign(); });
+}
+
+/* ══════════ 启动 ══════════ */
+syncThemeButtons();
+mount();
+wireEvents();
+video.src = D.video_url;
+showView("shots");
+setT(0);
+setDrawer(true);
+</script>
+</body>
+</html>

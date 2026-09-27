@@ -254,7 +254,7 @@ pub fn read(state: &State, uri: &str) -> Result<ReadResourceResult> {
     if meta.len() > MAX_BYTES {
         bail!(
             "这个文件 {} 太大了(上限 {}),不适合走资源通道 —— \
-             视频请用 render_timeline 打开时间线看,图片用 get_shot",
+             视频请用 render_workbench 打开工作台看,图片用 get_shot",
             vidbrief_project::human_size(meta.len()),
             vidbrief_project::human_size(MAX_BYTES)
         );

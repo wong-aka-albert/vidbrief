@@ -912,7 +912,7 @@ mod tests {
     fn normal_paths_are_accepted() {
         for good in [
             "project.json",
-            "01_preprocess/timeline.html",
+            "01_preprocess/workbench.html",
             "01_preprocess/shots/s001_0020.0.jpg",
             "source/video.mp4",
         ] {

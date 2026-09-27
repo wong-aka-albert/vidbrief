@@ -148,9 +148,8 @@ pub struct Materials {
     /// 补图候选:总条数 / 还没被 agent 看过的条数。
     pub supplement_total: Option<usize>,
     pub supplement_pending: Option<usize>,
-    /// 视图渲染出来没有。
-    pub timeline_html: bool,
-    pub calibrate_timeline_html: bool,
+    /// 工作台页面(`01_preprocess/workbench.html`)渲染出来没有。
+    pub workbench_html: bool,
     /// 步 2/3 的写入产物。
     pub cross_validate: bool,
     pub calibration_log: bool,
@@ -306,8 +305,7 @@ pub fn scan_materials(layout: &Layout) -> Materials {
         },
         supplement_total: supplement.as_ref().map(|s| s.requests.len()),
         supplement_pending: supplement.as_ref().map(|s| s.pending().count()),
-        timeline_html: layout.preprocess_timeline().is_file(),
-        calibrate_timeline_html: layout.calibrate_timeline().is_file(),
+        workbench_html: layout.workbench().is_file(),
         cross_validate: layout.cross_validate().is_file(),
         calibration_log: layout.calibration_log().is_file(),
         summary_md: layout.summary_md().is_file(),

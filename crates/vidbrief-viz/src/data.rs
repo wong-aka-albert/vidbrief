@@ -1,11 +1,18 @@
 //! 把项目文件组装成前端要用的那一坨 JSON。
 //!
-//! **刻意做成"一份自包含的数据"**:时间线 HTML 打开就能看,不依赖任何后端接口。
+//! **刻意做成「一份自包含的数据」**:页面打开就能看,不依赖任何后端接口。
 //! 代价是每轮校准后要重新渲染(见 `docs/DESIGN.md` §6.3),但换来的是
-//! "这个 HTML 发给别人也还能看"—— 除了视频和图片仍然走相对路径。
+//! 「这个 HTML 发给别人也还能看」—— 除了视频和图片仍然走相对路径。
 //!
 //! 采样点是**等间隔**的,所以只发分数数组,时刻由前端按 `step` 算出来 ——
 //! 986 个点的项目里,这比逐个发 `{t, score}` 省掉一半体积。
+//!
+//! # 只有一处组装
+//!
+//! 这里曾经有三个收集器:时间线一份、校准对照表一份、工作台一份。三份页面合并成
+//! 「一个页面看全部」之后,前两个就成了同一批材料的第二遍读法 —— 两次
+//! [`Shots::load`]、两处「结论以状态为准」的判断,迟早会漂。现在**一次读齐**:
+//! 页面上要什么,这儿就给什么,字段名就是页面里读的那个名字。
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -13,21 +20,31 @@ use vidbrief_project::{
     ChangeCurve, DenseRegions, Layout, Project, Shots, Transcript, VideoMeta,
 };
 
-/// 前端要的全部数据。
+/// 工作台要的全部数据 —— **一个页面看全部**:共轴那几层(曲线 / 密集区 / 截图 /
+/// 转录 / 知识点)加结论那一半(每张图的看图结论、每段转录的结论),再加报告。
+///
+/// 为什么在**造数据这一侧**合、而不是前端拿几份 payload 自己拼:字段怎么对齐、
+/// 哪一份是准的是**数据的形状**,不是页面的自由 —— 在这儿定死一次,前端只管画。
+///
+/// 不做的事:**不取校准日志** —— 它是 agent 的自由文本(给下一轮与审计看),
+/// 不是页面素材。把它贴到页面上,等于让读者拿一段手写的轮次时段去对每一行的时刻,
+/// 而信息本该长在被需要的地方(每条结论自己带着 `checked_at`)。
 #[derive(Debug, Serialize)]
-pub struct TimelineData {
+pub struct WorkbenchData {
     pub project: ProjectBrief,
-    /// 视频的**相对 URL**(相对 timeline.html 所在目录)。
+    /// 视频的**相对 URL**(相对 workbench.html 所在目录)。
     pub video_url: String,
-    /// 一个极小的、必然存在的文件的 URL。前端拿它当**健康探针**:
-    /// 视频卡住时 fetch 一下,失败就说明本地服务已经断开 —— 比一直转圈有用得多。
-    pub probe_url: String,
+    /// 校准轮数;**`None` = 状态文件不在或读不动**(结论栏来自明文投影,页面要说出来)。
+    pub rounds: Option<u32>,
     pub curve: CurveBrief,
     pub regions: Vec<RegionBrief>,
-    pub shots: Vec<ShotBrief>,
+    pub shots: Vec<WorkbenchShot>,
     pub segments: Vec<SegmentBrief>,
+    /// 报告(步 4 之前为 `None`—— 工作台在步 2 就要能用)。
+    pub report: Option<ReportBrief>,
 }
 
+/// 页头那行字。
 #[derive(Debug, Serialize)]
 pub struct ProjectBrief {
     pub id: String,
@@ -45,29 +62,34 @@ pub struct CurveBrief {
     pub scores: Vec<f64>,
 }
 
+/// 轴上那一条密集区。**只发画得出来的两样** —— 峰在哪儿、为什么判成密集区,
+/// 是算法侧的判断过程,页面上没有地方显示它。
 #[derive(Debug, Serialize)]
 pub struct RegionBrief {
-    pub id: u32,
     pub start: f64,
     pub end: f64,
-    pub peak_t: f64,
-    pub peak_score: f64,
-    pub reason: String,
 }
 
+/// 一张截图:共轴上的一个点 + 抽屉里的一张卡。
 #[derive(Debug, Serialize)]
-pub struct ShotBrief {
+pub struct WorkbenchShot {
     pub id: String,
     pub t: f64,
     /// 图片的相对 URL。
     pub url: String,
+    /// 怎么来的(`dense_region` / `isolated_peak` / `agent_request` / `manual`)。
     pub origin: String,
+    /// `keep` / `drop`。
     pub status: String,
-    pub region_id: Option<u32>,
+    /// 弃用理由(弃用的图)或补图理由(补的图)。
     pub reason: Option<String>,
     pub check: Option<CheckBrief>,
 }
 
+/// 一次看图核验的结论。
+///
+/// 下结论时对照的那段 ±6s 转录(`neighbor_text`)**不发** —— 它是留档用的快照,
+/// 页面上显示的是现在这句原文(点段芯片能跳过去看)。
 #[derive(Debug, Serialize)]
 pub struct CheckBrief {
     pub r#match: bool,
@@ -75,186 +97,8 @@ pub struct CheckBrief {
     pub type_read: String,
     pub issues: Vec<String>,
     pub confidence: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SegmentBrief {
-    pub start: f64,
-    pub end: f64,
-    /// 已经过 [`vidbrief_project::Segment::effective_text`] —— 有纠错就用纠错后的。
-    pub text: String,
-    pub corrected: bool,
-    pub correction: Option<CorrectionBrief>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CorrectionBrief {
-    pub note: String,
-    pub reason: String,
-}
-
-/// 读齐一个项目的全部材料,组装成视图数据。
-///
-/// # 结论那一半来自状态,不来自明文
-///
-/// `shots.json` / `transcript.fixed.json` 里那几栏是**投影**(见
-/// [`vidbrief_project::state`]):谁都能手改,所以这里不拿它当判据 ——
-/// 读得到状态就以状态为准,读不到才退回投影(视图是"看一眼"的东西,
-/// 状态坏了也得能画出来;真话由 `vidbrief status` 说)。
-pub fn collect(layout: &Layout, timeline_rel: &str) -> Result<TimelineData> {
-    let project = Project::load(&layout.project_json()).context("读 project.json 失败")?;
-    let meta = VideoMeta::load(&layout.video_meta()).context("读 video.meta.json 失败")?;
-    let curve = ChangeCurve::load(&layout.change_curve())
-        .context("读 change_curve.json 失败 —— 先跑 `vidbrief preprocess`")?;
-    let regions = DenseRegions::load(&layout.dense_regions()).context("读 dense_regions.json 失败")?;
-    let mut shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
-    // 还没有转录是**正常状态**(源视频可能没音轨),不该让视图渲染不出来
-    let mut transcript = Transcript::load(&layout.transcript()).ok();
-
-    match vidbrief_project::ProjectState::read_file(&layout.state_file()) {
-        Ok(Some(state)) => {
-            state.apply_to_shots(&mut shots);
-            if let Some(t) = transcript.as_mut() {
-                state.apply_to_transcript(t);
-            }
-        }
-        // 状态不在 / 读不动:退回明文投影(它至少是上一次写出去的样子)
-        Ok(None) | Err(_) => {}
-    }
-
-    Ok(TimelineData {
-        project: ProjectBrief {
-            id: project.id.to_string(),
-            name: project.name.clone(),
-            duration: meta.duration,
-        },
-        video_url: relative_url(timeline_rel, project.source.path.as_str())?,
-        probe_url: relative_url(timeline_rel, vidbrief_project::layout::PROJECT_FILE)?,
-        curve: CurveBrief {
-            step: curve.step().unwrap_or(1.0),
-            max_score: curve.max_score(),
-            scores: curve.changes.iter().map(|c| c.score).collect(),
-        },
-        regions: regions
-            .regions
-            .iter()
-            .map(|r| RegionBrief {
-                id: r.id,
-                start: r.start,
-                end: r.end,
-                peak_t: r.peak_t,
-                peak_score: r.peak_score,
-                reason: format!("{:?}", r.reason)
-                    .chars()
-                    .enumerate()
-                    .flat_map(|(i, c)| {
-                        if i > 0 && c.is_uppercase() {
-                            vec!['_', c.to_ascii_lowercase()]
-                        } else {
-                            vec![c.to_ascii_lowercase()]
-                        }
-                    })
-                    .collect(),
-            })
-            .collect(),
-        shots: shots
-            .shots
-            .iter()
-            .map(|s| {
-                Ok(ShotBrief {
-                    id: s.id.to_string(),
-                    t: s.t,
-                    url: relative_url(timeline_rel, s.file.as_str())?,
-                    origin: snake(&format!("{:?}", s.origin)),
-                    status: snake(&format!("{:?}", s.status)),
-                    region_id: s.region_id,
-                    reason: s.reason.clone(),
-                    check: s.check.as_ref().map(|c| CheckBrief {
-                        r#match: c.r#match,
-                        audio_visual_sync: c.audio_visual_sync,
-                        type_read: c.type_read.clone(),
-                        issues: c.issues.clone(),
-                        confidence: snake(&format!("{:?}", c.confidence)),
-                    }),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
-        segments: transcript
-            .map(|t| {
-                t.segments
-                    .iter()
-                    .map(|s| SegmentBrief {
-                        start: s.start,
-                        end: s.end,
-                        text: s.effective_text().to_string(),
-                        corrected: s.is_corrected(),
-                        correction: s.conclusion.as_ref().map(|c| CorrectionBrief {
-                            note: c.note().to_string(),
-                            reason: c.reason().to_string(),
-                        }),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    })
-}
-
-// ── 校准对照表(DESIGN §9.3)─────────────────────────────────────────
-
-/// 校准对照表要的全部数据。**与时间线同一条规矩:一份自包含的数据,打开就能看。**
-///
-/// 这一页要替人回答联调提出的四个问题(`docs/devlog/PLAN.md` 近期待办):
-///
-/// | 问题 | 这一页怎么答 |
-/// |------|-------------|
-/// | 哪些图是空的 | 缩略图按时刻并排,空的肉眼即见;弃用标记与理由是 agent 写下的 |
-/// | 哪几张是同一张幻灯片 | 同上 —— 并排的小图,重复一眼可见;agent 的弃用理由也在这 |
-/// | 哪几段转录被动过 | 每段的结论(改了/决定不改/存疑未改)+ 原文与现读法并排 |
-/// | 这个结论是哪一轮写的 | **只答一半**:每条结论带 `checked_at`(写下的精确时刻)。轮号没记 ——
-///   从前靠页尾内嵌的校准日志原文让人自己对着看,那既要读者自己做对账、
-///   又押在 agent 手写的轮次时段上(实测对不上;要答满得让工具在落结论时记轮号) |
-///
-/// 不做的事:**不取校准日志** —— 它是 agent 的自由文本(给下一轮与审计看),不是页面素材;
-/// 页尾贴一份原文,等于让读者拿一段手写时段去对上面每一行的时刻,而信息本该长在被需要的地方。
-/// 也不算"哪两张图像"(那是判断,判断归 agent;工具负责让人一眼能判)。
-#[derive(Debug, Serialize)]
-pub struct CalibrationData {
-    pub project: ProjectBrief,
-    /// 渲染时刻(给人读)。
-    pub generated_at: String,
-    /// 已完成的校准轮数。**`None` = 状态文件不在或读不动** ——
-    /// 那时结论栏来自明文投影(谁都能改),页面会把这句话亮出来。
-    pub rounds: Option<u32>,
-    pub shots: Vec<CalibShot>,
-    pub segments: Vec<CalibSegment>,
-    /// 指向时间线视图的相对链接(那页有视频回跳)。
-    pub timeline_url: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CalibShot {
-    pub id: String,
-    pub t: f64,
-    /// 图片的相对 URL。
-    pub url: String,
-    pub origin: String,
-    pub status: String,
-    pub reason: Option<String>,
-    /// 弃用的图也留着结论 —— 第四轮联调里 agent 就给重复图补了 check 说明。
-    pub check: Option<CalibCheck>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CalibCheck {
-    pub r#match: bool,
-    pub audio_visual_sync: bool,
-    pub type_read: String,
-    /// 下结论时对照的 ±6s 转录(留档的那一份)。
-    pub neighbor_text: Option<String>,
-    pub issues: Vec<String>,
-    pub confidence: String,
     pub evidence: Option<EvidenceBrief>,
-    /// 这条结论**是哪一刻写下的**(被后轮改写时,这里跟着变;旧结论在校准日志里)。
+    /// 这条结论**是哪一刻写下的**(被后轮改写时,这里跟着变)。
     pub checked_at: String,
 }
 
@@ -264,8 +108,9 @@ pub struct EvidenceBrief {
     pub quote: String,
 }
 
+/// 一段转录:原文与**现在的读法**并排给出来。
 #[derive(Debug, Serialize)]
-pub struct CalibSegment {
+pub struct SegmentBrief {
     pub id: u32,
     pub start: f64,
     pub end: f64,
@@ -283,20 +128,42 @@ pub struct CalibSegment {
 pub struct ConclusionBrief {
     /// 「改了」/「决定不改」/「存疑未改」。
     pub label: &'static str,
+    /// 改动的类型(只有「改了」才有)。
     pub kind: Option<String>,
     pub note: String,
     pub reason: String,
 }
 
-/// 组装校准对照表的数据。读法与 [`collect`] 同一条规矩:
-/// **结论以状态为准,状态读不到才退回明文投影**(那时 `rounds` 是 `None`,页面会明说)。
-pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<CalibrationData> {
+/// 报告那一段(工作台里要显示的那部分)。
+#[derive(Debug, Serialize)]
+pub struct ReportBrief {
+    /// 口味那句话(`ReportStyle::describe`);旧报告可能没有这一栏。
+    pub style: Option<String>,
+    pub summary: String,
+    pub topics: Vec<vidbrief_project::ReportTopic>,
+    pub generated_at: String,
+}
+
+/// 读齐一个项目的全部材料,组装成工作台要的数据。
+///
+/// # 结论那一半来自状态,不来自明文
+///
+/// `shots.json` / `transcript.fixed.json` 里那几栏是**投影**(见
+/// [`vidbrief_project::state`]):谁都能手改,所以这里不拿它当判据 ——
+/// 读得到状态就以状态为准,读不到才退回投影(视图是「看一眼」的东西,
+/// 状态坏了也得能画出来;真话由 `vidbrief status` 说)。
+pub fn collect_workbench(layout: &Layout, view_rel: &str) -> Result<WorkbenchData> {
     let project = Project::load(&layout.project_json()).context("读 project.json 失败")?;
     // 时长只是页头一行字;meta 还没跑出来时不该让整个视图渲不出来
     let duration = VideoMeta::load(&layout.video_meta()).map(|m| m.duration).unwrap_or(0.0);
+    let curve = ChangeCurve::load(&layout.change_curve())
+        .context("读 change_curve.json 失败 —— 先跑 `vidbrief preprocess`")?;
+    let regions = DenseRegions::load(&layout.dense_regions()).context("读 dense_regions.json 失败")?;
     let mut shots = Shots::load(&layout.shots_json()).unwrap_or_else(|_| Shots::new());
+    // 还没有转录是**正常状态**(源视频可能没音轨),不该让视图渲染不出来
     let mut transcript = Transcript::load(&layout.transcript()).ok();
 
+    // 状态读不动时 `rounds` 是 `None` —— 那就是「结论栏来自明文投影」这句话的开关
     let rounds = match vidbrief_project::ProjectState::read_file(&layout.state_file()) {
         Ok(Some(state)) => {
             state.apply_to_shots(&mut shots);
@@ -308,30 +175,42 @@ pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<Calibratio
         Ok(None) | Err(_) => None,
     };
 
-    Ok(CalibrationData {
+    Ok(WorkbenchData {
         project: ProjectBrief {
             id: project.id.to_string(),
             name: project.name.clone(),
             duration,
         },
-        generated_at: vidbrief_project::now().to_string(),
+        video_url: relative_url(view_rel, project.source.path.as_str())?,
         rounds,
+        curve: CurveBrief {
+            step: curve.step().unwrap_or(1.0),
+            max_score: curve.max_score(),
+            scores: curve.changes.iter().map(|c| c.score).collect(),
+        },
+        regions: regions
+            .regions
+            .iter()
+            .map(|r| RegionBrief {
+                start: r.start,
+                end: r.end,
+            })
+            .collect(),
         shots: shots
             .shots
             .iter()
             .map(|s| {
-                Ok(CalibShot {
+                Ok(WorkbenchShot {
                     id: s.id.to_string(),
                     t: s.t,
                     url: relative_url(view_rel, s.file.as_str())?,
                     origin: snake(&format!("{:?}", s.origin)),
                     status: snake(&format!("{:?}", s.status)),
                     reason: s.reason.clone(),
-                    check: s.check.as_ref().map(|c| CalibCheck {
+                    check: s.check.as_ref().map(|c| CheckBrief {
                         r#match: c.r#match,
                         audio_visual_sync: c.audio_visual_sync,
                         type_read: c.type_read.clone(),
-                        neighbor_text: c.neighbor_text.clone(),
                         issues: c.issues.clone(),
                         confidence: snake(&format!("{:?}", c.confidence)),
                         evidence: c.evidence.as_ref().map(|e| EvidenceBrief {
@@ -347,7 +226,7 @@ pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<Calibratio
             .map(|t| {
                 t.segments
                     .iter()
-                    .map(|s| CalibSegment {
+                    .map(|s| SegmentBrief {
                         id: s.id,
                         start: s.start,
                         end: s.end,
@@ -370,11 +249,27 @@ pub fn collect_calibration(layout: &Layout, view_rel: &str) -> Result<Calibratio
                     .collect()
             })
             .unwrap_or_default(),
-        timeline_url: relative_url(view_rel, vidbrief_project::layout::PREPROCESS_TIMELINE_FILE)?,
+        report: load_report_brief(layout)?,
     })
 }
 
-/// 从 `timeline.html` 所在目录出发,指向项目内另一个文件的**相对 URL**。
+/// 报告那一段:没有 `report.json`(还没跑步 4)就是 `None` —— 工作台在步 2 就要能用。
+fn load_report_brief(layout: &Layout) -> Result<Option<ReportBrief>> {
+    let path = layout.report_json();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let report = vidbrief_project::Report::load(&path).context("读 report.json 失败")?;
+    Ok(Some(ReportBrief {
+        // 先借后移:三个字段的初始化顺序就是这套借用的顺序。
+        style: report.style.as_ref().map(|s| s.describe()),
+        generated_at: report.generated_at.to_string(),
+        summary: report.summary,
+        topics: report.topics,
+    }))
+}
+
+/// 从视图所在目录出发,指向项目内另一个文件的**相对 URL**。
 ///
 /// 用相对路径而不是 `http://127.0.0.1:…/项目id/…`:这样 HTML 直接双击打开
 /// (或整个项目目录打包发给别人)也还能看到图和字幕,只有视频会因为 `file://`
@@ -411,29 +306,30 @@ mod tests {
     #[test]
     fn relative_url_walks_up_from_the_view_location() {
         assert_eq!(
-            relative_url("01_preprocess/timeline.html", "source/video.mp4").unwrap(),
+            relative_url("01_preprocess/workbench.html", "source/video.mp4").unwrap(),
             "../source/video.mp4"
         );
         assert_eq!(
-            relative_url("01_preprocess/timeline.html", "01_preprocess/shots/s001_0020.0.jpg").unwrap(),
+            relative_url("01_preprocess/workbench.html", "01_preprocess/shots/s001_0020.0.jpg")
+                .unwrap(),
             "../01_preprocess/shots/s001_0020.0.jpg"
         );
         // 放在项目根时不用往上走
         assert_eq!(
-            relative_url("timeline.html", "source/video.mp4").unwrap(),
+            relative_url("views.html", "source/video.mp4").unwrap(),
             "source/video.mp4"
         );
-        // 校准阶段的视图在第二层
+        // 报告页在第二层,与工作台同一档
         assert_eq!(
-            relative_url("02_calibrate/timeline.html", "source/video.mp4").unwrap(),
+            relative_url("04_report/report.html", "source/video.mp4").unwrap(),
             "../source/video.mp4"
         );
     }
 
     #[test]
     fn relative_url_rejects_escapes() {
-        assert!(relative_url("01_preprocess/timeline.html", "../secret").is_err());
-        assert!(relative_url("01_preprocess/timeline.html", "/abs/path").is_err());
+        assert!(relative_url("01_preprocess/workbench.html", "../secret").is_err());
+        assert!(relative_url("01_preprocess/workbench.html", "/abs/path").is_err());
     }
 
     #[test]

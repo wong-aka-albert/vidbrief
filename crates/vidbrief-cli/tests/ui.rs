@@ -1,8 +1,8 @@
-//! `vidbrief ui` 与时间线视图的端到端测试。
+//! `vidbrief ui` 与工作台视图的端到端测试。
 //!
-//! 最要紧的一条是 [`the_timeline_actually_plays_the_video`] ——
+//! 最要紧的一条是 [`the_workbench_actually_plays_the_video`] ——
 //! 它把整个链路串起来验:**渲染出的 HTML 引用的视频 URL,通过本地服务真的取得到**,
-//! 而且是支持 Range 的。这两件事缺一个,"拖时间轴→视频回跳"就是空谈。
+//! 而且是支持 Range 的。这两件事缺一个,"拖共轴→视频回跳"就是空谈。
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -82,23 +82,68 @@ fn prepared(tag: &str) -> (TempDir, Layout) {
 }
 
 #[test]
-fn preprocess_renders_the_timeline_by_itself() {
+fn preprocess_renders_the_workbench_by_itself() {
     // DESIGN §5.3:步 1 完成即产出可视化
     let (_tmp, layout) = prepared("auto-render");
-    let html = layout.rel(vidbrief_project::layout::PREPROCESS_TIMELINE_FILE);
-    assert!(html.is_file(), "preprocess 应当自动渲染出时间线:{}", html.display());
+    let html = layout.workbench();
+    assert!(html.is_file(), "preprocess 应当自动渲染出工作台:{}", html.display());
     let text = std::fs::read_to_string(&html).unwrap();
     assert!(text.contains("<video"), "渲染出来得是个能播视频的页面");
     assert!(!text.contains("/*__VIDBRIEF_DATA__*/null"), "数据占位符没被替换");
+    // 壳出厂就带 `hidden` 的话,页面是**全白**的 —— DOM / 数据 / CSS 一个不少,就是什么都看不见。
+    // (2026-09-27 实测:删掉换壳那行 JS 之后忘了摘属性,截图一片白,而 DOM 断言全绿。)
+    assert!(
+        !text.contains("id=\"app\" hidden"),
+        "工作台壳出厂就是 hidden —— 页面会全白"
+    );
+    // 共用片段(报告正文的渲染)也得注进去 —— 少了它页面一开就白
+    assert!(!text.contains("/*__SHARED_JS__*/"), "共用片段占位符没被替换");
+    assert!(text.contains("function topicNodes("), "共用片段没进工作台");
+}
+
+/// 工作台里那个「单独打开图文报告页」得**指对地方**。
+///
+/// 这种链接最容易错在"往上走几级":`../04_report/report.html` 与
+/// `../../04_report/report.html` 只差一个字符,而后者是个 404 ——
+/// 页面上看不出来,非点一次不可。
+#[test]
+fn the_workbench_links_to_the_report_page_next_door() {
+    let (_tmp, layout) = prepared("link");
+    let html = std::fs::read_to_string(layout.workbench()).unwrap();
+
+    let href = html
+        .split_once("href=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(href, _)| href.to_string())
+        .expect("工作台里应当有一个指向报告页的链接");
+    assert_eq!(
+        resolve("01_preprocess", &href).unwrap(),
+        vidbrief_project::layout::REPORT_HTML_FILE,
+        "链接没指到报告页:{href}"
+    );
+}
+
+/// 把相对 URL 按所在目录解成项目根相对路径;`..` 冒出去就是写错了。
+fn resolve(base_dir: &str, href: &str) -> Result<String, String> {
+    let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in href.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(format!("从 {base_dir} 出发走不到 {href}"));
+                }
+            }
+            s => parts.push(s),
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 #[test]
 fn the_rendered_page_carries_the_real_material() {
     let (_tmp, layout) = prepared("data");
-    let html = std::fs::read_to_string(
-        layout.rel(vidbrief_project::layout::PREPROCESS_TIMELINE_FILE),
-    )
-    .unwrap();
+    let html = std::fs::read_to_string(layout.workbench()).unwrap();
 
     let json = html
         .split_once(r#"<script id="vidbrief-data" type="application/json">"#)
@@ -137,10 +182,12 @@ fn the_rendered_page_carries_the_real_material() {
     // 截图 URL 同理
     let shot_url = data["shots"][0]["url"].as_str().unwrap();
     assert!(shot_url.starts_with("../01_preprocess/shots/"), "{shot_url}");
+    // 步 1 刚跑完,报告那栏还空着 —— 工作台从步 2 起就能用,别让它等着报告
+    assert!(data["report"].is_null(), "还没跑步 4,报告那栏该是空的:{}", data["report"]);
 }
 
 #[test]
-fn ui_serves_the_page_and_the_video_with_range_support() {
+fn the_workbench_actually_plays_the_video() {
     // 这一条是整个 M2 的验收:**渲染好的页面 + 本地服务 = 视频能加载能 seek**。
     let (tmp, layout) = prepared("serve");
     let _ = (&tmp, &layout);
@@ -182,7 +229,7 @@ fn ui_serves_the_page_and_the_video_with_range_support() {
 
     // ① 页面取得到
     let page = get(port, path, None);
-    assert_eq!(page.0, 200, "时间线页面取不到");
+    assert_eq!(page.0, 200, "工作台页面取不到");
     assert!(String::from_utf8_lossy(&page.1).contains("<video"));
 
     // ② 视频取得到,而且声明支持 Range

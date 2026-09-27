@@ -171,10 +171,10 @@ pub struct PreprocessReport {
     pub shot_checks_cleared: usize,
     /// 重转录时**作废掉**的核验戳与结论段数(`--no-transcribe` 时为 0)。
     pub segment_checks_cleared: usize,
-    /// 渲染出来的时间线;渲染失败时为 `None`。
-    pub timeline: Option<PathBuf>,
+    /// 渲染出来的工作台;渲染失败时为 `None`。
+    pub workbench: Option<PathBuf>,
     /// 视图为什么没渲染出来。**材料不受影响**(见 §5.3)。
-    pub timeline_error: Option<String>,
+    pub workbench_error: Option<String>,
     /// 这一趟**沿用了上次哪些成果**(增量重跑),以及没沿用的原因。
     pub reuse: ReuseOutcome,
     /// 跑完时 `project.json` 里 `progress.preprocess.done` 的值。
@@ -372,7 +372,7 @@ pub fn preprocess(
     // DESIGN §5.3:步 1 完成即产出可视化。**渲染失败不算步 1 失败** ——
     // 材料已经全部落盘,视图只是给人看的界面,没渲染出来可以再跑一次。
     on_progress(Stage::Rendering);
-    let (timeline, timeline_error) = match vidbrief_viz::render_timeline(&layout) {
+    let (workbench, workbench_error) = match vidbrief_viz::render_workbench(&layout) {
         Ok(path) => (Some(path), None),
         Err(e) => (None, Some(format!("{e:#}"))),
     };
@@ -390,10 +390,9 @@ pub fn preprocess(
         transcript,
         shot_checks_cleared,
         segment_checks_cleared,
-        timeline,
-        timeline_error,
-        reuse: ReuseOutcome {
-            visual: visual_reused,
+        workbench,
+        workbench_error,
+        reuse: ReuseOutcome {            visual: visual_reused,
             transcript: transcript_reused,
             visual_why_not,
             transcript_why_not,

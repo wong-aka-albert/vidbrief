@@ -8,8 +8,8 @@
 //!
 //! | 模板 | 依赖 | 状态 |
 //! |------|------|------|
-//! | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_timeline | ✅ 已就绪 |
-//! | P2 `fix_transcript` | apply_corrections / render_calibration_table | ✅ 已就绪 |
+//! | P1 `calibrate_shots` | list_shots / get_shot / record_shot_check / render_workbench | ✅ 已就绪 |
+//! | P2 `fix_transcript` | apply_corrections / render_workbench | ✅ 已就绪 |
 //! | P3 `find_missing_shots` | find_supplement_candidates / extract_shot | ✅ 已就绪 |
 //! | P4 `summarize_video` | get_shot / search_transcript / request_shot / write_summary / write_note | ✅ 已就绪 |
 //! | P5 `build_report` | build_report(M6 报告工具) | ✅ 已就绪 |
@@ -66,7 +66,8 @@ pub(crate) fn calibrate_shots_text(project_id: &str) -> String {
             `match` 判的是「**画面讲的与同期转录讲的是不是同一件事**」(主题 / 动作 / 对象) ——\n\
             **用字层面的差异不算不符**(转录把一个字听错了,那是转录纠错的活,走第 5 条):\n\
             两种读法都说得通的字段迟早被填成两个样,所以这里写死。\n\
-         7. 全部存完后调用 `render_timeline`,把返回的 url 给用户,让他自己看一遍。\n\
+         7. 全部存完后调用 `render_workbench`,把返回的 url 给用户,让他自己看一遍 ——
+            一个页面看全部:轴上点一下就展开那一条(图 + 你的结论),右边抽屉切三块。\n\
          \n\
          最后向用户汇报:多少张匹配、多少张存疑、哪几张需要他裁决。**不要替他下结论。**\n\
          有要他裁决的项时,进下一步会被工具挡住 —— 那时去问他;他说'就这样过',\n\
@@ -89,14 +90,14 @@ pub(crate) fn fix_transcript_text(project_id: &str) -> String {
             - 没把握的标 `uncertain`,**不要臆造**一个看起来像的写法 —— 那些留给用户裁决。\n\
             - **审过、没问题的段一并放进 `reviewed`**:不报等于没审,\n\
               工具分不出「看过没问题」和「压根没看」;有没审的段,写总结时会被门挡住。\n\
-         3. 写完调用 `render_calibration_table`,把返回的 url 给用户 —— 那一页能看到\n\
+         3. 写完调用 `render_workbench`,把返回的 url 给用户 —— 抽屉里那块「转录」能看到\n\
             每段的原文/改后/依据,以及还没核验的部分。\n\
          4. 把这一轮写进校准日志(`write_note` 到 `02_calibrate/calibration_log.md`,\n\
             mode `append`,带 `count_round`):第一行写 `## 第 N 轮(日期 时间段)`,\n\
-            下面列这轮改了哪几段、依据是什么。**每轮都要写** —— 对照表把这份日志原样\n\
-            嵌在末尾,用户就靠它分清每条结论是哪一轮写的;同一处被后轮改写时,\n\
-            旧结论只在这份日志里。\n\
-         5. **停下来**等用户看过对照表;他说哪里不对,那就是下一轮 —— 不要自己接着写总结。"
+            下面列这轮改了哪几段、依据是什么。**每轮都要写** —— 这份日志给下一轮和审计看\n\
+            (页面上不显示它:让读者拿一段手写的轮次时段去对每一行的时刻,是对不上账的;\n\
+            每条结论自己带着写下的时刻)。\n\
+         5. **停下来**等用户看过;他说哪里不对,那就是下一轮 —— 不要自己接着写总结。"
     )
 }
 
@@ -116,7 +117,7 @@ pub(crate) fn find_missing_shots_text(project_id: &str) -> String {
          \n\
          剩下没结论的候选会被审核门挡住(它数的就是这个数),所以别留下没表态的。\n\
          \n\
-         补完后调用 `render_timeline` 刷新,并把新增的图逐张给用户过一眼。"
+         补完后调用 `render_workbench` 刷新,并把新增的图逐张给用户过一眼。"
     )
 }
 
@@ -231,8 +232,8 @@ pub(crate) fn guide_index(project_id: &str) -> String {
            (**视频里逐个讲的内容各自成条**:一个个案例/步骤/样本各占一条),\n\
            工具把它们组装成**每条挂在时刻上的知识点**,那一刻的转录与画面就近挂上;\n\
            **先交代风格**(`style`:轮廓 preset + 粒度 + 语气 + 补充要求),\n\
-           一次 `build_report` 落数据并出页面(时间轴锚点 + 浮动解析 + 图文总结面板,\n\
-           可回跳视频)。\n\
+           一次 `build_report` 落数据并出页面(`04_report/report.html`,纯图文、能单独分享;\n\
+           工作台那一页的抽屉里也能读到同一份正文)。\n\
          - `styles` —— **报告的风格轮廓**:五种预置风格(快扫 / 教学 / 故事 / 元组 / 汇报)\n\
            各自怎么填 —— 条数怎么按视频长度换算、每条按什么骨架写、给谁看、要不要挂图,\n\
            以及怎么按用户的话挑一种。报告**动笔前先取这一份**。\n\
@@ -323,7 +324,7 @@ mod tests {
                     "record_shot_check",
                     "update_shot",
                     "apply_corrections",
-                    "render_timeline",
+                    "render_workbench",
                 ],
             ),
             (
@@ -333,13 +334,13 @@ mod tests {
                     "list_shots",
                     "get_shot",
                     "apply_corrections",
-                    "render_calibration_table",
+                    "render_workbench",
                     "write_note",
                 ],
             ),
             (
                 "find_missing_shots",
-                &["find_supplement_candidates", "extract_shot", "render_timeline"],
+                &["find_supplement_candidates", "extract_shot", "render_workbench"],
             ),
             (
                 "summarize_video",

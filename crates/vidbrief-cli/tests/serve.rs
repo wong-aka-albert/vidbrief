@@ -22,7 +22,7 @@ fn stage(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("01_preprocess")).unwrap();
     std::fs::write(dir.join("project.json"), br#"{"name":"serve-test"}"#).unwrap();
-    std::fs::write(dir.join("01_preprocess/timeline.html"), "<html>时间线</html>").unwrap();
+    std::fs::write(dir.join("01_preprocess/workbench.html"), "<html>工作台</html>").unwrap();
     dir
 }
 
@@ -130,9 +130,9 @@ fn a_serve_process_can_be_mounted_and_closed_through_the_front_door() {
     assert_eq!(reply.status, 200, "{}", reply.body);
 
     // 挂上就能取文件
-    let page = http(port, "GET", "/demo/01_preprocess/timeline.html", None);
+    let page = http(port, "GET", "/demo/01_preprocess/workbench.html", None);
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("时间线"), "{}", page.body);
+    assert!(page.body.contains("工作台"), "{}", page.body);
 
     // **正门**:一次 `@shutdown`,进程退出、登记表也收干净
     let entry = registry.join(format!("{}.json", child.id()));

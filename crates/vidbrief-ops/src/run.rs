@@ -591,8 +591,8 @@ mod tests {
             transcript: crate::preprocess::TranscriptOutcome::NoAudio,
             shot_checks_cleared: 0,
             segment_checks_cleared: 0,
-            timeline: None,
-            timeline_error: None,
+            workbench: None,
+            workbench_error: None,
             reuse: crate::preprocess::ReuseOutcome {
                 visual: false,
                 transcript: false,

@@ -102,7 +102,7 @@ impl VidbriefServer {
                 anyhow::anyhow!(
                     "{e:#}
                      
-                     这个项目正被另一个会话编辑。**只读的活不受影响**                     (list_shots / get_shot / get_transcript / render_timeline 都能照用);                     要改材料和结论,请让对方先收工,或让用户关掉那个会话。"
+                     这个项目正被另一个会话编辑。**只读的活不受影响**                     (list_shots / get_shot / get_transcript / render_workbench 都能照用);                     要改材料和结论,请让对方先收工,或让用户关掉那个会话。"
                 )
             })?;
             Ok((opened, hold))
@@ -216,7 +216,7 @@ mod tests {
             "get_shot",
             "record_shot_check",
             "apply_corrections",
-            "render_timeline",
+            "render_workbench",
         ] {
             assert!(names.iter().any(|n| n == expected), "缺工具 {expected}");
         }
