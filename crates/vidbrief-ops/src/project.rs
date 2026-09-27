@@ -857,6 +857,27 @@ pub struct ProjectSummary {
     pub health: crate::inspect::HealthView,
     /// 材料做到哪一步了(只看文件在不在,不解析内容)。
     pub materials: crate::inspect::Materials,
+    /// **步 1 那趟作业现在什么状态**(`RunRecord` 的摘要)。
+    ///
+    /// 为什么要它在列表里:项目一多,"现在谁在跑、谁断了、谁上次是失败"得**一屏看清** ——
+    /// 从前只有**单项目**的入口(`preprocess_progress` 一个项目问一次),
+    /// agent 手里排五个项目就要挨个问五遍,还得自己记。这里是**只读信息**,
+    /// 排哪个先跑仍然是它自己的判断(见 [260927-30])。
+    pub run: Option<RunBrief>,
+}
+
+/// 那趟作业的一句话状态(见 [`ProjectSummary::run`])。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunBrief {
+    pub run_id: String,
+    /// `running` / `done` / `failed` / `interrupted`。
+    pub state: &'static str,
+    /// 记录里那句人话(`跑完了,用时 1333.5 秒` / `转录失败:…`)。
+    pub message: String,
+    /// 这一趟从起步到现在(秒)。
+    pub elapsed_seconds: f64,
+    /// 记录多久没动了(秒)—— 判"断了"看它(`run::STALE_AFTER_SECONDS`)。
+    pub quiet_seconds: i64,
 }
 
 /// 扫一遍 `projects/` 下的项目。
@@ -924,6 +945,7 @@ fn summarize(layout: &Layout) -> Result<ProjectSummary> {
                 state_note,
                 health: crate::inspect::HealthView::problem(format!("{e:#}")),
                 materials,
+                run: run_brief(layout),
             });
         }
     };
@@ -942,6 +964,27 @@ fn summarize(layout: &Layout) -> Result<ProjectSummary> {
         state_note,
         health,
         materials,
+        run: run_brief(layout),
+    })
+}
+
+/// 那趟作业的一句话状态;没有记录(从没跑过 / 记录被清掉)就是 `None`。
+///
+/// **读不动不当错误**:列表是给人扫一眼的,一行读不出来不该让整份清单失败 ——
+/// 那种情况返回 `None`,与"没跑过"同形(要看细的用 `preprocess_progress`,它会说出来)。
+fn run_brief(layout: &Layout) -> Option<RunBrief> {
+    let record = crate::run::read(layout).ok().flatten()?;
+    Some(RunBrief {
+        run_id: record.run_id.clone(),
+        state: match record.outcome() {
+            crate::run::RunOutcome::Running => "running",
+            crate::run::RunOutcome::Done => "done",
+            crate::run::RunOutcome::Failed => "failed",
+            crate::run::RunOutcome::Interrupted => "interrupted",
+        },
+        message: record.summarize(),
+        elapsed_seconds: record.elapsed_seconds,
+        quiet_seconds: record.quiet_seconds(),
     })
 }
 
@@ -1188,6 +1231,27 @@ mod tests {
             "迁移之后底账该是齐的"
         );
         assert_eq!(opened.state().content.len(), 2, "转录 + 截图,两份都在底账里");
+    }
+
+    /// **列表里带出步 1 那趟作业的状态** —— 一屏看清"谁在跑、谁断了",不用逐个去问。
+    ///
+    /// 排哪个先跑仍是 **agent 的判断**,这条只是把话说清(见 [260927-30])。
+    #[test]
+    fn the_list_carries_the_step_one_run_state() {
+        use crate::run::{RunRecorder, RunStage};
+
+        let fake = crate::testkit::Fake::new("list-run-state").with_curve(3);
+        let layout = fake.layout().clone();
+        assert!(run_brief(&layout).is_none(), "还没跑过 → 没有那条");
+
+        let rec = RunRecorder::start(&layout, &crate::PreprocessOptions::default())
+            .expect("起一份运行记录");
+        rec.stage(RunStage::Transcribing, "正在跑 whisper", None);
+
+        let brief = run_brief(&layout).expect("记录在,就该有摘要:");
+        assert_eq!(brief.state, "running");
+        assert!(brief.message.contains("whisper"), "{}", brief.message);
+        assert!(!brief.run_id.is_empty());
     }
 
     /// `--fresh`:什么都不收,状态清零 —— 留给"状态坏了、也不想照明文将就"的人。
