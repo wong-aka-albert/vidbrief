@@ -73,7 +73,8 @@ pub use state::{
 };
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
 pub use transcript::{
-    Conclusion, CorrectionType, Segment, SegmentReview, SegmentStats, Transcript,
+    Conclusion, CorrectionType, GroupReview, GroupRule, QuoteHit, Segment, SegmentGroup,
+    SegmentReview, SegmentStats, Transcript,
 };
 /// 当前时刻,带本地 UTC 偏移(如 `2026-09-24T21:00:00+08:00`)。
 ///

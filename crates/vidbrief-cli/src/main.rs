@@ -50,12 +50,14 @@ Options:
                            {\"corrections\":[{\"segment_id\":1,\"outcome\":\"corrected\",
                              \"text\":\"改后的整句\",\"type\":\"terminology\",
                              \"note\":\"派森 → Python\",\"reason\":\"画面文字\"}],
-                            \"reviewed\":[2,3,4]}
+                            \"reviewed\":[2,3,4],
+                            \"reviewed_ranges\":[{\"from\":5,\"to\":300}]}
 
 说明:
   outcome 三种:corrected(改了,必须给 text)/ kept(决定保留原句)/ uncertain(定不了,留给人)。
   **改成跟原文一字不差会被拒收** —— 要保留原句就用 kept。
-  reviewed 是「审过、没问题」的段 id;不报等于没审,审核门会拦。
+  reviewed / reviewed_ranges 是「审过、没问题」的段:逐段点名,或整片报一个闭区间,两种取并集。
+  不报等于没审,审核门会拦。
   走的是和 MCP 工具同一套代码、同一把锁、同一个门。
 ";
 
@@ -197,7 +199,9 @@ Arguments:
   <project>                项目目录,或 projects/ 下的项目名
 
 Options:
-      --fresh              什么都不收,起一份**空**状态:已有的核验记录清零,材料原样保留
+      --fresh              什么都不收,起一份**空**状态:已有的核验记录清零,材料原样保留。
+                           步 1 的完成标记保留 —— 它答的是「那趟算法活儿跑完了没有」,
+                           材料没动,答案就没变(清掉它会让状态页报「① 前处理 — 未做」而材料齐全)
       --accept-material    把**现在这份**材料当成新底账(连跟底账对不上的那些也重记)。
                            只有在你知道材料为什么变了、并且认了它的时候才用
   -h, --help               显示本条用法
@@ -721,7 +725,15 @@ fn cmd_correct(args: &[String]) -> Result<()> {
         if let Some(reason) = lock_note {
             eprintln!("警告:{reason}");
         }
-        let outcome = vidbrief_ops::apply_corrections(opened, &items, &body.reviewed)?;
+        let ranges: Vec<vidbrief_ops::ReviewedRange> = body
+            .reviewed_ranges
+            .iter()
+            .map(|r| vidbrief_ops::ReviewedRange {
+                from: r.from,
+                to: r.to,
+            })
+            .collect();
+        let outcome = vidbrief_ops::apply_corrections(opened, &items, &body.reviewed, &ranges)?;
         Ok((opened.id().to_string(), outcome))
     })?;
 
@@ -1041,6 +1053,16 @@ struct CorrectBody {
     corrections: Vec<CorrectItem>,
     #[serde(default)]
     reviewed: Vec<u32>,
+    #[serde(default)]
+    reviewed_ranges: Vec<CorrectRange>,
+}
+
+/// 「审过、没问题」的一个区间(闭区间,按段 id)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorrectRange {
+    from: u32,
+    to: u32,
 }
 
 #[derive(serde::Deserialize)]

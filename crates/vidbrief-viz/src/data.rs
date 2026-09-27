@@ -40,6 +40,8 @@ pub struct WorkbenchData {
     pub regions: Vec<RegionBrief>,
     pub shots: Vec<WorkbenchShot>,
     pub segments: Vec<SegmentBrief>,
+    /// 组(核验单位)—— 段是真值,这里只是它的一个视图。
+    pub groups: Vec<GroupBrief>,
     /// 报告(步 4 之前为 `None`—— 工作台在步 2 就要能用)。
     pub report: Option<ReportBrief>,
 }
@@ -223,6 +225,7 @@ pub fn collect_workbench(layout: &Layout, view_rel: &str) -> Result<WorkbenchDat
             })
             .collect::<Result<Vec<_>>>()?,
         segments: transcript
+            .as_ref()
             .map(|t| {
                 t.segments
                     .iter()
@@ -249,8 +252,49 @@ pub fn collect_workbench(layout: &Layout, view_rel: &str) -> Result<WorkbenchDat
                     .collect()
             })
             .unwrap_or_default(),
+        // 组:一丝不苟地**现算**(§4.5.1)。转录那一栏按它展示 —— 逐段铺出来是
+        // 2269 行碎句,而核验单位本来就是组。段仍是真值(`segments` 一个字没少),
+        // 这里只给边界 + 拼好的正文 + 组自己的核验状态。
+        groups: transcript
+            .as_ref()
+            .map(|t| {
+                t.groups()
+                    .into_iter()
+                    .map(|g| GroupBrief {
+                        id: g.id,
+                        from: g.from,
+                        to: g.to,
+                        start: g.start,
+                        end: g.end,
+                        text: g.text(t),
+                        state: match g.review(t) {
+                            vidbrief_project::GroupReview::Unchecked => "unchecked",
+                            vidbrief_project::GroupReview::Checked => "checked",
+                            vidbrief_project::GroupReview::NeedsUser => "needs_user",
+                        }
+                        .to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         report: load_report_brief(layout)?,
     })
+}
+
+/// 一组(一口气说完的一小段)—— 转录那一栏的展示单位。
+#[derive(Debug, Serialize)]
+pub struct GroupBrief {
+    pub id: u32,
+    /// 首段段 id(含)。
+    pub from: u32,
+    /// 末段段 id(含)。
+    pub to: u32,
+    pub start: f64,
+    pub end: f64,
+    /// 整组的现读法(各段接起来)。
+    pub text: String,
+    /// `unchecked` / `checked` / `needs_user`(与门同一口径)。
+    pub state: String,
 }
 
 /// 报告那一段:没有 `report.json`(还没跑步 4)就是 `None` —— 工作台在步 2 就要能用。

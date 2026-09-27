@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use vidbrief_project::{
-    ChangeCurve, DenseRegions, RelPath, Segment, Shot, ShotId, Shots, SupplementRequests,
-    Transcript,
+    ChangeCurve, DenseRegions, GroupReview, GroupRule, RelPath, Segment, SegmentGroup, Shot, ShotId,
+    Shots, SupplementRequests, Transcript,
 };
 
 use crate::inspect::ShotCounts;
@@ -464,6 +464,104 @@ pub fn transcript(opened: &OpenProject, range: Option<(f64, f64)>) -> Result<Tra
         duration: full.duration,
         total_segments: total,
         segments,
+    })
+}
+
+/// 转录的**按组**视图 —— 通读与表态的单位。
+///
+/// # 为什么另给一个形状,不在 [`TranscriptView`] 上加个开关
+///
+/// 两个形状回答的是两个问题:"哪些段要改"(逐段,拿去写 `corrections`)和
+/// "哪些位置我还没看过"(按组,拿去写 `reviewed_ranges`)。塞进一个结构体
+/// 就会出现"`segments` 是空的但有 `groups`"这种要靠约定才读得懂的返回 ——
+/// 真 agent 实测里,那种形状的返回值它是会读错的。
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptGroupsView {
+    /// 这份转录来自哪个文件(项目根相对)。
+    pub source_file: RelPath,
+    /// 是不是纠错稿(`transcript.fixed.json`)。
+    pub corrected: bool,
+    pub model: String,
+    pub language: String,
+    pub duration: f64,
+    /// 全量段数(即使本次只返回了一部分组)。
+    pub total_segments: usize,
+    /// 全量组数。
+    pub total_groups: usize,
+    /// 分组规则 —— 三个浅特征,摆出来省得调用方猜组是怎么来的。
+    pub rule: GroupRule,
+    /// 本次返回的组。
+    pub groups: Vec<GroupView>,
+}
+
+/// 一组在视图里的样子。
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupView {
+    pub id: u32,
+    /// 首段段 id(含)。
+    pub from: u32,
+    /// 末段段 id(含)。**报「审过」时就报这个区间**。
+    pub to: u32,
+    pub start: f64,
+    pub end: f64,
+    /// 整组的现读法(各段接起来)。
+    pub text: String,
+    /// `unchecked`(还没核验)/ `checked`(核过)/ `needs_user`(有段在等人拍板)。
+    pub state: &'static str,
+}
+
+impl GroupView {
+    fn of(group: &SegmentGroup, transcript: &Transcript) -> Self {
+        Self {
+            id: group.id,
+            from: group.from,
+            to: group.to,
+            start: group.start,
+            end: group.end,
+            text: group.text(transcript),
+            state: match group.review(transcript) {
+                GroupReview::Unchecked => "unchecked",
+                GroupReview::NeedsUser => "needs_user",
+                GroupReview::Checked => "checked",
+            },
+        }
+    }
+}
+
+/// 取转录,**按组**(见 [`SegmentGroup`])。给了 `range` 就只取与 `[start, end]` 重叠的组。
+///
+/// 组是"一口气说完的一小段":whisper 按停顿切段,70 分钟的视频切出两千多段、
+/// 一段三五个字,逐段读与逐段表态都会把上下文顶穿(2026-09-27 实测)。
+/// **要逐段的原文**(已经在找某个词、要报 `segment_id` 改它)就用 [`transcript`]
+/// 配上小范围 —— 那是手术,这是通读。
+pub fn transcript_groups(
+    opened: &OpenProject,
+    range: Option<(f64, f64)>,
+) -> Result<TranscriptGroupsView> {
+    let (full, path, corrected) = effective_transcript(opened)?;
+    let all = full.groups();
+    let groups = match range {
+        Some((start, end)) if end >= start => all
+            .iter()
+            .filter(|g| g.overlaps(start, end))
+            .map(|g| GroupView::of(g, &full))
+            .collect(),
+        Some((start, end)) => {
+            anyhow::bail!("区间不合法:start={start} > end={end}");
+        }
+        None => all.iter().map(|g| GroupView::of(g, &full)).collect(),
+    };
+
+    Ok(TranscriptGroupsView {
+        source_file: RelPath::new(rel_of(opened, &path))?,
+        corrected,
+        model: full.model,
+        language: full.language,
+        duration: full.duration,
+        total_segments: full.segments.len(),
+        total_groups: all.len(),
+        rule: GroupRule::default(),
+        groups,
     })
 }
 

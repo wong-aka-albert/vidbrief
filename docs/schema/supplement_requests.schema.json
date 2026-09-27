@@ -41,22 +41,22 @@
           "t": {
             "type": "number",
             "minimum": 0,
-            "description": "建议补图的时刻(通常取该转录段的中点)"
+            "description": "建议补图的时刻(取那一**组**的中点)"
           },
           "segment_id": {
             "type": "integer",
             "minimum": 1,
-            "description": "触发本候选的转录段 id"
+            "description": "触发本候选的那一**组**的首段 id"
           },
           "text": {
             "type": "string",
             "minLength": 1,
-            "description": "该段转录原文,便于人直接看为什么被列出来"
+            "description": "那一**组**的现读法(各段接起来),便于人直接看为什么被列出来"
           },
           "trigger": {
             "type": "string",
             "enum": ["deictic_phrase", "no_shot_nearby", "both"],
-            "description": "deictic_phrase=含指代性表达(看这里/这边显示/大家看屏幕…);no_shot_nearby=附近无截图;both=两者都命中"
+            "description": "deictic_phrase=该**组**含指代性表达(看这里/这边显示/大家看屏幕…);both=指代 + 附近无截图(最该看一眼的那类);no_shot_nearby=**历史值,不再产生**(2026-09-27 起「附近没图」只做信息,不再单独成候选),留着是为了读老文件"
           },
           "nearest_shot": {
             "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/shot_id" }],

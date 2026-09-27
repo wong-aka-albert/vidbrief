@@ -39,9 +39,11 @@ fn the_command_line_twin_writes_through_the_same_door() {
     let fake = Fake::new("twin-write")
         .with_transcript(&[
             (0.0, 2.0, "这是国内派森教程的第一小节"),
-            (2.0, 4.0, "各位好"),
+            (2.0, 4.0, "各位好,看这里的数字"),
         ])
-        // 一张很远的图:让前两段都成为「附近没图」的候选,门才有东西可拦
+        // 一张很远的图:让这一组(两段连成一气)成为候选,门才有东西可拦。
+        // 候选的判据是**指代**(「看这里」),不再是「附近没图」——
+        // 后者实测把 95~99% 的段都报成了候选、而 agent 一条都没补([260927-16])。
         .with_shot(1, 30.0);
     let proj = fake.layout().root().to_string_lossy().into_owned();
     let pending = vidbrief_ops::find_supplement_candidates(&mut fake.open(), 3.0, false)
@@ -97,7 +99,7 @@ fn the_command_line_twin_writes_through_the_same_door() {
     // ④ 形式错误当场退回,不留半成品
     let (ok, _, stderr) = run(
         &["correct", &proj, "--json", "-"],
-        r#"{"corrections":[{"segment_id":2,"outcome":"corrected","text":"各位好","reason":"x"}]}"#,
+        r#"{"corrections":[{"segment_id":2,"outcome":"corrected","text":"各位好,看这里的数字","reason":"x"}]}"#,
     );
     assert!(!ok);
     assert!(stderr.contains("一字不差"), "{stderr}");

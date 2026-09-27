@@ -50,13 +50,22 @@ enum Placement {
 
 /// 常驻服务的句柄。
 struct Running {
-    port: u16,
+    /// 服务端口。**可改**:远端那份服务可能被杀掉(实测:2026-09-27 误关过一次),
+    /// 那时要换一个新端口并把它记回来 —— 只读的 `u16` 会让这个会话此后所有视图全废。
+    port: std::sync::atomic::AtomicU16,
     /// 挂载点(项目 id)→ 项目根目录。`Remote` 时这张表**不用管**(在对面)。
     mounts: Mutex<BTreeMap<String, PathBuf>>,
     placement: Placement,
 }
 
 static SERVER: OnceLock<Running> = OnceLock::new();
+
+/// 那个端口上还有人在听吗。**一条 TCP 连接就够**(服务只绑回环,握手都不必发)。
+fn alive(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)).is_ok()
+}
 
 /// 要不要把服务**放到另一个进程**里跑。
 ///
@@ -139,7 +148,19 @@ pub fn has_action_handler() -> bool {
 /// `root` 是首个挂载的目录(用于日志);真正的路径映射靠 [`mount`]。
 pub fn ensure_running() -> Result<u16> {
     if let Some(running) = SERVER.get() {
-        return Ok(running.port);
+        let port = running.port.load(std::sync::atomic::Ordering::SeqCst);
+        // **远端那份先探活**:它可能已经不在(被关掉、崩了、机器重启过)。
+        // 从前这里直接把它交出去,于是"服务死了"这件事会**一直**留在会话内存里 ——
+        // 实测(2026-09-27):会话挂的查看服务被误关之后,`render_workbench` 每次都报
+        // 「连不上查看服务(端口 11834)」,直到重启那个会话为止。**它会自愈**才对。
+        if running.placement == Placement::Remote && !alive(port) {
+            let fresh = spawn_server_process(standalone_serve())?;
+            running
+                .port
+                .store(fresh, std::sync::atomic::Ordering::SeqCst);
+            return Ok(fresh);
+        }
+        return Ok(port);
     }
 
     // 要独立进程:spawn `vidbrief serve` 并把端口拿回来(见 `spawn_server_process`)
@@ -155,13 +176,16 @@ pub fn ensure_running() -> Result<u16> {
     };
 
     let running = Running {
-        port,
+        port: std::sync::atomic::AtomicU16::new(port),
         mounts: Mutex::new(BTreeMap::new()),
         placement: Placement::Local { standalone: false },
     };
     if SERVER.set(running).is_err() {
         // 另一个线程先跑赢了 —— 用它那份就行
-        return Ok(SERVER.get().map(|r| r.port).unwrap_or(port));
+        return Ok(SERVER
+            .get()
+            .map(|r| r.port.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(port));
     }
 
     std::thread::Builder::new()
@@ -193,7 +217,7 @@ pub fn run_in_this_process(port: u16, mounts: Vec<(String, PathBuf)>) -> Result<
     }
 
     let running = Running {
-        port,
+        port: std::sync::atomic::AtomicU16::new(port),
         mounts: Mutex::new(table),
         // 独立进程:**关服务只关它自己**(这正是把服务挪出工具进程的全部意义)
         placement: Placement::Local { standalone: true },
@@ -260,12 +284,15 @@ fn spawn_server_process(exe: PathBuf) -> Result<u16> {
 
     // 记在表里:后续 mount / shutdown 全走 HTTP 控制面(表在对面那个进程里)
     let running = Running {
-        port,
+        port: std::sync::atomic::AtomicU16::new(port),
         mounts: Mutex::new(BTreeMap::new()),
         placement: Placement::Remote,
     };
     if SERVER.set(running).is_err() {
-        return Ok(SERVER.get().map(|r| r.port).unwrap_or(port));
+        return Ok(SERVER
+            .get()
+            .map(|r| r.port.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(port));
     }
     Ok(port)
 }
@@ -391,7 +418,9 @@ pub fn shutdown() -> Result<()> {
     let running = SERVER.get().context("没有在跑的查看服务")?;
     match running.placement {
         // 服务在别的进程里:让它自己收工
-        Placement::Remote => post_control(running.port, "@shutdown", &serde_json::json!({})).map(|_| ()),
+        Placement::Remote => post_control(
+            running.port.load(std::sync::atomic::Ordering::SeqCst),
+            "@shutdown", &serde_json::json!({})).map(|_| ()),
         // 本进程就是那个独立服务 → 回应完就退(见控制面那条)
         Placement::Local { standalone: true } => std::process::exit(0),
         Placement::Local { standalone: false } => bail!(
@@ -495,6 +524,17 @@ fn handle(_server: &Server, request: Request) -> Result<()> {
         }
     };
 
+    // **工作台这一页是现算的**(见 `html::workbench_page`):它就是"看材料"的那一页,
+    // 而材料一直在变 —— 烤进文件的那份快照只在渲染那一瞬间是对的。实测(2026-09-27):
+    // agent 在步 2 中途渲过一次,步 4 跑完打开看到的还是「全部未核验 / 还没有报告」。
+    // 路要排在静态文件**前面**,否则拿到的是盘上那份旧快照。
+    if rest == vidbrief_project::layout::WORKBENCH_FILE {
+        return match crate::html::workbench_page(&root) {
+            Ok(html) => respond_html(request, 200, &html),
+            Err(e) => respond_text(request, 500, &format!("这一页渲不出来:{e:#}")),
+        };
+    }
+
     // 第一道关:URL 路径本身必须是一个合法的项目内相对路径
     let rel = match RelPath::new(rest) {
         Ok(rel) => rel,
@@ -572,11 +612,23 @@ fn handle(_server: &Server, request: Request) -> Result<()> {
 }
 
 fn respond_text(request: Request, code: u16, text: &str) -> Result<()> {
+    respond_with(request, code, "text/plain; charset=utf-8", text)
+}
+
+/// 回一页 HTML(现算的工作台走这条 —— 它和静态文件那条路的 mime 必须一样,
+/// 否则浏览器会把它当纯文本显示出来)。
+fn respond_html(request: Request, code: u16, html: &str) -> Result<()> {
+    respond_with(request, code, "text/html; charset=utf-8", html)
+}
+
+fn respond_with(request: Request, code: u16, mime: &str, body: &str) -> Result<()> {
     request
         .respond(
-            Response::from_string(text)
+            Response::from_string(body)
                 .with_status_code(StatusCode(code))
-                .with_header(header("Content-Type", "text/plain; charset=utf-8")),
+                .with_header(header("Content-Type", mime))
+                // 现算的页面**不许缓存**:不然浏览器拿旧的那份,又回到"看着像没干活"
+                .with_header(header("Cache-Control", "no-store")),
         )
         .map_err(Into::into)
 }
@@ -607,7 +659,7 @@ fn handle_control(mut request: Request, decoded: &str, control: &str) -> Result<
                 200,
                 &serde_json::json!({
                     "pid": std::process::id(),
-                    "port": running.port,
+                    "port": running.port.load(std::sync::atomic::Ordering::SeqCst),
                     "standalone": matches!(running.placement, Placement::Local { standalone: true }),
                     "mounts": list,
                 }),
@@ -633,7 +685,7 @@ fn handle_control(mut request: Request, decoded: &str, control: &str) -> Result<
                 .lock()
                 .map_err(|_| anyhow::anyhow!("挂载表中毒"))?
                 .insert(id.to_string(), canonical);
-            write_registry(running.port)?;
+            write_registry(running.port.load(std::sync::atomic::Ordering::SeqCst))?;
             respond_value(request, 200, &serde_json::json!({"ok": true}))
         }
         ("shutdown", &Method::Post) => {

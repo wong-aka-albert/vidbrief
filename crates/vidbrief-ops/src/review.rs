@@ -42,8 +42,8 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use vidbrief_project::digest::short;
 use vidbrief_project::{
-    Confidence, MaterialDigests, ReviewCounts, Segment, Shot, ShotStatus, SupplementRequest,
-    SupplementStatus,
+    Confidence, GroupReview, MaterialDigests, ReviewCounts, Segment, Shot, ShotStatus,
+    SupplementRequest, SupplementStatus,
 };
 
 use crate::project::OpenProject;
@@ -85,7 +85,8 @@ impl PendingItems {
 
         let parts: Vec<String> = [
             one("截图", "张", &self.shots),
-            one("转录", "段", &self.segments),
+            // 转录那一格按**组**报(见 `state`),所以单位是「处」而不是「段」
+            one("转录", "处", &self.segments),
             one("补图候选", "条", &self.supplements),
         ]
         .into_iter()
@@ -121,8 +122,12 @@ pub struct BadEvidence {
 /// 2. **图没了** → 结论是关于一张不存在的图;
 /// 3. **文对不上** → 它引的那句话,转录里没有。
 ///
-/// 第 3 条按**逐字包含**判,而且判的是**当初引的那一段**:文中途被人改过也算对不上 ——
-/// 结论是照着旧文下的,材料变了它就该重看一遍。
+/// 第 3 条按**逐字包含**判,而判的范围是**那一组**(不是那一段):whisper 按停顿
+/// 切段,一句话常常横跨两三个碎段 —— 老判据("必须整句落在同一段里")实测把那句话
+/// 确实在材料里的两次也拒了(2026-09-27)。跨组仍然算对不上:那是两句话。
+///
+/// 判的是**当初引的那一组**:组里的文被人改过也算对不上 —— 结论是照着旧文下的,
+/// 材料变了它就该重看一遍。
 fn bad_evidence(opened: &OpenProject, shots: &vidbrief_project::Shots, transcript: Option<&vidbrief_project::Transcript>) -> Vec<BadEvidence> {
     let layout = opened.layout();
     let mut bad = Vec::new();
@@ -151,23 +156,24 @@ fn bad_evidence(opened: &OpenProject, shots: &vidbrief_project::Shots, transcrip
             continue;
         };
 
-        let hit = transcript.and_then(|t| t.segments.iter().find(|s| s.id == evidence.segment));
-        match hit {
-            None => bad.push(BadEvidence {
-                shot: id.clone(),
+        let quote = evidence.quote.trim();
+        let Some((t, group)) = transcript
+            .and_then(|t| t.group_holding(evidence.segment).map(|group| (t, group)))
+        else {
+            bad.push(BadEvidence {
+                shot: id,
                 why: format!("凭据指向的转录段 seg {} 不在了", evidence.segment),
-            }),
-            Some(segment) if !segment.effective_text().contains(evidence.quote.trim()) => {
-                bad.push(BadEvidence {
-                    shot: id.clone(),
-                    why: format!(
-                        "凭据说凭的是 seg {} 里的「{}」,可那一段现在不是这么写的",
-                        evidence.segment,
-                        evidence.quote.trim()
-                    ),
-                })
-            }
-            Some(_) => {}
+            });
+            continue;
+        };
+        if !group.text(t).contains(quote) {
+            bad.push(BadEvidence {
+                shot: id,
+                why: format!(
+                    "凭据说凭的是 seg {} 那一组(seg {}–{})里的「{}」,可那儿现在不是这么写的",
+                    evidence.segment, group.from, group.to, quote
+                ),
+            });
         }
     }
 
@@ -237,15 +243,18 @@ pub fn state(opened: &OpenProject) -> Result<ReviewState> {
     }
 
     if let Some(t) = &transcript {
+        // **按组报**(2026-09-27):2269 段的项目逐段报要吐两千多个 id。
+        // 组内**全审过**才算这一组审过 —— 不能"组里有一段核过就算整组看过",
+        // 那正是"分不出看过没问题"那条顾虑要防的。
+        for group in t.groups() {
+            if group.review(t) == GroupReview::Unchecked {
+                out.unchecked.segments.push(group.label());
+            }
+        }
+        // "等人拍板"是**那一段**的事,逐段报 —— 用户要裁决的就是那几句。
         for segment in &t.segments {
-            match segment.review() {
-                vidbrief_project::SegmentReview::Unchecked => {
-                    out.unchecked.segments.push(format!("seg {}", segment.id));
-                }
-                vidbrief_project::SegmentReview::NeedsUser => {
-                    out.needs_user.segments.push(format!("seg {}", segment.id));
-                }
-                vidbrief_project::SegmentReview::Checked => {}
+            if segment.review() == vidbrief_project::SegmentReview::NeedsUser {
+                out.needs_user.segments.push(format!("seg {}", segment.id));
             }
         }
     }
@@ -465,8 +474,10 @@ pub fn gate_calibrate(opened: &OpenProject) -> Result<()> {
              \n\
              接着审。三类各有各的入口,别漏:\n\
              - **截图**:`get_shot` 看过之后用 `record_shot_check` 记结论;\n\
-             - **转录段**:审过、没问题的也要报上来(`apply_corrections` 的 `reviewed`),\
-             不报等于没审 —— 门分不出'看过没问题'和'压根没看';\n\
+             - **转录段**:`get_transcript` 是按**组**给的(一口气说完的一小段;\
+             组里逐段都核过才算这一组核过)。审过、没问题的用 `apply_corrections` 报 `reviewed`,\
+             一整片就报 `reviewed_ranges` 区间 —— 不报等于没审,\
+             门分不出'看过没问题'和'压根没看';\n\
              - **补图候选**:每一条都要结论,补或不补都用 `disposition_supplements` 报,\
              并给一句理由。",
             now.unchecked.describe().unwrap_or_default()
@@ -780,7 +791,7 @@ mod tests {
 
     /// 报告这些转录段审过了。
     fn review_segments(opened: &mut crate::project::OpenProject, ids: &[u32]) {
-        crate::conclusions::apply_corrections(opened, &[], ids).unwrap();
+        crate::conclusions::apply_corrections(opened, &[], ids, &[]).unwrap();
     }
 
     fn two_shots(tag: &str) -> Fake {
@@ -799,7 +810,8 @@ mod tests {
 
         let s = state(&opened).unwrap();
         assert_eq!(s.unchecked.shots, vec!["s001", "s002"]);
-        assert_eq!(s.unchecked.segments, vec!["seg 1", "seg 2"]);
+        // 转录**按组**报:两段首尾相接、又不满 12 秒,是一组
+        assert_eq!(s.unchecked.segments, vec!["seg 1–2"]);
         assert!(s.needs_user.is_empty(), "还没审,谈不上等人拍板:{}", describe(&s));
     }
 
@@ -886,8 +898,7 @@ mod tests {
                     reason: "同音,没把握".into(),
                 },
             }],
-            &[2],
-        )
+            &[2], &[])
         .unwrap();
 
         let err = gate_calibrate(&opened).unwrap_err().to_string();
@@ -1031,8 +1042,7 @@ mod tests {
                         reason: "测试".into(),
                     },
                 }],
-            &[],
-        )
+            &[], &[])
         .unwrap();
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s001"), "{err}");
@@ -1047,6 +1057,94 @@ mod tests {
             }),
         );
         gate_calibrate(&opened).expect("凭据补对了就该过");
+    }
+
+    // ── 组:核验与报账的单位(2026-09-27,清账十七) ────────────────────
+
+    /// **门按组报**,不按段 —— 2269 段的项目逐段报要吐两千多个 id。
+    ///
+    /// 判据仍是段(见 `SegmentGroup::review`):组里**全审过**才算这一组审过。
+    #[test]
+    fn the_gate_counts_groups_not_segments() {
+        let fake = Fake::new("review-groups")
+            // 前两段首尾相接 → 一组;空 5 秒 → 后两段另一组
+            .with_transcript(&[
+                (0.0, 2.0, "各位好"),
+                (2.0, 4.0, "接着讲"),
+                (9.0, 11.0, "下面看这张图"),
+                (11.0, 13.0, "这里是重点"),
+            ])
+            .with_curve(14)
+            .with_shot(1, 2.0);
+        let mut opened = fake.open();
+        check_shot(&mut opened, 1, high());
+
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("转录 2 处"), "该按组报:\n{err}");
+        assert!(err.contains("seg 1–2"), "{err}");
+        assert!(err.contains("seg 3–4"), "{err}");
+
+        // 报了一半 → 还是拦,而且报的是**剩下的那一组**
+        review_segments(&mut opened, &[1, 2]);
+        let err = gate_calibrate(&opened).unwrap_err().to_string();
+        assert!(err.contains("转录 1 处"), "{err}");
+        assert!(err.contains("seg 3–4"), "{err}");
+        assert!(!err.contains("seg 1–2"), "报过的组不该再报:\n{err}");
+
+        // 用一个**区间**把剩下那一组报掉 → 放行
+        crate::conclusions::apply_corrections(
+            &mut opened,
+            &[],
+            &[],
+            &[crate::conclusions::ReviewedRange { from: 3, to: 4 }],
+        )
+        .unwrap();
+        gate_calibrate(&opened).expect("全核过就该过");
+    }
+
+    /// **一句话横跨几个碎段**:从前判它是"编的",现在认 —— 跨组才不认。
+    #[test]
+    fn evidence_may_span_the_fragments_of_one_group() {
+        let fake = Fake::new("review-evidence-span")
+            .with_transcript(&[
+                (0.0, 2.0, "各位好"),
+                (2.0, 4.0, "接着讲"),
+                (20.0, 22.0, "另一段话"),
+            ])
+            .with_curve(24)
+            .with_shot(1, 2.0);
+        let mut opened = fake.open();
+        let quote = |text: &str| crate::conclusions::ShotCheckInput {
+            r#match: true,
+            audio_visual_sync: true,
+            type_read: "画面".into(),
+            issues: vec![],
+            confidence: high(),
+            neighbor_text: None,
+            evidence_quote: Some(text.to_string()),
+        };
+
+        // 引文横跨第 1、2 段(它们是一组)—— 该认下,段号落在起点那一段
+        let check = crate::conclusions::record_shot_check(
+            &mut opened,
+            vidbrief_project::ShotId::FIRST,
+            &quote("各位好接着讲"),
+        )
+        .unwrap();
+        assert_eq!(check.evidence.unwrap().segment, 1, "段号该是引文的起点");
+
+        review_segments(&mut opened, &[1, 2, 3]);
+        gate_calibrate(&opened).expect("跨段但在一组之内,该过");
+
+        // 跨组的一句 → 拒收(那是两句话)
+        let err = crate::conclusions::record_shot_check(
+            &mut opened,
+            vidbrief_project::ShotId::FIRST,
+            &quote("接着讲另一段话"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("找不到"), "跨组的引文该拒:\n{err}");
     }
 
     #[test]
@@ -1126,8 +1224,7 @@ mod tests {
                     reason: "上下文".into(),
                 },
             }],
-            &[],
-        )
+            &[], &[])
         .unwrap();
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("不是工具写出去的那一份"), "{err}");

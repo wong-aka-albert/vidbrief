@@ -152,15 +152,45 @@ button.tool:disabled { opacity:.4; cursor:default; }
 .focusline { outline:2px solid var(--warn); outline-offset:2px; }
 
 /* ── 浮动层:轴上点中的那一条就近展开。引线是独立元素(浮层自己 overflow,伪元素会被裁掉)── */
+/* 浮层 = **上标题 + 下内容(flex 竖排)**:圆角交给父容器,靠 `overflow:hidden` 裁 ——
+   子元素不自己加圆角、也不靠 sticky/负 margin 去凑(2026-09-27:那么凑过一版,
+   结果顶沿一道 10px 的缝、拖动之后内容还从右边溢出来)。**只有内容那一格滚**:
+   标题在滚动容器**外面**,天然不动,不需要 sticky。 */
+/* 一组一块:组头一行(左:组号/区间,右:折叠开关)+ 整组正文;有结论的段折在下面 */
+.seggroup { border-top:1px solid var(--line); padding:13px 0 5px; }
+.ghead { display:flex; align-items:center; gap:8px; }
+.ghead .spacer { flex:1; }
+.ghead .tags { margin:0; }
+/* 折叠开关就是一行字(见 `paintMarksToggle`),不是按钮 */
+.marksToggle { display:block; margin:6px 0 2px; padding:0; border:0; background:none;
+  color:var(--dim); font:inherit; font-size:11.5px; cursor:pointer; text-align:left; }
+.marksToggle:hover { color:var(--fg); text-decoration:underline; }
+.marks { margin-left:10px; }
+.marks[hidden] { display:none; }
+.seggroup:first-child { border-top:0; }
+.seggroup > .seg { margin:8px 0 0 10px; padding:8px 10px; border:1px solid var(--line);
+  border-radius:8px; }
+/* 组头:编号亮、区间暗,都**比正文小一号** —— 不然跟正文一样,看不出分界在哪。
+   (`> .where` 那版选择器匹配不到 `.ghead` 里的那个,组头就一直用的正文样式。) */
+.ghead .where { display:flex; align-items:baseline; gap:7px;
+  color:var(--dim); font-size:11.5px; font-variant-numeric:tabular-nums; }
+.ghead .gnum { color:var(--accent); font-size:13px; font-weight:600; }
 .float { position:absolute; left:50%; transform:translateX(-50%);
   width:min(460px, 92%); max-height:46vh;
-  overflow-y:auto; overflow-x:hidden;          /* 横向不滚:竖直条会挤内容,底下就多一根横条 */
-  background:color-mix(in srgb, var(--panel) 94%, transparent);
+  display:flex; flex-direction:column; overflow:hidden;
+  background:color-mix(in srgb, var(--panel) 96%, transparent);
   backdrop-filter:blur(6px);
   border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow);
-  padding:10px 15px 12px; z-index:6; }
+  padding:0; z-index:6; }
 .float[hidden], .stem[hidden] { display:none; }
-.float .head { display:flex; align-items:center; gap:6px; }
+.float .head { flex:0 0 auto; display:flex; align-items:center; gap:6px;
+  padding:9px 15px 8px;
+  background:var(--panel); border-bottom:1px solid var(--line);
+  cursor:grab; user-select:none; }
+.float .head:active { cursor:grabbing; }
+.float .head button { cursor:pointer; }
+/* 唯一滚动的那一格。横向不滚(竖直条会挤内容,底下就多一根横条)。 */
+.float .body { flex:1 1 auto; overflow-y:auto; overflow-x:hidden; padding:2px 15px 12px; }
 .float .idx { color:var(--dim); font-size:12px; }
 .float .head .spacer { flex:1; }
 .float h3 { margin:6px 0 4px; font-size:15.5px; }
@@ -387,6 +417,59 @@ function shotNode(s) {
   return card;
 }
 
+// 一组:一口气说完的一小段。**转录那一栏的展示单位。**
+function groupNode(g) {
+  const box = el("div", "seggroup" + (g.state === "unchecked" ? " unchecked" : "") +
+    (g.state === "needs_user" ? " needs_user" : ""));
+  box.id = "grp-" + g.id;
+  const body = D.segments.filter((s) => s.id >= g.from && s.id <= g.to);
+  const marks = body.filter((s) => s.conclusion);
+  const changed = marks.filter((s) => s.conclusion.label === "改了").length;
+  // 筛选口径与逐段那版一致:有结论 → touched;其余按组自己的核验状态
+  box.dataset.f = marks.length ? "touched" : g.state;
+
+  // 组头一行:左边是组号/区间,右边是**折叠开关**(有结论的段默认折起来 ——
+  // 一屏里该先读到"这些话说了什么",改动要看再展开)。
+  const ghead = el("div", "ghead");
+  // 组头:**编号**一格(亮)+ 区间/时刻一格(暗)—— 一眼能看出这一组从哪开始
+  const where = el("span", "where");
+  where.appendChild(el("span", "gnum", `#${g.id}`));
+  where.appendChild(el("span", null, `seg ${g.from}–${g.to} · ${fmtT(g.start)}–${fmtT(g.end)}`));
+  ghead.appendChild(where);
+  ghead.appendChild(el("span", "spacer"));
+  const tags = el("div", "tags");
+  if (changed) tags.appendChild(el("span", "badge ok", `改了 ${changed} 段`));
+  if (!marks.length) {
+    tags.appendChild(el("span", "badge" + (g.state === "unchecked" ? "" : " ok"),
+      g.state === "unchecked" ? "未核验" : g.state === "needs_user" ? "存疑未改" : "核验过"));
+  }
+  ghead.appendChild(tags);
+  box.appendChild(ghead);
+
+  const what = el("div", "what");
+  what.appendChild(el("span", "line", g.text));       // 整组读起来是一句话
+  box.appendChild(what);
+
+  if (marks.length) {
+    const marksBox = el("div", "marks");
+    marksBox.hidden = true;                            // **默认折叠**
+    for (const s of marks) marksBox.appendChild(segNode(s));
+    // 一行纯文字就够了(`展开(3)` / `收起`)—— 不加按钮壳、不加 caret
+    const toggle = el("button", "marksToggle");
+    toggle.dataset.n = String(marks.length);
+    toggle.onclick = () => { marksBox.hidden = !marksBox.hidden; paintMarksToggle(toggle, marksBox.hidden); };
+    paintMarksToggle(toggle, true);
+    box.appendChild(marksBox);
+    box.appendChild(toggle);                           // 正文底下、改动上面
+  }
+  return box;
+}
+
+/// 折叠开关的文案只有这一处:`展开更多(N)` ⇄ `收起`。
+function paintMarksToggle(t, hidden) {
+  t.textContent = hidden ? `展开(${t.dataset.n})` : "收起";
+}
+
 function segNode(s) {
   const row = el("div", "seg" + (s.state === "unchecked" ? " unchecked" : "") +
     (s.state === "needs_user" ? " needs_user" : ""));
@@ -443,6 +526,18 @@ function filterNode(defs, onPick) {
 /* ══════════ 3 effects ══════════ 听 state:播放器 / 轴 / 浮层 / 抽屉 / 主题 / 挂载。 */
 const cv = $("#cv"), ctx = cv.getContext("2d");
 const floatEl = $("#float"), stemEl = $("#stem");
+// 浮层被手动拖走过没有。拖动**只挪当前位置、不记忆**:点轴上的锚点、点抽屉里的知识点、
+// 或重新展开,都回默认位置(贴着轴、水平对齐锚点)。
+let floatMoved = false;
+function resetFloatPos() {
+  if (!floatMoved) return;
+  floatMoved = false;
+  floatEl.style.top = "";
+  floatEl.style.bottom = "";
+  floatEl.style.left = "";   // 交回 CSS 的 50%,紧接着的 placeFloat 会算准
+  floatEl.style.transform = "";
+  stemEl.hidden = false;
+}
 const stageEl = $("#stage"), axiswrapEl = document.querySelector(".axiswrap");
 const viewEl = $("#view"), mainEl = $("#main");
 const video = $("#v");
@@ -582,10 +677,15 @@ function placeFloat(t) {
   const w = sr.width || 1;
   const pct = Math.min(1, Math.max(0, t.t / DUR));
   const half = Math.min(230, w * 0.46);
-  floatEl.style.left = Math.min(Math.max((cr.left - sr.left) + pct * cr.width, half + 8), w - half - 8) + "px";
-  floatEl.style.bottom = (axiswrapEl.offsetHeight + 6) + "px";   // 贴在轴区上沿
+  // 被拖走过就别再抢它的位置 —— 拖动是临时的,但临时期间播放头每换一条都会走到这儿,
+  // 不管住它的话拖了等于没拖。
+  if (!floatMoved) {
+    floatEl.style.left = Math.min(Math.max((cr.left - sr.left) + pct * cr.width, half + 8), w - half - 8) + "px";
+    floatEl.style.bottom = (axiswrapEl.offsetHeight + 6) + "px";   // 贴在轴区上沿
+  }
   requestAnimationFrame(() => {                                  // 等布局落定再量引线
     if (!S.floatOn) return;
+    if (floatMoved) { stemEl.hidden = true; return; }             // 拖开了:引线再画只会指错
     const fr = floatEl.getBoundingClientRect();
     const ay = (cr.top - sr.top) + (Y.topics[0] + Y.topics[1]) / 2;
     stemEl.style.left = (cr.left - sr.left + pct * cr.width) + "px";
@@ -618,13 +718,16 @@ function showTopic(i, opts) {
   close.onclick = () => setFloatOn(false);
   head.appendChild(prev); head.appendChild(next); head.appendChild(close);
   floatEl.appendChild(head);
+  // 内容那一格:标题 + 正文 + 来源 + 待核验 + 关联段,**只有它滚**(见上面 .body 的注释)
+  const scroller = el("div", "body");
   const h3 = el("h3", null, tp.title);
   h3.appendChild(el("span", "t", fmtT(tp.t)));
-  floatEl.appendChild(h3);
+  scroller.appendChild(h3);
   const body = el("div", "md");
   body.innerHTML = md(tp.body) + sourceHtml(tp) + verifyHtml(tp) + segsHtml(tp);
-  floatEl.appendChild(body);
-  floatEl.scrollTop = 0;
+  scroller.appendChild(body);
+  floatEl.appendChild(scroller);
+  scroller.scrollTop = 0;
   placeFloat(tp);
   S.sel = { kind: "topic", id: i };
   drawAxis();
@@ -656,6 +759,13 @@ function focusSeg(id) {
   showView("segs");
   const row = rowById.get(id);
   if (!row) return;
+  // 它可能折着 —— 跳过去就得看得见(点段芯片、左栏那两条快捷入口都走这儿)
+  const box = row.querySelector(".marks");
+  if (box && box.hidden) {
+    box.hidden = false;
+    const t = row.querySelector(".marksToggle");
+    if (t) paintMarksToggle(t, false);
+  }
   clearFocus(); row.classList.add("focusline");
   scrollViewTo(row);
 }
@@ -675,7 +785,7 @@ function pick(kind, id, t) {
   setT(at == null ? t : at);
   if (kind === "shot") focusShot(id);
   else if (kind === "seg") focusSeg(id);
-  else focusTopic(id);
+  else { resetFloatPos(); focusTopic(id); }   // 点轴上的知识点 = 回默认位置
   drawAxis();
 }
 cv.addEventListener("click", (e) => {
@@ -709,7 +819,12 @@ function setDrawer(open) {
   realign();
 }
 function realign() { if (TOPICS[S.curTopic]) placeFloat(TOPICS[S.curTopic]); }
-mainEl.addEventListener("transitionend", realign);   // 过渡当中量到的是中间值,落定后再对一次
+mainEl.addEventListener("transitionend", () => { drawAxis(); realign(); });
+// 抽屉开合改的是布局宽度,而时间轴是 canvas —— **改完必须重画**:
+// 画布宽高是照 `cv.clientWidth` 定的,过渡当中量到的是旧值,浏览器随后把旧位图
+// 拉伸到新宽度 → 标尺糊了(实测:收起抽屉后 8:00 那一段的字重影,点一下才好)。
+// 过渡结束那一下重画一次;`ResizeObserver` 再兜住其它改宽度的路径(窗口、字体、抽屉)。
+if (window.ResizeObserver) new ResizeObserver(() => { drawAxis(); realign(); }).observe(cv);
 
 // ── 3.9 放大层 ──
 function zoomTo(id) {
@@ -787,16 +902,32 @@ function mount() {
     const kept = D.segments.filter((s) => s.conclusion && s.conclusion.label === "决定不改").length;
     const uncertain = D.segments.filter((s) => s.state === "needs_user").length;
     const unchecked = D.segments.filter((s) => s.state === "unchecked").length;
+    // **按组报**:核验单位是组(§4.5.1),逐段铺出来是两千多行碎句
+    const gTotal = (D.groups || []).length;
+    const gUn = (D.groups || []).filter((g) => g.state === "unchecked").length;
     $("#segCounts").textContent =
-      `共 ${total} 段 · 改过 ${changed} · 决定不改 ${kept} · 存疑 ${uncertain} · 未核验 ${unchecked}`;
+      `共 ${total} 段 · ${gTotal} 组 · 改过 ${changed} · 决定不改 ${kept} · 存疑 ${uncertain} · 未核验 ${gUn} 组`;
   }
   const list = $("#segList");
   const rows = [];
-  for (const s of D.segments) {
-    const row = segNode(s);
-    list.appendChild(row);
-    rows.push(row);
-    rowById.set(s.id, row);
+  // **按组铺**:一组一块(组号 + 段区间 + 整组现读法 + 状态),
+  // 组里**有结论的段**跟在下面(原文 / 现读法 / 说明 / 写于)—— 没结论的段不单独占一行。
+  // 老 payload 没有 `groups` 时退回逐段(不至于白屏)。
+  const groups = D.groups || [];
+  if (groups.length) {
+    for (const g of groups) {
+      const box = groupNode(g);
+      list.appendChild(box);
+      rows.push(box);
+      for (const s of D.segments) if (s.id >= g.from && s.id <= g.to) rowById.set(s.id, box);
+    }
+  } else {
+    for (const s of D.segments) {
+      const row = segNode(s);
+      list.appendChild(row);
+      rows.push(row);
+      rowById.set(s.id, row);
+    }
   }
   if (!D.segments.length) list.appendChild(el("p", "hint", "还没有转录(源视频可能没有音轨,或还没跑 preprocess)。"));
   $("#segFilters").replaceWith(mountSegsFilter(rows));
@@ -868,7 +999,12 @@ function wireEvents() {
   });
   $("#view").addEventListener("click", (e) => {
     const stamp = e.target.closest(".topic-item h4 .t[data-at]");
-    if (stamp) { setT(Number(stamp.dataset.at)); video.play().catch(() => {}); return; }
+    if (stamp) {
+      resetFloatPos();                            // 点知识点 = 回默认位置(拖动是临时的)
+      setT(Number(stamp.dataset.at));
+      video.play().catch(() => {});
+      return;
+    }
     const chip = e.target.closest(".segchip[data-start]");
     if (chip) {
       e.preventDefault();
@@ -880,6 +1016,37 @@ function wireEvents() {
     if (e.target.id === "zoom" || e.target.closest("#zoom")) $("#zoom").classList.remove("on");
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#zoom").classList.remove("on"); });
+
+  // 拖动:标题栏当手柄。挂在这一层、用 closest 判 `.head` ——
+  // 标题栏每次 `showTopic` 都重建,绑在它身上会随 innerHTML 一起丢掉。
+  floatEl.addEventListener("mousedown", (e) => {
+    const head = e.target.closest ? e.target.closest(".head") : null;
+    if (!head || e.target.closest("button")) return;   // 标题栏上的按钮归按钮
+    e.preventDefault();                                // 别顺手选中标题文字
+    const sr = stageEl.getBoundingClientRect();
+    const fr = floatEl.getBoundingClientRect();
+    const dx = e.clientX - fr.left, dy = e.clientY - fr.top;
+    // 从「居中贴轴」的一次性定位换成拖动要用的 left/top(基准同样是 stage)
+    floatEl.style.transform = "none";
+    floatEl.style.bottom = "auto";
+    floatEl.style.left = (fr.left - sr.left) + "px";
+    floatEl.style.top = (fr.top - sr.top) + "px";
+    floatMoved = true;
+    stemEl.hidden = true;                              // 拖开了,引线不再指着锚点
+    const move = (ev) => {
+      // 夹在舞台里:拖出去就再也抓不回来了
+      const x = Math.min(Math.max(ev.clientX - dx - sr.left, 0), Math.max(0, sr.width - fr.width));
+      const y = Math.min(Math.max(ev.clientY - dy - sr.top, 0), Math.max(0, sr.height - fr.height));
+      floatEl.style.left = x + "px";
+      floatEl.style.top = y + "px";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
 
   // 播放器:一路看一路读(手动翻过页就不跟),拖进度条同理
   video.addEventListener("timeupdate", () => {

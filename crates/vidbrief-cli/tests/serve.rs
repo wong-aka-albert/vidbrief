@@ -21,8 +21,39 @@ fn stage(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vidbrief-serve-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("01_preprocess")).unwrap();
-    std::fs::write(dir.join("project.json"), br#"{"name":"serve-test"}"#).unwrap();
-    std::fs::write(dir.join("01_preprocess/workbench.html"), "<html>工作台</html>").unwrap();
+    // 一份**能渲染**的项目材料:工作台那一页是**现算**的(见 `vidbrief_viz::html::workbench_page`),
+    // 所以夹具得让它算得出来 —— 换句话,这一条顺带在验"挂上就能看到真页面"。
+    std::fs::write(
+        dir.join("project.json"),
+        br#"{"schema_version":2,"id":"demo","name":"serve-test",
+             "created_at":"2026-09-24T21:00:00+08:00",
+             "source":{"path":"source/video.mp4","original":"D:/videos/demo.mp4","link":"hardlink"},
+             "glossary":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("01_preprocess/change_curve.json"),
+        br#"{"source":"source/video.mp4","duration":10.0,"fps_sampled":1.0,
+             "width":480,"height":270,"metric":"hist_l1_0.75+luma_0.25",
+             "generated_at":"2026-09-24T21:03:11+08:00",
+             "changes":[{"t":0.0,"score":0.0},{"t":1.0,"score":0.5}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("01_preprocess/dense_regions.json"),
+        br#"{"generated_at":"2026-09-24T21:03:11+08:00",
+             "params":{"window":8.0,"peak_threshold":0.25,"mass_k":3.0,"mass_floor":0.6,
+                       "merge_gap":4.0,"static_break":120.0},
+             "stats":{"sampled_points":2,"mass_median":0.25,"mass_threshold":0.6},
+             "regions":[]}"#,
+    )
+    .unwrap();
+    // 盘上还留一份**旧快照** —— 正是它会被现算那一页盖过去(下面那条断言钉的就是这件事)
+    std::fs::write(
+        dir.join("01_preprocess/workbench.html"),
+        "<html>旧快照:不该被发出去</html>",
+    )
+    .unwrap();
     dir
 }
 
@@ -132,7 +163,19 @@ fn a_serve_process_can_be_mounted_and_closed_through_the_front_door() {
     // 挂上就能取文件
     let page = http(port, "GET", "/demo/01_preprocess/workbench.html", None);
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("工作台"), "{}", page.body);
+    // **发出去的是现算的那一页**,不是盘上那份旧快照 —— 工作台就是"看材料"的那一页,
+    // 材料变了再打开就该是新的(2026-09-27 实测踩过:步 4 跑完打开还写着"全部未核验")
+    assert!(page.body.contains("serve-test"), "该是现算的页面:{}", page.body);
+    assert!(
+        !page.body.contains("旧快照"),
+        "盘上那份快照不该被发出去:{}",
+        page.body
+    );
+
+    // 普通文件照旧静态发(只有工作台那一页是现算的)
+    let raw = http(port, "GET", "/demo/project.json", None);
+    assert_eq!(raw.status, 200, "{}", raw.body);
+    assert!(raw.body.contains("serve-test"), "{}", raw.body);
 
     // **正门**:一次 `@shutdown`,进程退出、登记表也收干净
     let entry = registry.join(format!("{}.json", child.id()));

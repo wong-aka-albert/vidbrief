@@ -32,7 +32,7 @@
   必填:`project_id`
 - **`get_shot`** — 取一张截图:**返回图像本身**,外加它的元数据与该时刻前后 ±6 秒的转录。
   必填:`project_id`、`shot_id`
-- **`get_transcript`** — 取转录全文(或某个时间段)。
+- **`get_transcript`** — 取转录(或某个时间段)。
   必填:`project_id`
 - **`list_projects`** — 列出 `projects/` 下的所有项目,含各自做到第几步、材料齐不齐、源视频还在不在。
 - **`list_regions`** — 取变化密集区清单(每段的起止、峰值时刻、为什么被选中)。

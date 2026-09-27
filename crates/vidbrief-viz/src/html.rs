@@ -68,6 +68,28 @@ pub fn render_workbench(layout: &Layout) -> Result<std::path::PathBuf> {
     write_view(layout, rel, &html)
 }
 
+/// **现算**工作台那一页(给服务用;顺手把盘上那份快照也刷新)。
+///
+/// # 为什么这一页要现算,而报告页不要
+///
+/// 工作台是"**看材料**"的那一页,而材料一直在变(校准在写结论、总结在写、报告在落)。
+/// 烤进 HTML 的那份快照**只在渲染那一瞬间是对的** —— 实测(2026-09-27,样本 D
+/// 重跑):agent 在步 2 中途渲过一次(那时刚清完场),步 4 跑完用户打开看到的还是
+/// 「全部未核验 322 段 / 还没有报告」,差点当成"活没干"。
+///
+/// 报告页反过来:它是**交付物**(能单独存、发给别人),快照正是它要的形态 ——
+/// 所以那一页照旧烤数据。
+///
+/// 盘上那份文件仍然写着(双击打开、换个静态服务器打开时看到的也是新的);
+/// 写失败不影响这次请求:它是**投影**,丢了再渲一次就有。
+pub fn workbench_page(root: &std::path::Path) -> Result<String> {
+    let layout = Layout::new(root);
+    let rel = vidbrief_project::layout::WORKBENCH_FILE;
+    let html = render_workbench_html(&data::collect_workbench(&layout, rel)?)?;
+    let _ = write_view(&layout, rel, &html);
+    Ok(html)
+}
+
 fn write_view(layout: &Layout, rel: &str, html: &str) -> Result<std::path::PathBuf> {
     let out = layout.rel(rel);
     vidbrief_project::write_atomic_str(&out, html)
@@ -97,6 +119,7 @@ mod tests {
             regions: vec![],
             shots: vec![],
             segments: vec![],
+            groups: vec![],
             report: None,
         }
     }
@@ -150,5 +173,71 @@ mod tests {
     fn rendered_html_still_declares_the_data_block() {
         let html = render_workbench_html(&sample()).unwrap();
         assert!(html.contains(r#"<script id="vidbrief-data" type="application/json">"#));
+    }
+
+    /// **服务给的那一页是现算的** —— 文件里那份是快照,材料变了再打开就是新的。
+    ///
+    /// 这条钉的是 2026-09-27 那次踩坑:agent 在步 2 中途渲过一次工作台
+    /// (那时刚清完场),步 4 跑完用户打开看到的还是「全部未核验 / 还没有报告」——
+    /// 因为盘上那份 HTML 只在渲染那一瞬间是对的。
+    #[test]
+    fn the_served_page_is_collected_fresh_every_time() {
+        const MARK: &str = "LIVEPAGE-MARK-7f3a";
+        let root = std::env::temp_dir().join(format!("vidbrief-live-page-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        vidbrief_project::Layout::new(&root).create_dirs().unwrap();
+
+        std::fs::write(
+            root.join("01_preprocess/../project.json"),
+            r#"{"schema_version":2,"id":"demo","name":"现算样例",
+                "created_at":"2026-09-24T21:00:00+08:00",
+                "source":{"path":"source/video.mp4","original":"D:/videos/demo.mp4","link":"hardlink"},
+                "glossary":null}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("01_preprocess/change_curve.json"),
+            r#"{"source":"source/video.mp4","duration":10.0,"fps_sampled":1.0,
+                "width":480,"height":270,"metric":"hist_l1_0.75+luma_0.25",
+                "generated_at":"2026-09-24T21:03:11+08:00",
+                "changes":[{"t":0.0,"score":0.0},{"t":1.0,"score":0.5}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("01_preprocess/dense_regions.json"),
+            r#"{"generated_at":"2026-09-24T21:03:11+08:00",
+                "params":{"window":8.0,"peak_threshold":0.25,"mass_k":3.0,"mass_floor":0.6,
+                          "merge_gap":4.0,"static_break":120.0},
+                "stats":{"sampled_points":2,"mass_median":0.25,"mass_threshold":0.6},
+                "regions":[]}"#,
+        )
+        .unwrap();
+
+        // ① 材料里还没有转录 —— 现算那一页里不该有这个标记
+        let before = workbench_page(&root).unwrap();
+        assert!(!before.contains(MARK), "这会儿还没有这条结论:{before}");
+
+        // ② 材料变了(转录里多了一条结论):**同一个请求**再算一次就该带上它
+        std::fs::write(
+            root.join("01_preprocess/transcript.json"),
+            format!(
+                r#"{{"source":"source/video.mp4","model":"m","language":"zh","duration":10.0,
+                    "generated_at":"2026-09-24T21:03:11+08:00",
+                    "segments":[{{"id":1,"start":0.0,"end":2.0,"text":"各位好",
+                      "conclusion":{{"outcome":"kept","note":"{MARK}","reason":"原句通顺"}},
+                      "checked_at":null}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let after = workbench_page(&root).unwrap();
+        assert!(after.contains(MARK), "材料变了,现算的那一页就该跟着变:{after}");
+
+        // 顺手也把盘上那份快照刷新了(双击打开 / 换个静态服务器打开时看到的也是新的)
+        let on_disk = std::fs::read_to_string(root.join("01_preprocess/workbench.html")).unwrap();
+        assert!(on_disk.contains(MARK), "盘上那份快照也该跟着刷新");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

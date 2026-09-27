@@ -15,14 +15,14 @@
 //! # 算法
 //!
 //! ```text
-//! 输入:transcript.segments[], shots.shots[], window
+//! 输入:transcript.segments[](先并成组,见 `SegmentGroup`)、shots.shots[]、window
 //!
 //! 1) 留用图 = shots 里 status == keep 的那些(drop 的不算)
-//! 2) 每段取中点 t = (start + end) / 2
-//! 3) 指代性表达:该段**有效文本**含 DEICTIC_PHRASES 里任一条?
-//! 4) 附近无图:没有留用图满足 |t - shot.t| ≤ window?
-//! 5) 两条都不命中 → 丢掉;命中任一 → 一条候选(都命中时 trigger = both)
-//! 6) 按 t 升序 → 从 1 起连续编号
+//! 2) 每一**组**取中点 t = (group.start + group.end) / 2
+//! 3) 指代性表达:该组**整组现读法**里含 DEICTIC_PHRASES 里任一条?
+//!    —— 不含就丢掉,**不再看"附近有没有图"**(见下)
+//! 4) 附近无图:没有留用图满足 |t - shot.t| ≤ window?(只用来标 trigger = both)
+//! 5) 按 t 升序 → 从 1 起连续编号
 //! ```
 //!
 //! ## 四个需要解释的决定
@@ -31,23 +31,34 @@
 //! 中点是对"这一句在讲哪一帧"最中立的猜测(取 `start` 或 `end` 会系统性地偏早或偏晚)。
 //! 它只是**建议值** —— agent 收到候选后完全可以自己换个时刻抽帧。
 //!
+//! **为什么以「组」为单位**(2026-09-27,[260927-15]):whisper 按停顿切段,一段常常
+//! 只有三五个字,断句断在半个词上 —— 「大家看」在一段、「这张图」在下一段的话,
+//! **逐段扫会一条都扫不到**。而 agent 判断"要不要补"靠的正是那句完整的话。
+//!
+//! **为什么"附近没图"不再单独成候选**(2026-09-27,[260927-16]):它曾经是个判据,
+//! 结果**四份真实视频里 95~99% 的段都成了候选**(样本 A 270/277、样本 C
+//! 2235/2269、样本 D 307/322、样本 E 688/702),而 agent 一条都没补
+//! (**3700 条候选,0 条 accepted**)—— 讲授型视频里"离上一张图超过 3 秒"几乎恒真,
+//! 它筛出来的不是"缺图",是"时间过去了"。代价却全在 agent 头上:2235 条候选逐条表态
+//! 把上下文顶到 491k、400 撞墙。现在它只做**信息**(`trigger = both` 表示"不但嘴
+//! 上指了、附近还没图",更该看一眼),不再单独构成候选。
+//!
 //! **为什么 `window` 是闭区间**:`|t - shot.t| <= window` 与 `<` 在真实数据上差不了几帧,
 //! 但闭区间有确定的语义 ——"正好差 `window` 秒"算附近。这样文档里写的 `±3s` 与代码判据
 //! 完全一致,不会出现"照文档算该命中、跑起来却没命中"的错位(边界值最容易吵架)。
 //!
 //! **为什么"附近有图"只认留用图**:被 `drop` 掉的图**不会出现在最终产物里**。
 //! 若拿它当"这里已经有图了",就会把真正缺图的那段永久静音 —— 而那段画面再也补不回来。
-//! 所以判据只看 `status == keep`,一张留用图都没有时更是整段都该被列出来。
+//! 所以判据只看 `status == keep`。
 //!
 //! **为什么读 `Segment::effective_text()` 而不是 `text`**:纠错的成果只写在
-//! `corrected_text` 里,直接读 `text` 等于拿 ASR 的错字去匹配关键词(「如图」被听成
+//! 结论里,直接读 `text` 等于拿 ASR 的错字去匹配关键词(「如图」被听成
 //! 「入图」就漏了)。`effective_text()` 有纠错用纠错、没有才回落到原文,是唯一正确的入口。
 
 use std::cmp::Ordering;
 
 use vidbrief_project::{
-    Segment, Shot, Shots, SupplementRequest, SupplementRequests, SupplementStatus, Transcript,
-    Trigger,
+    Shot, Shots, SupplementRequest, SupplementRequests, SupplementStatus, Transcript, Trigger,
 };
 
 /// 指代性表达。命中任一条即认为"嘴上提到了画面上的东西"。
@@ -81,6 +92,10 @@ pub const DEICTIC_PHRASES: &[&str] = &[
     "这张图",
     "这个图形",
     "这张图形",
+    // 「示意图」是**实测补进来的**(2026-09-27):那份被 agent 逐条看过的候选里,
+    // 唯一一条真指代而词表漏掉的正是它(「我们先看一下这个示意图」指向开场那张手绘图)。
+    // 加上它,四份材料合计只多出 1 条候选 —— 精确,不泛。
+    "示意图",
     "图中",
     "图上",
     "图里",
@@ -127,24 +142,29 @@ pub fn find_candidates(transcript: &Transcript, shots: &Shots, window: f64) -> S
     // 将来真出现了第三种状态也不会漏改这里。
     let kept: Vec<&Shot> = shots.usable().collect();
 
-    // 段通常已按 `start` 升序,但编号要求是"按 t 升序连续"。若依赖上游顺序,
+    // 单位是**组**(一口气说完的一小段,见 `SegmentGroup`):断句断在半个词上的时候,
+    // 逐段扫会连"大家看 / 这张图"这种最典型的指代都扫不到。
+    //
+    // 组通常已按时间升序,但编号要求是"按 t 升序连续"。若依赖上游顺序,
     // 上游哪天不守约(id 乱序 / 区间重叠)就会悄悄编出错号,而且不会报错 —— 显式排一次。
-    let mut points: Vec<(f64, &Segment)> = transcript
-        .segments
-        .iter()
-        .map(|seg| ((seg.start + seg.end) / 2.0, seg))
-        .collect();
-    points.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
+    let mut groups: Vec<_> = transcript.groups().into_iter().collect();
+    groups.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
             .unwrap_or(Ordering::Equal)
-            // 同一时刻的两段按 segment id 定序,使结果与输入顺序无关
-            .then(a.1.id.cmp(&b.1.id))
+            // 同一时刻的两组按首段 id 定序,使结果与输入顺序无关
+            .then(a.from.cmp(&b.from))
     });
 
-    for (t, seg) in points {
-        let text = seg.effective_text();
-        let deictic = has_deictic_phrase(text);
+    for group in groups {
+        let text = group.text(transcript);
+        // **只说"附近没图"不再打扰 agent** —— 见模块文档里那条实测
+        // (3700 条候选、0 条 accepted,代价却全在上下文上)。
+        if !has_deictic_phrase(&text) {
+            continue;
+        }
 
+        let t = (group.start + group.end) / 2.0;
         let nearest = nearest_kept(&kept, t);
         let gap = nearest.map(|(_, distance)| distance);
         let no_shot_nearby = match gap {
@@ -153,22 +173,19 @@ pub fn find_candidates(transcript: &Transcript, shots: &Shots, window: f64) -> S
             None => true,
         };
 
-        let trigger = match (deictic, no_shot_nearby) {
-            (true, true) => Trigger::Both,
-            (true, false) => Trigger::DeicticPhrase,
-            (false, true) => Trigger::NoShotNearby,
-            // 既没提画面,附近又有图 —— 没有任何理由打扰 agent
-            (false, false) => continue,
-        };
-
         requests.requests.push(SupplementRequest {
             id: 0, // 排完序统一发号(与 regions 的做法一致)
             t,
-            segment_id: seg.id,
-            // 原文照抄,不截断:agent 正是靠这句话判断该不该补,
+            // 组的**首段** —— 段号仍然是引用材料的那把钥匙(组的区间是 from..=to)
+            segment_id: group.from,
+            // 整组的现读法,不截断:agent 正是靠这句话判断该不该补,
             // 它也是"为什么会被列出来"的唯一凭据(见 `SupplementRequest::text` 的注释)。
-            text: text.to_string(),
-            trigger,
+            text,
+            trigger: if no_shot_nearby {
+                Trigger::Both
+            } else {
+                Trigger::DeicticPhrase
+            },
             nearest_shot: nearest.map(|(shot, _)| shot.id),
             gap,
             status: SupplementStatus::Pending,
@@ -211,7 +228,7 @@ fn nearest_kept<'a>(kept: &[&'a Shot], t: f64) -> Option<(&'a Shot, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vidbrief_project::{RelPath, ShotId, ShotOrigin, ShotStatus};
+    use vidbrief_project::{RelPath, Segment, ShotId, ShotOrigin, ShotStatus};
 
     /// 默认判定半径,DESIGN §4.9 给的就是 3.0。
     const W: f64 = 3.0;
@@ -297,14 +314,21 @@ mod tests {
     }
 
     #[test]
-    fn no_shot_nearby_alone_is_a_candidate() {
-        // 没有任何指代性表达,但这一段的画面根本没被抽出来 → 仍是候选
+    fn no_shot_nearby_alone_is_no_longer_a_candidate() {
+        // 「附近没图」单独不再成候选(2026-09-27,[260927-16]):实测四份视频 95~99% 的段
+        // 都命中它、而 agent 一条都没补 —— 它筛出来的是"时间过去了",不是"缺图"。
         let t = transcript(&[(1, 0.0, 10.0, "今天先讲一下基本面")]);
         let s = shots(vec![shot(1, 100.0, ShotStatus::Keep)]);
-        let reqs = find_candidates(&t, &s, W);
+        assert!(
+            find_candidates(&t, &s, W).requests.is_empty(),
+            "嘴上没指画面,就不该拿'附近没图'去打扰 agent"
+        );
 
+        // 但它没白算:指了画面、附近又确实没图 → trigger = both,而且距离摆在候选上
+        let t = transcript(&[(1, 0.0, 10.0, "今天先讲一下基本面,大家看这里")]);
+        let reqs = find_candidates(&t, &s, W);
         let r = only(&reqs);
-        assert_eq!(r.trigger, Trigger::NoShotNearby);
+        assert_eq!(r.trigger, Trigger::Both);
         assert_eq!(r.nearest_shot, Some(ShotId::new(1).unwrap()), "远处那张仍是'最近的一张'");
         assert_eq!(r.gap, Some(95.0));
     }
@@ -330,16 +354,17 @@ mod tests {
     }
 
     #[test]
-    fn no_shots_at_all_means_no_nearest_and_everything_is_no_shot_nearby() {
+    fn no_shots_at_all_means_no_nearest_and_every_shot_nearby_is_unknown() {
         let t = transcript(&[
-            (1, 0.0, 10.0, "今天先讲一下基本面"),
-            (2, 10.0, 20.0, "再说说后面的安排"),
+            (1, 0.0, 10.0, "今天先讲一下基本面,大家看这里"),
+            (2, 10.0, 20.0, "再说说后面的安排,如图"),
         ]);
         let reqs = find_candidates(&t, &shots(vec![]), W);
 
         assert_eq!(reqs.requests.len(), 2);
         for r in &reqs.requests {
-            assert_eq!(r.trigger, Trigger::NoShotNearby);
+            // 一张图都没有 → "附近无图"恒真,于是两条都是 both
+            assert_eq!(r.trigger, Trigger::Both);
             assert_eq!(r.nearest_shot, None);
             assert_eq!(r.gap, None, "没有图就没有距离可言");
         }
@@ -375,13 +400,14 @@ mod tests {
 
     #[test]
     fn a_dropped_shot_does_not_count_as_nearby() {
-        // drop 掉的图不会出现在最终产物里,拿它当"这里已经有图"会把缺口永久盖住
-        let t = transcript(&[(1, 0.0, 10.0, "今天先讲一下基本面")]);
+        // drop 掉的图不会出现在最终产物里,拿它当"这里已经有图"会把缺口永久盖住:
+        // 它既不该压掉候选,也不该被当成"最近的那一张"。
+        let t = transcript(&[(1, 0.0, 10.0, "大家看这里的代码")]);
         let dropped = shots(vec![shot(1, 5.0, ShotStatus::Drop)]);
 
         let reqs = find_candidates(&t, &dropped, W);
         let r = only(&reqs);
-        assert_eq!(r.trigger, Trigger::NoShotNearby, "被 drop 的图不算附近有图");
+        assert_eq!(r.trigger, Trigger::Both, "被 drop 的图不算附近有图");
         assert_eq!(r.nearest_shot, None, "一张留用图都没有");
 
         // 有留用图时,最近的那张也绝不能是 drop 掉的那张
@@ -399,9 +425,9 @@ mod tests {
     fn ids_are_continuous_in_time_order_even_if_segments_arrive_shuffled() {
         // 故意倒着传、且 id 与时间不一致 —— 编号必须按 t 升序重排
         let t = transcript(&[
-            (3, 20.0, 30.0, "这一段是第三句"),
-            (1, 0.0, 10.0, "这一段是第一句"),
-            (2, 10.0, 20.0, "这一段是第二句"),
+            (3, 20.0, 30.0, "这一段是第三句,看这里"),
+            (1, 0.0, 10.0, "这一段是第一句,看这里"),
+            (2, 10.0, 20.0, "这一段是第二句,看这里"),
         ]);
         let reqs = find_candidates(&t, &shots(vec![]), W);
 
@@ -411,6 +437,38 @@ mod tests {
         assert_eq!(times, vec![5.0, 15.0, 25.0], "按 t 升序");
         let seg_ids: Vec<u32> = reqs.requests.iter().map(|r| r.segment_id).collect();
         assert_eq!(seg_ids, vec![1, 2, 3]);
+    }
+
+    /// **候选的单位是「组」**(2026-09-27,[260927-16]):whisper 把一句话切碎时,
+    /// 指代的一半可能在上一段、另一半在下一段 —— 逐段扫一条都扫不到。
+    #[test]
+    fn a_candidate_covers_its_whole_group() {
+        let t = transcript(&[
+            (1, 0.0, 2.0, "好那我们"),        // 组里的一段,不含指代
+            (2, 2.0, 5.0, "大家看这张图"),    // 指代在这里
+            (3, 5.0, 8.0, "上面画的这条线"),  // 组里的一段
+        ]);
+
+        let reqs = find_candidates(&t, &shots(vec![]), W);
+        let r = only(&reqs);
+        assert_eq!(r.segment_id, 1, "段号落在**组首**");
+        assert_eq!(r.t, 4.0, "建议时刻取组中点");
+        assert_eq!(
+            r.text, "好那我们大家看这张图上面画的这条线",
+            "text 是**整组**的现读法,不是命中的那一段"
+        );
+    }
+
+    /// 指代被切断在两段之间也算 —— 这正是逐段扫会漏、按组扫不会漏的那种输入。
+    #[test]
+    fn a_phrase_split_across_two_segments_still_counts() {
+        // 「调出来」被切在中间:两段各自都不含任何指代词,合起来才是
+        let t = transcript(&[(1, 0.0, 3.0, "好我们把它调"), (2, 3.0, 6.0, "出来对比一下")]);
+        assert!(!has_deictic_phrase("好我们把它调"), "前提:前后半截各自都不命中");
+        assert!(!has_deictic_phrase("出来对比一下"), "前提:前后半截各自都不命中");
+
+        let reqs = find_candidates(&t, &shots(vec![]), W);
+        assert_eq!(only(&reqs).text, "好我们把它调出来对比一下");
     }
 
     #[test]

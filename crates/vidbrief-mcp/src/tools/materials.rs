@@ -48,6 +48,13 @@ pub struct TranscriptQuery {
     /// 终点(秒)。和 `start` 必须成对 —— 只给一头会被打回来问清楚。
     #[serde(default)]
     pub end: Option<f64>,
+    /// 按**组**给(默认)还是逐段给。
+    ///
+    /// 组 = 一口气说完的一小段(whisper 按停顿切段,一段常常只有三五个字)。
+    /// 通读、找哪儿不对、报「这些我看过了」都按组;**已经定位到某一句、
+    /// 要给 `corrections` 报段号**时才逐段 —— 那时配上 `start`/`end` 只看那一小段。
+    #[serde(default)]
+    pub grouped: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -151,9 +158,13 @@ impl VidbriefServer {
     }
 
     #[tool(
-        description = "取转录全文(或某个时间段)。**有纠错稿就给纠错稿** —— \
-                       返回里的 `corrected` 告诉你读的是哪一份。\
-                       校准前先用它通读一遍找识别错误。",
+        description = "取转录(或某个时间段)。**默认按「组」返回** —— 组是一口气说完的一小段:\
+                       whisper 按停顿切段,一段常常只有三五个字,逐段读一遍两千多段会把上下文顶穿。\
+                       有纠错稿就给纠错稿,返回里的 `corrected` 告诉你读的是哪一份。\
+                       校准前先用它通读一遍找识别错误;报「这些我看过了」时,把组自己的\
+                       `from`/`to` 当区间报给 apply_corrections。\
+                       **要逐段原文**(已经定位到某一句、要给 corrections 报段号)就给 \
+                       `grouped: false` 配上 `start`/`end`,只看那一小段。",
         annotations(title = "读转录", read_only_hint = true)
     )]
     async fn get_transcript(
@@ -162,6 +173,11 @@ impl VidbriefServer {
     ) -> Result<CallToolResult, CallToolResult> {
         let range = range_of(p.start, p.end)?;
         let opened = self.open_read(&p.project_id).await?;
+        // 默认按组:通读与表态都按组,逐段是"手术"时才要的形状
+        if p.grouped.unwrap_or(true) {
+            let view = blocking(move || vidbrief_ops::transcript_groups(&opened, range)).await?;
+            return json(&view);
+        }
         let view = blocking(move || vidbrief_ops::transcript(&opened, range)).await?;
         json(&view)
     }

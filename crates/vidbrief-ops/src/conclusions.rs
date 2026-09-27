@@ -87,22 +87,20 @@ pub fn record_shot_check(
             let transcript = transcript.as_ref().with_context(|| {
                 "要给证据,得先有转录 —— 这个项目还没有可读的转录".to_string()
             })?;
-            // **逐字**在某一**段**里找。跨段不算:那样落下来的段号是拼的,
-            // 而"这句话在哪一段"正是要留给人事后回去核对的定位。
-            let hit = transcript
-                .segments
-                .iter()
-                .find(|s| s.effective_text().contains(quote));
-            let Some(segment) = hit else {
+            // **逐字**在一**组**里找(见 `Transcript::locate_quote`)。落下来的段号是
+            // 引文**起点**那一段 —— 它就是留给人事后回去核对的定位。
+            let Some(hit) = transcript.locate_quote(quote) else {
                 bail!(
                     "这段文在转录里找不到:`{quote}`\n\
                      \n\
-                     证据必须是**照抄**的一句原文(从 `get_transcript` 里原样搬过来,落在一段之内)。\
+                     证据必须是**照抄**的一句原文(从 `get_transcript` 里原样搬过来)。\
+                     一句话可以横跨几个碎段(whisper 按停顿切)—— 但不能跨组:\
+                     跨组就是两句不同的话了。\n\
                      找不到就说明它不是转录里的话 —— 那这条结论就没有凭据,不能这么写。"
                 );
             };
             Some(vidbrief_project::Evidence {
-                segment: segment.id,
+                segment: hit.segment,
                 quote: quote.to_string(),
             })
         }
@@ -141,6 +139,25 @@ pub struct CorrectionInput {
     pub conclusion: Conclusion,
 }
 
+/// 「这一段我审过」的一个**区间**(闭区间:两端都算)。
+///
+/// # 为什么要有它
+///
+/// whisper 按停顿切段,切出 1.8 秒一段是常事(实测 70 分钟的视频切出 **2269 段**)。
+/// 而门的判据是「每一段都有核验状态」,表态的唯一口子是 `reviewed` —— 于是模型每轮
+/// 要吐两千多个数字,实测一次 2.7k token,**对判断毫无贡献**,还把上下文顶穿了
+/// (2026-09-27 五份重跑:491k 输入 / 524k 上限,400 撞墙)。
+///
+/// 区间是同一件事的紧凑写法:读完一片、整片没问题,报一个区间就够。
+/// 它**只表达「看过」**,不表达任何结论 —— 真要改字仍然逐条走 `corrections`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedRange {
+    /// 起点(含)。**按段 id**(与 `transcript.json` 里的号一致,从 1 起)。
+    pub from: u32,
+    /// 终点(含)。
+    pub to: u32,
+}
+
 /// 纠错的落盘结果。
 #[derive(Debug, Clone, Serialize)]
 pub struct CorrectionOutcome {
@@ -169,21 +186,28 @@ pub struct CorrectionOutcome {
 ///
 /// 可以反复调用:每次都在**现有纠错稿**上继续改,所以 agent 可以分批发现、分批写回。
 ///
-/// # `reviewed`:审过但没话说的那些段
+/// # `reviewed` / `reviewed_ranges`:审过但没话说的那些段
 ///
 /// `items` 只装"**确实有话说**"的段(改了哪儿 / 哪儿没把握)。可校准里绝大多数段是
 /// **审了、没问题** —— 没有地方记它们的话,"审过没问题"和"压根没审"就分不开,
 /// 门也就拦不住"跳过了 300 段"。
 ///
-/// 所以这个列表是"这一段我看过了,不用改",和 `items` 一起提交(它们本来就是
+/// 所以这两个入参是"这一段我看过了,不用改",和 `items` 一起提交(它们本来就是
 /// 同一趟活:读完一批 → 挑出有问题的 → 其余照过)。改过的段自动算审过,不用重复列。
+///
+/// 两种写法**取并集**,混用随意:
+///
+/// - `reviewed: [2, 3, 4]` —— 逐段点名(几段、几十段时好写);
+/// - `reviewed_ranges: [{from: 5, to: 300}]` —— 整片区间(whisper 把一句话切碎时
+///   常有几百段的片段,逐段报 id 纯属浪费输出 —— 见 [`ReviewedRange`])。
 pub fn apply_corrections(
     opened: &mut OpenProject,
     items: &[CorrectionInput],
     reviewed: &[u32],
+    ranges: &[ReviewedRange],
 ) -> Result<CorrectionOutcome> {
-    if items.is_empty() && reviewed.is_empty() {
-        bail!("没有要写的东西 —— `corrections` 和 `reviewed` 至少给一个");
+    if items.is_empty() && reviewed.is_empty() && ranges.is_empty() {
+        bail!("没有要写的东西 —— `corrections`、`reviewed`、`reviewed_ranges` 至少给一个");
     }
     let layout = opened.layout().clone();
     let raw = Transcript::load(&layout.transcript()).with_context(|| {
@@ -199,22 +223,102 @@ pub fn apply_corrections(
     opened.state().apply_to_transcript(&mut fixed);
 
     // 先整体校验一遍再动手:半路失败会留下"改了一半"的文件,比整批拒绝更难收拾
-    let mut unknown = Vec::new();
+    let known: std::collections::HashSet<u32> = fixed.segments.iter().map(|s| s.id).collect();
+    let mut unknown: Vec<u32> = Vec::new();
     for item in items {
-        if !fixed.segments.iter().any(|s| s.id == item.segment_id) {
+        if !known.contains(&item.segment_id) {
             unknown.push(item.segment_id);
         }
     }
     for id in reviewed {
-        if !fixed.segments.iter().any(|s| s.id == *id) {
+        if !known.contains(id) {
             unknown.push(*id);
         }
     }
+    for range in ranges {
+        // 空区间先挡:不然它悄悄"什么都没报",调用方还以为审过了
+        if range.from > range.to {
+            bail!(
+                "区间 {}–{} 是空的(起点比终点大)。\
+                 闭区间两端都算,所以 [{}, {}] 才表示这两段。",
+                range.from,
+                range.to,
+                range.to,
+                range.from
+            );
+        }
+        // **越界要在展开之前挡掉**:一个手滑的 `to`(比如 99999)会让下面转上十万圈。
+        // 先看两端在不在 —— 在,就说明这一段落在已有的段号范围里,展开才是有界的。
+        let mut edges_ok = true;
+        for edge in [range.from, range.to] {
+            if !known.contains(&edge) {
+                unknown.push(edge);
+                edges_ok = false;
+            }
+        }
+        if edges_ok {
+            // 段 id 是从 1 起连续的,但这里**不假设**它:逐个核,缺一个就整批拒
+            unknown.extend((range.from..=range.to).filter(|id| !known.contains(id)));
+        }
+    }
     if !unknown.is_empty() {
+        unknown.sort_unstable();
+        unknown.dedup();
+        let shown: Vec<String> = unknown.iter().take(8).map(u32::to_string).collect();
+        let tail = if unknown.len() > shown.len() {
+            format!(" 等 {} 个", unknown.len())
+        } else {
+            String::new()
+        };
         bail!(
-            "这些转录段不存在:{unknown:?}(共 {} 段,id 从 1 起)",
+            "这些转录段不存在:{}{tail}(共 {} 段,id 从 1 起)",
+            shown.join("、"),
             fixed.segments.len()
         );
+    }
+
+    // **每一段的毛病都过一遍,一次列全** —— 不是碰到第一条就退。
+    //
+    // 实测(2026-09-27,样本 D 那次重跑):模型一次报 26 条,里面 8 条各有各的毛病
+    // (5 条 `corrected` 没给 `text`、4 条该 `uncertain` 却写了 `corrected`…),
+    // 还两次把同一段报了两遍。工具当时只点名**第一条**,整批被拒 → 它把 26 条原样重发
+    // → 又被拒(这次是 `uncertain` 没写 `note`)→ 再重发才过。**三趟的 token 全花在
+    // "把同一份内容再说一次"上**,而每条毛病本来一句话就说清了。
+    let mut trouble = check_items(items, &fixed);
+    if !trouble.is_empty() {
+        trouble.sort();
+        trouble.dedup();
+        bail!(
+            "这批结论里有 {} 处要改,一次都列在这儿了(**改完再交一次**即可,别一条一条试):\n\
+             \n\
+             {}\n\
+             \n\
+             三种 `outcome` 各自要带什么(一次说清):\n\
+             - `corrected` —— 必给 `text`(**改后的整句**,不是只写改动的那个词);\
+             `type` 选填;`text` 跟原文一字不差会被拒(要保留原句就换 `kept`)\n\
+             - `kept` —— 必给 `note`(为什么决定不改)\n\
+             - `uncertain` —— 必给 `note`(疑似是什么写法)\n\
+             三者都要给 `reason`(依据:画面文字 / 上下文 / 术语表)。\n\
+             **一段只能有一条结论**:同一段有几处改动,合并进同一个 `text`。\n\
+             `reviewed` / `reviewed_ranges` 报的是**审过、没问题**的那些段,和上面这三个无关。",
+            trouble.len(),
+            trouble
+                .iter()
+                .map(|t| format!("  - {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    // "审过"的戳盖在两处:改过的段(改了当然就是审过)+ 调用方点名/圈区间的那批。
+    // **先收成一个集合再盖章**:片段几百段时,逐段去 `contains` 一遍是 O(段×报的),
+    // 2269 段 × 2269 个 id 就是五百万次比较 —— 换成人手写就是"看着能跑、实测卡住"。
+    let mut touched: std::collections::HashSet<u32> = reviewed.iter().copied().collect();
+    for range in ranges {
+        touched.extend(range.from..=range.to);
+    }
+    for item in items {
+        touched.insert(item.segment_id);
     }
 
     for item in items {
@@ -224,15 +328,12 @@ pub fn apply_corrections(
             .position(|s| s.id == item.segment_id)
             .expect("上面刚校验过");
         let original = fixed.segments[index].text.clone();
-        fixed.segments[index].conclusion = Some(normalize(&item.conclusion, &original, item.segment_id)?);
+        fixed.segments[index].conclusion = Some(polish(&item.conclusion, &original));
     }
 
-    // "审过"的戳盖在两处:改过的段(改了当然就是审过)+ 调用方点名的那批
     let now = vidbrief_project::now();
     for segment in &mut fixed.segments {
-        let touched = items.iter().any(|i| i.segment_id == segment.id)
-            || reviewed.contains(&segment.id);
-        if touched {
+        if touched.contains(&segment.id) {
             segment.checked_at = Some(now);
         }
     }
@@ -264,63 +365,99 @@ pub fn apply_corrections(
     })
 }
 
-/// 把一条结论校准到可以落盘:补齐能自动补的,挡掉自相矛盾的。
+/// **把这一批结论里所有不对劲的地方一次查出来**(不落盘、不改数据:调用方拿着这份清单
+/// 一次改完再交一遍)。
 ///
-/// 挡的三样都是实测踩过的坑:
+/// 查的四样都是实测踩过的坑:
+/// - **"改了"却没给改后的整句** —— 模型最容易漏的一条:它把改动写进 `reason`
+///   (「蹦发 → 爆发」)却忘了 `text` 要的是**整句**;
 /// - **"改了"但文本和原文一字不差** —— 那不叫改。想保留原句就用"决定不改"
-///   (第五轮那份对照表里,27 段"改过"里有 11 段的正文一个字没动)。
-/// - **"改了"但文本空着** —— 现在不可能了(文本就在枚举里),但空字符串还能传进来。
-/// - **"不改"却不说为什么** —— 这条记录就没有信息量了。
-fn normalize(
-    conclusion: &Conclusion,
-    original: &str,
-    segment_id: u32,
-) -> Result<Conclusion> {
+///   (第五轮那份对照表里,27 段"改过"里有 11 段的正文一个字没动);
+/// - **`kept` / `uncertain` 却不说为什么 / 疑似是什么** —— 这条记录就没有信息量了;
+/// - **同一段报了两次** —— 一段只有一条结论,报两条时后一条会静默盖掉前一条
+///   (实测模型想把两处改动分两条报,结果只落了一条)。
+///
+/// 段号不存在的**不在这里报**:那一条由调用方那边统一核(`这些转录段不存在`),
+/// 两处都报会让人以为材料有问题。
+fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for item in items {
+        if !seen.insert(item.segment_id) {
+            out.push(format!(
+                "第 {} 段报了两次 —— 一段只能有一条结论,把这一段的几处改动**合并进同一个 `text`**",
+                item.segment_id
+            ));
+            continue;
+        }
+        let Some(segment) = fixed.segments.iter().find(|s| s.id == item.segment_id) else {
+            continue;
+        };
+        let id = item.segment_id;
+        match &item.conclusion {
+            Conclusion::Corrected { text, .. } => {
+                if text.trim().is_empty() {
+                    out.push(format!(
+                        "第 {id} 段说改了(`outcome = corrected`),却没给 `text` —— \
+                         要的是**改后的整句**(不是只写改动的那个词:那是 `reason` 里的东西);\
+                         决定不改就换成 `outcome = kept`"
+                    ));
+                } else if text == &segment.text {
+                    out.push(format!(
+                        "第 {id} 段的 `text` 和原文一字不差 —— 那不叫改;\
+                         要保留原句就换成 `outcome = kept`(并写清为什么决定不改)"
+                    ));
+                }
+            }
+            Conclusion::Kept { note, .. } => {
+                if note.trim().is_empty() {
+                    out.push(format!(
+                        "第 {id} 段决定不改(`outcome = kept`),却没写 `note`(为什么决定不改)"
+                    ));
+                }
+            }
+            Conclusion::Uncertain { note, .. } => {
+                if note.trim().is_empty() {
+                    out.push(format!(
+                        "第 {id} 段标了存疑(`outcome = uncertain`),却没写 `note`(疑似是什么写法)"
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 把一条结论校准到可以落盘 —— **只补能自动补的**。
+///
+/// 校验已经在 [`check_items`] 那一趟里做过了(一次列全);走到这里的东西都是合规的,
+/// 所以这个函数不再返回错误,只负责:理由/说明两头空白掐掉、`note` 没给就用
+/// [`changed_span`] 自动掐出来的改动片段顶上。
+fn polish(conclusion: &Conclusion, original: &str) -> Conclusion {
     match conclusion {
         Conclusion::Corrected {
             text,
             kind,
             note,
             reason,
-        } => {
-            if text.trim().is_empty() {
-                bail!("第 {segment_id} 段说改了,却没给改后的文本(`text`)");
-            }
-            if text == original {
-                bail!(
-                    "第 {segment_id} 段的 `text` 和原文一字不差 —— 那不叫改。\
-                     要保留原句就用 `outcome = kept`(并说清为什么决定不改)"
-                );
-            }
-            let note = match note.trim() {
+        } => Conclusion::Corrected {
+            text: text.clone(),
+            kind: *kind,
+            note: match note.trim() {
                 "" => changed_span(original, text),
                 given => given.to_string(),
-            };
-            Ok(Conclusion::Corrected {
-                text: text.clone(),
-                kind: *kind,
-                note,
-                reason: reason.trim().to_string(),
-            })
-        }
-        Conclusion::Kept { note, reason } => {
-            if note.trim().is_empty() {
-                bail!("第 {segment_id} 段决定不改,却没写为什么(`note`)");
-            }
-            Ok(Conclusion::Kept {
-                note: note.trim().to_string(),
-                reason: reason.trim().to_string(),
-            })
-        }
-        Conclusion::Uncertain { note, reason } => {
-            if note.trim().is_empty() {
-                bail!("第 {segment_id} 段标了存疑,却没写疑似写法(`note`)");
-            }
-            Ok(Conclusion::Uncertain {
-                note: note.trim().to_string(),
-                reason: reason.trim().to_string(),
-            })
-        }
+            },
+            reason: reason.trim().to_string(),
+        },
+        Conclusion::Kept { note, reason } => Conclusion::Kept {
+            note: note.trim().to_string(),
+            reason: reason.trim().to_string(),
+        },
+        Conclusion::Uncertain { note, reason } => Conclusion::Uncertain {
+            note: note.trim().to_string(),
+            reason: reason.trim().to_string(),
+        },
     }
 }
 
@@ -745,8 +882,7 @@ mod tests {
                     reason: "测试".into(),
                 },
             }],
-            &[],
-        )
+            &[], &[])
         .unwrap_err()
         .to_string();
         assert!(err.contains("一字不差"), "{err}");
@@ -762,8 +898,7 @@ mod tests {
                     reason: "原句通顺".into(),
                 },
             }],
-            &[],
-        )
+            &[], &[])
         .unwrap();
         let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
         assert_eq!(fixed.segments[0].effective_text(), "派森列表");
@@ -809,8 +944,7 @@ mod tests {
                     },
                 },
             ],
-            &[4],
-        )
+            &[4], &[])
         .unwrap();
 
         let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
@@ -857,8 +991,7 @@ mod tests {
                     },
                 },
             ],
-            &[],
-        )
+            &[], &[])
         .unwrap();
 
         assert_eq!(outcome.applied, 2);
@@ -902,8 +1035,7 @@ mod tests {
                         reason: "第一次".into(),
                     },
                 }],
-            &[],
-        )
+            &[], &[])
         .unwrap();
         let second = apply_corrections(
             &mut opened,
@@ -916,8 +1048,7 @@ mod tests {
                         reason: "第二次".into(),
                     },
                 }],
-            &[],
-        )
+            &[], &[])
         .unwrap();
 
         assert_eq!(second.corrected, 2, "第二次不该把第一次的结论抹掉");
@@ -953,12 +1084,193 @@ mod tests {
                     },
                 },
             ],
+            &[], &[])
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("99"), "{err}");
+        assert!(
+            !fake.layout().transcript_fixed().exists(),
+            "整批拒绝时不该落下半个文件"
+        );
+    }
+
+    // ── `reviewed_ranges`:整片报「审过」(2026-09-27,清账十六) ──────────
+
+    /// 三段的区间报上去,那三段就是"审过、没问题";区间外的照旧是"没审"。
+    ///
+    /// 这条要钉的是**它真的等价于逐段点名**,不是"另记了一笔区间账" ——
+    /// 门的判据只有每段的 `checked_at`,区间必须展开到段上(见 `ReviewedRange`)。
+    #[test]
+    fn a_reviewed_range_marks_every_segment_in_it() {
+        let fake = Fake::new("concl-range").with_transcript(&[
+            (0.0, 2.0, "甲"),
+            (2.0, 4.0, "乙"),
+            (4.0, 6.0, "丙"),
+            (6.0, 8.0, "丁"),
+            (8.0, 10.0, "戊"),
+        ]);
+        let mut opened = fake.open();
+
+        let outcome = apply_corrections(
+            &mut opened,
+            &[],
+            &[],
+            &[ReviewedRange { from: 2, to: 4 }],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.reviewed, 3);
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        let s = fixed.stats();
+        assert_eq!((s.clean, s.unchecked), (3, 2));
+        assert_eq!(fixed.segments[1].checked_at.is_some(), true);
+        assert_eq!(fixed.segments[0].checked_at.is_none(), true);
+        assert_eq!(fixed.segments[4].checked_at.is_none(), true);
+        // 区间只表态「看过」,一个字都不改
+        assert_eq!(fixed.segments[1].effective_text(), "乙");
+        assert_eq!(s.corrected + s.kept + s.uncertain, 0);
+    }
+
+    /// 逐段点名与区间**取并集**,而且重叠、越段都不算错 —— 分批报时天然会重叠。
+    #[test]
+    fn ids_and_ranges_unite_and_may_overlap() {
+        let fake = Fake::new("concl-range-mix")
+            .with_transcript(&[(0.0, 2.0, "甲"), (2.0, 4.0, "乙"), (4.0, 6.0, "丙"), (6.0, 8.0, "丁")]);
+        let mut opened = fake.open();
+
+        apply_corrections(
+            &mut opened,
+            &[],
+            &[1],
+            &[
+                ReviewedRange { from: 3, to: 4 },
+                ReviewedRange { from: 2, to: 3 }, // 与上一条重叠,也接上了点名的 1
+            ],
+        )
+        .unwrap();
+
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.stats().unchecked, 0, "四条都该被点到");
+    }
+
+    /// 空区间(`[5, 4]`)整批拒 —— 悄悄"什么都没报"的话,调用方还以为审过了。
+    #[test]
+    fn an_empty_range_is_refused() {
+        let fake = Fake::new("concl-range-empty").with_transcript(&[(0.0, 2.0, "甲"), (2.0, 4.0, "乙")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[],
+            &[],
+            &[ReviewedRange { from: 5, to: 4 }],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("空的"), "{err}");
+        assert!(err.contains("[4, 5]"), "要顺手告诉它怎么写:{err}");
+        assert!(!fake.layout().transcript_fixed().exists());
+    }
+
+    /// 越界的区间整批拒 —— 而且**不许先展开再判**:一个手滑的 `to` 不该让工具转上十万圈。
+    #[test]
+    fn a_range_past_the_end_is_refused() {
+        let fake = Fake::new("concl-range-over").with_transcript(&[(0.0, 2.0, "甲"), (2.0, 4.0, "乙")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[],
+            &[],
+            &[ReviewedRange { from: 1, to: 4_000_000_000 }],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("4000000000"), "{err}");
+        assert!(err.contains("这些转录段不存在"), "{err}");
+        assert!(!fake.layout().transcript_fixed().exists());
+    }
+
+    /// **一批里所有毛病一次列全** —— 不是碰到第一条就退。
+    ///
+    /// 实测(2026-09-27,样本 D 重跑):模型一次报 26 条、其中 8 条各有各的毛病,
+    /// 而工具只点名第一条 → 它把 26 条**原样重发** → 又被拒(这次是 `uncertain` 没写 `note`)
+    /// → 再重发才过。三趟的 token 全花在"把同一份内容再说一次"上。
+    #[test]
+    fn every_problem_in_the_batch_is_reported_at_once() {
+        let fake = Fake::new("concl-all-at-once").with_transcript(&[
+            (0.0, 2.0, "甲"),
+            (2.0, 4.0, "乙"),
+            (4.0, 6.0, "丙"),
+            (6.0, 8.0, "丁"),
+        ]);
+        let mut opened = fake.open();
+        let err = apply_corrections(
+            &mut opened,
+            &[
+                // ① 说改了,却只把改动写进 `reason`
+                CorrectionInput {
+                    segment_id: 1,
+                    conclusion: Conclusion::Corrected {
+                        text: String::new(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "蹦发 → 爆发".into(),
+                    },
+                },
+                // ② 决定不改,却不写为什么
+                CorrectionInput {
+                    segment_id: 2,
+                    conclusion: Conclusion::Kept {
+                        note: String::new(),
+                        reason: "原句通顺".into(),
+                    },
+                },
+                // ③ 标了存疑,却不写疑似写法
+                CorrectionInput {
+                    segment_id: 3,
+                    conclusion: Conclusion::Uncertain {
+                        note: String::new(),
+                        reason: "听不清".into(),
+                    },
+                },
+                // ④ 同一段报了两次:后一条会静默盖掉前一条
+                CorrectionInput {
+                    segment_id: 4,
+                    conclusion: Conclusion::Kept {
+                        note: "不改".into(),
+                        reason: "原句通顺".into(),
+                    },
+                },
+                CorrectionInput {
+                    segment_id: 4,
+                    conclusion: Conclusion::Kept {
+                        note: "第二次".into(),
+                        reason: "同上".into(),
+                    },
+                },
+            ],
+            &[],
             &[],
         )
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("99"), "{err}");
+        for (who, what) in [
+            ("第 1 段", "却没给 `text`"),
+            ("第 2 段", "却没写 `note`"),
+            ("第 3 段", "却没写 `note`"),
+            ("第 4 段", "报了两次"),
+        ] {
+            assert!(err.contains(who) && err.contains(what), "{who}{what} 没报出来:\n{err}");
+        }
+        // 三种 outcome 的规矩也一并说清 —— 一次交完,省得再来回
+        assert!(err.contains("一次说清"), "{err}");
+        assert!(err.contains("改完再交一次"), "{err}");
         assert!(
             !fake.layout().transcript_fixed().exists(),
             "整批拒绝时不该落下半个文件"
@@ -978,8 +1290,7 @@ mod tests {
                         reason: "说不上来".into(),
                     },
                 }],
-            &[],
-        )
+            &[], &[])
         .unwrap_err()
         .to_string();
         assert!(err.contains("note"), "{err}");
@@ -1184,7 +1495,7 @@ mod tests {
             },
         )
         .unwrap();
-        apply_corrections(&mut opened, &[], &[1, 2]).unwrap();
+        apply_corrections(&mut opened, &[], &[1, 2], &[]).unwrap();
         fake
     }
 
@@ -1242,7 +1553,7 @@ mod tests {
         )
         .unwrap();
         // 转录那一段也报一声"审过了" —— 门分不出"看过没问题"和"压根没看"
-        apply_corrections(&mut opened, &[], &[1]).unwrap();
+        apply_corrections(&mut opened, &[], &[1], &[]).unwrap();
         write_one(&mut opened, a_section(None, "总述", "# 总结"));
 
         let state = fake.state();

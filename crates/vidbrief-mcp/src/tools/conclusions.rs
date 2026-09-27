@@ -101,8 +101,11 @@ pub struct RecordShotCheckParams {
     pub neighbor_text: Option<String>,
     /// **照抄**的那句转录原文 —— 你这条结论凭的就是它。
     ///
-    /// 从 `get_transcript` 里原样搬一句过来(落在一段之内,别跨段)。工具拿它去转录里搜:
-    /// 搜得到就把它连段号一起记下,搜不到就拒收。
+    /// 从 `get_transcript` 里原样搬一句过来。工具拿它去转录里搜:搜得到就把它连段号
+    /// 一起记下,搜不到就拒收。
+    ///
+    /// **一句话可以横跨几个碎段**(whisper 按停顿切,一句常常切成两三段),
+    /// 但不许跨**组** —— 跨组就是两句不同的话了。搬的时候照抄**整句**最稳。
     ///
     /// 为什么必须给:没有它,这条结论就只是一句话 —— 事后除了再问你一遍,没有别的办法
     /// 核实。**照抄的画面文字同理**,只是画面上写了什么工具核不了(它没有眼睛)。
@@ -116,18 +119,28 @@ pub struct RecordShotCheckParams {
 pub struct CorrectionItem {
     /// 转录段 id(`transcript.json` 里的序号,从 1 起)。
     pub segment_id: u32,
-    /// 这一段是什么结论:
-    /// `corrected` 改了(要给 `text`)/ `kept` 决定保留原句 / `uncertain` 定不了、留给人。
+    /// 这一段是什么结论 —— **三种各自要带什么,见下面的字段说明**:
+    ///
+    /// | `outcome` | 必给 | 说明 |
+    /// |-----------|------|------|
+    /// | `corrected` | `text`(改后的**整句**) | 改了正文 |
+    /// | `kept` | `note`(为什么决定不改) | 看过,决定保留原句 |
+    /// | `uncertain` | `note`(疑似是什么写法) | 定不了,留给用户裁决 |
+    ///
+    /// 三者都要给 `reason`。**同一段只能有一条结论**:一段里有几处改动,
+    /// 合并进同一个 `text`(报两条的话,后一条会盖掉前一条)。
     pub outcome: CorrectionOutcomeArg,
-    /// `outcome = corrected` 时必给:改后的整句。
+    /// **`outcome = corrected` 时必给**:改后的**整句** ——
+    /// 不是只写改动的那个词(那是 `note` / `reason` 里的东西)。
     /// **它必须和原文不一样** —— 想保留原句就用 `kept`。
     #[serde(default)]
     pub text: Option<String>,
     /// `outcome = corrected` 时给:错的性质(`homophone` / `terminology` / `number` / `other`)。
     #[serde(default, rename = "type")]
     pub kind: Option<CorrectionTypeArg>,
-    /// 改动内容,如 `派森 → Python`。不给就按前后缀差异自动掐出来;
-    /// `kept` / `uncertain` 时**必须给**,否则这条记录没有信息量。
+    /// 改动内容,如 `派森 → Python`。
+    /// **`kept` / `uncertain` 时必给**(前者说为什么不改,后者说疑似是什么写法)——
+    /// 否则这条记录没有信息量。`corrected` 不给就按前后缀差异自动掐出来。
     #[serde(default)]
     pub note: Option<String>,
     /// 判断依据(画面文字 / 上下文 / 术语表)。**必须写**,这是事后复核的唯一线索。
@@ -154,14 +167,34 @@ pub struct ApplyCorrectionsParams {
     pub project_id: String,
     /// 本次要写的纠错条目。可以分批多次调用 —— 每次都在已有纠错稿上继续改。
     pub corrections: Vec<CorrectionItem>,
-    /// **审过、没问题**的段 id 列表 —— 比如刚读完 1–50 段,里面只有 2 段要改,
+    /// **审过、没问题**的段 id —— 比如刚读完 1–50 段,里面只有 2 段要改,
     /// 那 `corrections` 给那 2 段,这里给剩下 48 段。
     ///
     /// 为什么要有它:校准里绝大多数段是"审了、没问题",而 `corrections` 只装
     /// **确实有话说**的段。没有这个列表,"审过没问题"和"压根没审"就分不开 ——
     /// 而审核门要拦的正是"跳过了某一段"。改过的段自动算审过,不用在这里重复列。
+    ///
+    /// **一整片都没问题就别逐段点名** —— 用 `reviewed_ranges` 报区间。
     #[serde(default)]
     pub reviewed: Vec<u32>,
+    /// **审过、没问题**的**区间**(闭区间,两端都算,按段 id)。
+    ///
+    /// whisper 按停顿切段,一段一两秒是常事 —— 70 分钟的视频能切出两千多段。
+    /// 逐段报 id 光吐数字就要两千多个,而它对判断没有任何贡献。
+    /// 读完一片、整片没问题,报 `[{"from": 5, "to": 300}]` 就够,和 `reviewed` 取并集。
+    #[serde(default)]
+    pub reviewed_ranges: Vec<ReviewedRangeArg>,
+}
+
+/// 「审过、没问题」的一个区间(闭区间:两端都算)。
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
+#[serde(deny_unknown_fields)]
+pub struct ReviewedRangeArg {
+    /// 起点(含),段 id。
+    pub from: u32,
+    /// 终点(含),段 id。
+    pub to: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -259,7 +292,17 @@ impl VidbriefServer {
                        只改明确的识别错误,不润色、不改语序;数字/单位/时间除非明显错了否则保留;\
                        没把握的别改,标 `uncertain` 并在 note 里写疑似写法。\
                        \n\n\
-                       **审过、没问题的段用 `reviewed` 一并报上来**(如 `[1,2,3,…]`),\
+                       **三种 `outcome` 各自要带什么(一次说清,别一条一条试)**:\
+                       `corrected` 必给 `text`(**改后的整句**,不是只写改动的那个词)、`type` 选填;\
+                       `kept`(看过决定不改)必给 `note`(为什么);\
+                       `uncertain`(定不了)必给 `note`(疑似是什么写法);\
+                       三者都要给 `reason`(依据)。**同一段只能有一条结论** ——\
+                       一段里几处改动合并进同一个 `text`;\
+                       `text` 跟原文一字不差会被拒(那不叫改,要保留原句就换 `kept`)。\
+                       一批里所有问题**一次全报**给你,改完再交一次即可。\
+                       \n\n\
+                       **审过、没问题的段用 `reviewed` 报上来**(如 `[1,2,3,…]`);\
+                       一整片没问题就用 `reviewed_ranges` 报闭区间(如一条 from 5 to 300),两者取并集;\
                        否则那些段在系统里跟'压根没审'分不开 —— 而审核门拦的就是跳段。\
                        改过的段自动算审过,不用重复列。",
         annotations(title = "写回转录纠错", read_only_hint = false, idempotent_hint = true)
@@ -303,8 +346,18 @@ impl VidbriefServer {
             });
         }
         let reviewed = p.reviewed;
-        let outcome =
-            blocking(move || vidbrief_ops::apply_corrections(&mut opened, &items, &reviewed)).await?;
+        let ranges: Vec<vidbrief_ops::ReviewedRange> = p
+            .reviewed_ranges
+            .iter()
+            .map(|r| vidbrief_ops::ReviewedRange {
+                from: r.from,
+                to: r.to,
+            })
+            .collect();
+        let outcome = blocking(move || {
+            vidbrief_ops::apply_corrections(&mut opened, &items, &reviewed, &ranges)
+        })
+        .await?;
         Ok(attach_warning(json(&outcome)?, slot.warning()))
     }
 

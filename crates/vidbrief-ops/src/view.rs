@@ -43,7 +43,17 @@ pub fn serve_and_open_workbench(
     open_browser: bool,
 ) -> Result<(PathBuf, String)> {
     let path = render_workbench(opened)?;
-    let url = serve(opened, vidbrief_project::layout::WORKBENCH_FILE, open_browser)?;
+    // 渲染**已经成了**(上面那一步),起服务是"顺手给你个能点开的地址"。
+    // 起不来时说清这件事,并且提示重试就会再试一次 —— 别让调用方以为整件事没干成。
+    // (服务被杀之后**换端口重来**这件事在 `vidbrief_viz::ensure_running` 里兜着;
+    //  2026-09-27 实测:那一层缺了自愈,会话会一直拿着一个死端口报错。)
+    let url = serve(opened, vidbrief_project::layout::WORKBENCH_FILE, open_browser).map_err(|e| {
+        anyhow::anyhow!(
+            "工作台**已经渲染好了**({}),只是本地查看服务没起来:{e:#}\n\
+             再调一次就会重试;或者直接打开那个文件 —— 页面本身能看,只有视频回跳需要服务。",
+            path.display()
+        )
+    })?;
     Ok((path, url))
 }
 

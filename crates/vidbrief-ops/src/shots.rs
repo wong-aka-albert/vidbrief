@@ -623,7 +623,9 @@ mod tests {
     #[test]
     fn a_write_that_lands_mid_batch_is_not_clobbered() {
         let fake = Fake::new("shots-mid-batch")
-            .with_transcript(&[(0.0, 2.0, "大家看一下这张图"), (2.0, 4.0, "还有这里")]);
+            // 两段之间有句号 → 断成两组(各成一条候选);距离又够近(1.0 与 3.0),
+            // 补出来的图正好落在第二条的判定半径里 —— 这一条测的就是那一下
+            .with_transcript(&[(0.0, 2.0, "大家看一下这张图。"), (2.0, 4.0, "还有这里")]);
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")

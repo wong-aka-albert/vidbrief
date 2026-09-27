@@ -47,8 +47,8 @@ pub mod write;
 pub mod testkit;
 
 pub use conclusions::{
-    CorrectionInput, CorrectionOutcome, SectionInput, ShotCheckInput, SummaryOutcome, WriteMode,
-    apply_corrections, record_shot_check, write_note, write_summary,
+    CorrectionInput, CorrectionOutcome, ReviewedRange, SectionInput, ShotCheckInput,
+    SummaryOutcome, WriteMode, apply_corrections, record_shot_check, write_note, write_summary,
 };
 pub use inspect::{
     HealthLevel, HealthView, InspectOptions, InspectReport, Materials, ShotCounts, ToolView,
@@ -59,10 +59,10 @@ pub use inputs::{
     VISUAL_ALGO_VERSION, VisualInputs,
 };
 pub use materials::{
-    SegmentView, ShotDetail, TranscriptView, change_curve, content_mismatches,
-    content_mismatches_of, list_regions, note_transcript_content, save_shots, save_supplements,
-    save_transcript_projection, shot_detail, shot_counts, shots, shots_optional, supplements,
-    transcript, transcript_search,
+    GroupView, SegmentView, ShotDetail, TranscriptGroupsView, TranscriptView, change_curve,
+    content_mismatches, content_mismatches_of, list_regions, note_transcript_content, save_shots,
+    save_supplements, save_transcript_projection, shot_detail, shot_counts, shots, shots_optional,
+    supplements, transcript, transcript_groups, transcript_search,
 };
 pub use preprocess::{
     AnalysisSummary, PreprocessOptions, PreprocessReport, ReuseOutcome, Stage, TranscriptOutcome,

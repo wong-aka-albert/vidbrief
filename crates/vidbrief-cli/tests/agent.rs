@@ -353,11 +353,21 @@ fn p4_summarize_video_tools_all_answer() {
     let mut client = McpClient::start(dir.path());
     client.initialize();
 
-    // 通读转录:还没纠错时读的是原始稿
+    // 通读转录:还没纠错时读的是原始稿。**默认按组给**(一口气说完的一小段)
     let full = as_json(&client.tool_text("get_transcript", json!({"project_id": proj})));
     assert_eq!(full["corrected"], false, "还没有纠错稿:{full}");
-    let segs = full["segments"].as_array().expect("该有段").len();
-    assert!(segs >= 6, "转录段数不对:{full}");
+    let groups = full["groups"].as_array().expect("该有组").len();
+    assert!(groups >= 4, "转录组数不对:{full}");
+    assert_eq!(full["total_groups"], groups, "全量时总数该和返回的一致:{full}");
+    assert_eq!(full["total_segments"], 6, "{full}");
+    let first = &full["groups"][0];
+    assert_eq!(first["from"], 1, "第一组该从第 1 段起:{full}");
+    assert_eq!(first["to"], 2, "前两段首尾相接、又不满 12 秒,该并成一组:{full}");
+    assert!(
+        first["text"].as_str().unwrap_or("").contains("承前启后"),
+        "组的正文该把组里各段接起来:{full}"
+    );
+    assert_eq!(first["state"], "unchecked", "还没审过的组要说清:{full}");
 
     // 只取一段时间
     let part = as_json(&client.tool_text(
@@ -365,8 +375,20 @@ fn p4_summarize_video_tools_all_answer() {
         json!({"project_id": proj, "start": 0.0, "end": 15.0}),
     ));
     assert!(
-        part["segments"].as_array().unwrap().len() < segs,
+        part["groups"].as_array().unwrap().len() < groups,
         "限了时间段却返回了全量:{part}"
+    );
+
+    // 要逐段的原文(已经定位到某一句、要给 corrections 报段号)—— 给 grouped: false
+    let by_segment = as_json(&client.tool_text(
+        "get_transcript",
+        json!({"project_id": proj, "grouped": false}),
+    ));
+    let segs = by_segment["segments"].as_array().expect("该有段").len();
+    assert!(segs >= 6, "逐段读该给全都段:{by_segment}");
+    assert_eq!(
+        by_segment["total_segments"], 6,
+        "两种形状的总数口径该一样:{by_segment}"
     );
 
     // 搜一句话在哪
@@ -602,8 +624,13 @@ fn corrections_close_the_loop_and_leave_the_original_alone() {
     ));
     assert_eq!(outcome["applied"], 2, "{outcome}");
 
-    // 读回来的必须是改后稿,而且工具要**说清读的是哪一份**
-    let after = as_json(&client.tool_text("get_transcript", json!({"project_id": proj})));
+    // 读回来的必须是改后稿,而且工具要**说清读的是哪一份**。
+    // 这一条**逐段**断言(改的是哪几段就该在哪几段读到,按组读是另一条测试的事)——
+    // 已经定位到某一句时读逐段的形状,正是说明书里 `grouped: false` 那条路。
+    let after = as_json(&client.tool_text(
+        "get_transcript",
+        json!({"project_id": proj, "grouped": false}),
+    ));
     assert_eq!(after["corrected"], true, "有纠错稿就该给纠错稿:{after}");
     let texts: Vec<String> = after["segments"]
         .as_array()
@@ -807,7 +834,7 @@ fn a_misspelled_parameter_is_named_back() {
     );
     let parsed = as_json(&ok);
     assert!(
-        !parsed["segments"]
+        !parsed["groups"]
             .as_array()
             .unwrap_or(&Vec::new())
             .is_empty(),

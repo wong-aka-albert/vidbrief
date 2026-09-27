@@ -328,6 +328,172 @@ impl SegmentStats {
     }
 }
 
+/// 组的划分规则 —— **只有浅特征,一处语义判断都不许有**。
+///
+/// 「这两句讲的是同一件事」是**判断**,归 agent(`AGENTS.md` §1 的第三条铁律);
+/// 工具只认一件**形状**上的事:**whisper 按停顿把一句话切碎了**。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct GroupRule {
+    /// 相邻两段之间静音超过它就断开(秒)。
+    pub max_gap_seconds: f64,
+    /// 一组最多多长(秒)。到顶就断,哪怕话没说完。
+    pub max_seconds: f64,
+}
+
+impl Default for GroupRule {
+    fn default() -> Self {
+        Self {
+            max_gap_seconds: 0.35,
+            max_seconds: 12.0,
+        }
+    }
+}
+
+/// 一口气说下来的一小段 —— **核验与通读的单位**。
+///
+/// # 为什么要有这一层
+///
+/// whisper 按停顿切段:70 分钟的视频切出 **2269 段**,一段 1.8 秒、正文常常只有
+/// 三五个字(实测 399 段 ≤4 字)。而审核门要求**每一段都有核验状态** ——
+/// 于是模型每轮要吐两千多个数字、把 2269 段逐段读一遍,上下文当场顶穿
+/// (2026-09-27 五份重跑:491k 输入 / 524k 上限,400 撞墙)。
+///
+/// 组把"一口气说完的一小段"合成一个单位:2269 段 → **387 组**,通读要读的行数
+/// 降到六分之一,表态也一次报一个区间。
+///
+/// # 三条边界(写死)
+///
+/// - **段 id 一个字节都不动**:结论、`evidence.segment`、报告的段芯片、门的逐条报账
+///   全按段 id 引用 —— 重编号等于把用户攒下的东西一次性作废。组只是**段的区间**。
+/// - **组是核验单位,不是材料**:真值永远是**段**(原文)+ **状态**(结论)。
+///   组算错了(把两句并了、把一句拆了)最多让人多点一次名,不污染数据。
+/// - **组不落盘**:它是**现算的**(浅特征 + 原始转录),不是一个可以手改的文件。
+///   落成文件就会多出一条侧门 —— 「把组改大 = 少核验」,而门要么信它(被绕过去),
+///   要么不信它(那文件就只是个摆设)。
+///
+/// 划界读的是 [`Segment::text`](ASR 原文,永不就地改写)而**不是**改后的读法:
+/// 原文不动,组就不会跟着"你刚改的那一句"漂移 —— 模型校准到一半,手上的组号
+/// 整个换了一茬,那是没法干活的。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentGroup {
+    /// 从 1 起(每次现算都从 1 数)。
+    pub id: u32,
+    /// 首段段 id(含)。
+    pub from: u32,
+    /// 末段段 id(含)。
+    pub to: u32,
+    pub start: f64,
+    pub end: f64,
+}
+
+impl SegmentGroup {
+    /// 覆盖几段。
+    pub fn len(&self) -> u32 {
+        self.to.saturating_sub(self.from) + 1
+    }
+
+    /// 全部由一段组成(没什么可并的)。
+    pub fn is_single(&self) -> bool {
+        self.from == self.to
+    }
+
+    /// 与 `[start, end]` 有没有重叠 —— 取一段区间的组时用。
+    pub fn overlaps(&self, start: f64, end: f64) -> bool {
+        self.end >= start && self.start <= end
+    }
+
+    /// 组里读作什么(把各段现读法接起来)。
+    ///
+    /// **不加分隔符**:whisper 的段本来就是半句,中文之间插空格反而读不通。
+    /// 要按语义断句得先看懂内容 —— 那是 agent 的活,不是这里的。
+    ///
+    /// 取段只有一处([`Transcript::segment_slice`]),拼法只有这一处:三处各写一份的话,
+    /// "页面上读得到、凭据却找不到"迟早出现。
+    pub fn text(&self, transcript: &Transcript) -> String {
+        let mut out = String::new();
+        for seg in transcript.segment_slice(self).unwrap_or_default() {
+            out.push_str(seg.effective_text());
+        }
+        out
+    }
+
+    /// 人读的写法:`seg 12–14`。
+    pub fn label(&self) -> String {
+        if self.is_single() {
+            format!("seg {}", self.from)
+        } else {
+            format!("seg {}–{}", self.from, self.to)
+        }
+    }
+
+    /// 这一组读完了没有。**全组都核过才算核过。**
+    ///
+    /// 判据只有这一处(与 [`Segment::review`] 同一套),不让调用方各拼一份 ——
+    /// 拼法一散,迟早出现"门说审完了、界面说没审"。
+    pub fn review(&self, transcript: &Transcript) -> GroupReview {
+        let mut state = GroupReview::Checked;
+        for seg in transcript.segment_slice(self).unwrap_or_default() {
+            match seg.review() {
+                // 未核验是**最先要干的事**,它压过"等用户拍板"那一档
+                SegmentReview::Unchecked => return GroupReview::Unchecked,
+                SegmentReview::NeedsUser => state = GroupReview::NeedsUser,
+                SegmentReview::Checked => {}
+            }
+        }
+        state
+    }
+}
+
+/// 一句话落在哪儿([`Transcript::locate_quote`] 的结果)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuoteHit {
+    /// 引文**起点**所在的那一段 —— 存进 `evidence.segment` 的就是它。
+    pub segment: u32,
+    /// 所在的组号。
+    pub group: u32,
+    /// 那一组的段区间(含)。
+    pub from: u32,
+    pub to: u32,
+}
+
+/// 这一段读完了没有 —— **组的核验状态**。
+///
+/// 判据是"组内**全部**段都核验过"。不能"组里有一段核过就算整组看过":
+/// 那正是「分不出看过没问题」那条顾虑要防的(跳几段不会被发现)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupReview {
+    /// 组内还有没核验的段。
+    Unchecked,
+    /// 核验过,但组内有段在等用户拍板。
+    NeedsUser,
+    /// 全组核过。
+    Checked,
+}
+
+/// 一组里的段首尾都要在(按 id 取切片时用)。
+fn group_of(segments: &[&Segment], index: usize) -> SegmentGroup {
+    let first = segments.first().expect("空组不该被造出来");
+    let last = segments.last().expect("空组不该被造出来");
+    SegmentGroup {
+        id: index as u32 + 1,
+        from: first.id,
+        to: last.id,
+        start: first.start,
+        end: last.end,
+    }
+}
+
+/// 这一段是不是说完了(句末标点)。
+///
+/// 全角 `!?` 用转义写出来 —— 它们在源码里长得和半角一模一样,一眼看不出差别,
+/// 而"哪种标点算句末"正是这里唯一的判据。
+fn ends_a_sentence(text: &str) -> bool {
+    matches!(
+        text.trim_end().chars().next_back(),
+        Some('。' | '…' | '\u{ff01}' | '\u{ff1f}' | '!' | '?')
+    )
+}
+
 /// 结构化转录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,6 +515,119 @@ impl Transcript {
     /// 找出包含时刻 `t` 的段。
     pub fn segment_at(&self, t: f64) -> Option<&Segment> {
         self.segments.iter().find(|s| s.contains(t))
+    }
+
+    /// 按**浅特征**把段并成组 —— 核验与通读的单位(见 [`SegmentGroup`])。
+    pub fn groups(&self) -> Vec<SegmentGroup> {
+        self.groups_with(GroupRule::default())
+    }
+
+    /// 同上,规则自己给。判据只有三个,全是形状上的:
+    /// 相邻段之间的静音够短、整组没超时、上一段不是句末。
+    ///
+    /// 按 **start 升序**切(同一时刻按 id 定序),不看数组里的先后 ——
+    /// 文件格式本身承诺"按 `start` 升序、区间互不重叠"(`transcript.rs` 的 `Transcript`),
+    /// 但读盘那一层不校验它;哪天上游不守约,这里按位置切就会**悄悄切出错组**,
+    /// 而错组不会报错,只会让门少数几组。显式排一次,代价是 n log n 的一次比较。
+    pub fn groups_with(&self, rule: GroupRule) -> Vec<SegmentGroup> {
+        let mut order: Vec<&Segment> = self.segments.iter().collect();
+        order.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.id.cmp(&b.id))
+        });
+
+        let mut out: Vec<SegmentGroup> = Vec::new();
+        let mut start = 0usize;
+        for i in 1..order.len() {
+            let prev = order[i - 1];
+            let cur = order[i];
+            let contiguous = cur.start - prev.end < rule.max_gap_seconds;
+            let within = cur.end - order[start].start <= rule.max_seconds;
+            // **句末断开**这一条对没有标点的 ASR 输出不生效(实测那五份里只有 36 段
+            // 带句号),留着是给带标点的输出用的 —— 它不是判据的主力,主力是时长上限。
+            let sentence_done = ends_a_sentence(&prev.text);
+            if !(contiguous && within && !sentence_done) {
+                out.push(group_of(&order[start..i], out.len()));
+                start = i;
+            }
+        }
+        if start < order.len() {
+            out.push(group_of(&order[start..], out.len()));
+        }
+        out
+    }
+
+    /// 这一段落在哪一组里。**给凭据校验用** —— 引文可以跨段,但不许跨组。
+    pub fn group_holding(&self, segment_id: u32) -> Option<SegmentGroup> {
+        self.groups()
+            .into_iter()
+            .find(|g| (g.from..=g.to).contains(&segment_id))
+    }
+
+    /// 一句话落在**哪一段**上(段号 = 引文**起点**所在的那一段)。
+    ///
+    /// # 为什么不是「逐段包含」
+    ///
+    /// 从前的判据是"这句话必须整句落在某一段里"。可 whisper 按停顿切段,
+    /// 一句话常常横跨两三个碎段 —— 于是材料里明明有的原话被判成"找不到"
+    /// (2026-09-27 实测撞了两次)。现在按**组**找:组是"一口气说完的一小段",
+    /// 组内跨段是常态,跨组才是"两句话"。
+    ///
+    /// 落在哪一段由**拼起来的串里那个起点**决定(不是"第一个能装的段"——
+    /// 那样报出来的段号会比真正的起点靠前,而段号正是留给人事后回去核对的定位)。
+    ///
+    /// 读的是 [`Segment::effective_text`](纠错后的现读法):引文是照着**现在读到的
+    /// 材料**抄的,而材料唯一会变的途径就是纠错。
+    pub fn locate_quote(&self, quote: &str) -> Option<QuoteHit> {
+        let quote = quote.trim();
+        if quote.is_empty() {
+            return None;
+        }
+        for group in self.groups() {
+            let segs = match self.segment_slice(&group) {
+                Some(s) => s,
+                None => continue,
+            };
+            let joined = group.text(self);
+            // 每段在拼串里的起点(字节)—— 只用来比大小,**不拿来切片**,
+            // 所以中文的多字节在这里不构成裸切片风险(AGENTS §1.1)。
+            let mut starts: Vec<(usize, u32)> = Vec::with_capacity(segs.len());
+            let mut cursor = 0usize;
+            for seg in segs {
+                starts.push((cursor, seg.id));
+                cursor += seg.effective_text().len();
+            }
+            let Some(at) = joined.find(quote) else {
+                continue;
+            };
+            let anchor = starts
+                .iter()
+                .rev()
+                .find(|(offset, _)| *offset <= at)
+                .map(|(_, id)| *id)
+                .unwrap_or(group.from);
+            return Some(QuoteHit {
+                segment: anchor,
+                group: group.id,
+                from: group.from,
+                to: group.to,
+            });
+        }
+        None
+    }
+
+    /// 按组取那几段(按 **id** 找首尾,再按**位置**切)。
+    ///
+    /// 不假设"段号 = 数组下标":文件里 ids 从 1 起、按时间排,但读盘那一层不校验,
+    /// 上游不守约时按下标切会悄悄切错(`groups_with` 那段注释说了同一件事)。
+    /// 首尾 id 都在、位置也对得上,才给这一段切片。
+    pub fn segment_slice(&self, group: &SegmentGroup) -> Option<&[Segment]> {
+        let a = self.segments.iter().position(|s| s.id == group.from)?;
+        let b = self.segments.iter().position(|s| s.id == group.to)?;
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        Some(&self.segments[lo..=hi])
     }
 
     /// 取 `[start, end]` 区间内重叠的所有段。
@@ -635,5 +914,208 @@ mod tests {
         let text = crate::json::to_pretty_string(&t).unwrap();
         let back: Transcript = serde_json::from_str(&text).unwrap();
         assert_eq!(back, t);
+    }
+
+    // ── 组:核验与通读的单位(2026-09-27,清账十七) ──────────────────────
+
+    /// 连成一气的三句合成一组;中间空一下(静音)就从那儿断开。
+    #[test]
+    fn a_pause_breaks_the_group() {
+        let mut t = transcript();
+        // 2 与 3 之间留 3 秒 —— 超过 0.35s 的静音阈值
+        t.segments[2].start = 9.0;
+        t.segments[2].end = 11.0;
+
+        let groups = t.groups();
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!((groups[0].from, groups[0].to), (1, 2));
+        assert_eq!((groups[1].from, groups[1].to), (1 + 2, 3));
+        assert_eq!(groups[0].id, 1);
+        assert_eq!(groups[1].id, 2);
+        assert!(!groups[0].is_single());
+        assert!(groups[1].is_single());
+        assert_eq!(groups[0].label(), "seg 1–2");
+        assert_eq!(groups[1].label(), "seg 3");
+    }
+
+    /// 一口气说个不停也要断开:一组最多 12 秒 —— 不然一段安静的长独白会并成一组。
+    #[test]
+    fn a_long_monologue_is_cut_by_the_duration_cap() {
+        let seg = |id: u32, start: f64, end: f64, text: &str| Segment {
+            id,
+            start,
+            end,
+            text: text.to_string(),
+            conclusion: None,
+            checked_at: None,
+        };
+        // 每段 5 秒、首尾相接,共 20 秒
+        let t = Transcript {
+            source: RelPath::new("source/video.mp4").unwrap(),
+            model: "m".into(),
+            language: "zh".into(),
+            duration: 20.0,
+            generated_at: crate::now(),
+            segments: (0..4)
+                .map(|i| {
+                    let start = i as f64 * 5.0;
+                    seg(i + 1, start, start + 5.0, "一直说一直说")
+                })
+                .collect(),
+        };
+
+        let groups = t.groups();
+        assert_eq!(groups.len(), 2, "12 秒的上限该把它切成 2 组:{groups:?}");
+        assert_eq!((groups[0].from, groups[0].to), (1, 2));
+        assert!(groups[0].end - groups[0].start <= 12.0);
+        assert_eq!((groups[1].from, groups[1].to), (3, 4));
+    }
+
+    /// 句末标点断开(对带标点的 ASR 输出才有用 —— 那五份实测里只有 36 段带句号)。
+    #[test]
+    fn a_full_stop_ends_the_group() {
+        let mut t = transcript();
+        t.segments[1].text = "今天用一个很短的小样例过一遍流程。".into();
+        let groups = t.groups();
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!((groups[0].from, groups[0].to), (1, 2));
+    }
+
+    /// **组跟着原文走,不跟着纠错漂移。**
+    ///
+    /// 划界读的是 ASR 原文(永不就地改写),所以模型校准到一半、改了几段正文,
+    /// 手上的组号还是原来那套 —— 不然它得重新通读一遍才知道自己读到哪儿了。
+    #[test]
+    fn groups_do_not_drift_when_text_is_corrected() {
+        let t = transcript();
+        let before = t.groups();
+
+        let mut after = t.clone();
+        // 改掉正文、甚至把标点也改了(改后版本结尾多了句号)
+        after.segments[0].conclusion = Some(corrected("各位好,我们开始。"));
+        after.segments[1].checked_at = Some(crate::now());
+        after.segments[2].conclusion = Some(Conclusion::Uncertain {
+            note: "疑似漏字".into(),
+            reason: "听不清".into(),
+        });
+
+        assert_eq!(after.groups(), before, "组不该跟着纠错漂移");
+    }
+
+    /// 组的核验状态:**组内全核过才算核过**;有未核验的压过"等用户拍板"。
+    #[test]
+    fn a_group_is_checked_only_when_all_of_its_segments_are() {
+        let mut t = transcript();
+        for s in &mut t.segments {
+            s.checked_at = Some(crate::now());
+        }
+        let g = &t.groups()[0];
+        assert_eq!(g.review(&t), GroupReview::Checked);
+
+        t.segments[1].checked_at = None;
+        assert_eq!(g.review(&t), GroupReview::Unchecked, "剩一段没核就是没核");
+
+        // 未核验那一段补上、另一段标存疑 → 这一组是在等人拍板
+        t.segments[1].checked_at = Some(crate::now());
+        t.segments[2].conclusion = Some(Conclusion::Uncertain {
+            note: "疑似漏字".into(),
+            reason: "听不清".into(),
+        });
+        assert_eq!(g.review(&t), GroupReview::NeedsUser);
+
+        // 两者同时存在时,未核验优先 —— 那是还没干完的活
+        t.segments[1].checked_at = None;
+        assert_eq!(g.review(&t), GroupReview::Unchecked);
+    }
+
+    /// 组覆盖到每一段,一段不漏、不重、id 连续。
+    #[test]
+    fn the_groups_cover_every_segment_exactly_once() {
+        let t = transcript();
+        let groups = t.groups();
+        // 这一份首尾相接、总共 8.9 秒 —— 并成一组
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        let flat: Vec<u32> = groups.iter().flat_map(|g| g.from..=g.to).collect();
+        let ids: Vec<u32> = t.segments.iter().map(|s| s.id).collect();
+        assert_eq!(flat, ids);
+        assert_eq!(groups[0].id, 1);
+
+        // 断开之后,两组的区间首尾相接、号也接着数
+        let mut split = t.clone();
+        split.segments[2].start = 9.0;
+        split.segments[2].end = 11.0;
+        let groups = split.groups();
+        assert_eq!(
+            groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let flat: Vec<u32> = groups.iter().flat_map(|g| g.from..=g.to).collect();
+        assert_eq!(flat, ids, "断开也不许漏段");
+    }
+
+    /// **一句话跨几个碎段**:照样找得到,段号落在引文的**起点**那一段。
+    #[test]
+    fn a_quote_may_span_segments_and_anchors_where_it_starts() {
+        let t = transcript();
+        // 「小样例过一遍流程现在是讲解人画面」横跨第 2、3 两段
+        let hit = t.locate_quote("小样例过一遍流程现在是讲解人画面").expect("该找得到");
+        assert_eq!(hit.segment, 2, "落在起点那一段:{hit:?}");
+
+        // 整句在一段里 → 还是那一段
+        assert_eq!(t.locate_quote("各位好").unwrap().segment, 1);
+        // 头尾空白不算数
+        assert_eq!(t.locate_quote("  各位好 ").unwrap().segment, 1);
+        // 组号也给出来了
+        assert_eq!(t.locate_quote("各位好").unwrap().group, 1);
+
+        // 空引文 / 材料里没有的 → 找不到
+        assert!(t.locate_quote("   ").is_none());
+        assert!(t.locate_quote("这句话不在材料里").is_none());
+    }
+
+    /// **跨组不算**:那是两句话,不该拿它当一条凭据。
+    #[test]
+    fn a_quote_across_two_groups_is_refused() {
+        let mut t = transcript();
+        // 让 2、3 之间断开 → 「各位好」在组 1,后两句在组 2
+        t.segments[2].start = 9.0;
+        t.segments[2].end = 11.0;
+        assert_eq!(t.groups().len(), 2);
+
+        assert!(
+            t.locate_quote("小样例过一遍流程现在是讲解人画面").is_none(),
+            "跨组的引文不该被认下"
+        );
+        // 组里的那半句还认
+        assert_eq!(t.locate_quote("现在是讲解人画面").unwrap().segment, 3);
+    }
+
+    /// 凭据是照**现读法**抄的:段里的字改过之后,引改后的那句话照样落在那一段上。
+    #[test]
+    fn a_quote_anchors_against_the_text_you_actually_read() {
+        let mut t = transcript();
+        t.segments[0].conclusion = Some(corrected("各位好,咱们开始"));
+        assert_eq!(t.locate_quote("各位好,咱们开始").unwrap().segment, 1);
+    }
+
+    /// 一组落在哪一段上:`group_holding` 反向查。
+    #[test]
+    fn group_holding_finds_the_group_of_a_segment() {
+        let mut t = transcript();
+        t.segments[2].start = 9.0;
+        t.segments[2].end = 11.0;
+        assert_eq!(t.group_holding(1).unwrap().id, 1);
+        assert_eq!(t.group_holding(2).unwrap().id, 1, "1、2 是一组");
+        assert_eq!(t.group_holding(3).unwrap().id, 2);
+        assert!(t.group_holding(99).is_none(), "没有的段号 → 没有的组");
+    }
+
+    /// 空转录不炸:一组都没有。
+    #[test]
+    fn an_empty_transcript_has_no_groups() {
+        let mut t = transcript();
+        t.segments.clear();
+        assert!(t.groups().is_empty());
+        assert!(t.locate_quote("各位好").is_none());
     }
 }

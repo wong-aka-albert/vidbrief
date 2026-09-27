@@ -329,6 +329,11 @@ pub struct UpgradeOutcome {
 ///
 /// `fresh` = 什么都不收,起一份空的:所有核验记录清零,材料原样保留。
 /// 那是留给"状态坏了、也不想照明文将就"的人的。
+///
+/// **`fresh` 清的只是核验记录**:步 1 的完成标记(`progress.preprocess`)保留 ——
+/// 它答的是「这趟算法活儿跑完了没有」,而材料一个字节都没动,答案没变。
+/// 清掉它,`status` 就会报「① 前处理 — 未做」而材料齐全 —— 自相矛盾,
+/// 而且显示上分不出"没跑过"和"跑过、状态被重起过"([260927-16] 记着那次排查)。
 pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
     let layout = resolve(arg)?;
     // 自己取锁:这条路要能在"项目打不开"的时候跑,所以不走 `with_write`
@@ -376,6 +381,14 @@ pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
         }
     }
 
+    // `--fresh` 走这条路重新起一份状态。**先把旧那份读下来**(读得动的话)——
+    // 它里面有两样东西不该跟着清(见下面那段)。
+    let previous = if opts.fresh {
+        ProjectState::read_file(&layout.state_file()).ok().flatten()
+    } else {
+        None
+    };
+
     let mut state = ProjectState::new();
     if let Some(legacy) = &legacy {
         state.rev = legacy.rev;
@@ -385,7 +398,21 @@ pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
 
     let mut note = None;
     if opts.fresh {
-        note = Some("`--fresh`:什么都没收 —— 已有的核验记录清零,材料原样保留。".to_string());
+        if let Some(old) = &previous {
+            // **步 1 的完成标记不是核验记录**,它记的是「这趟算法活儿跑完了没有」。
+            // 而 `--fresh` 明确保住材料(还要照它们重记底账)—— 那条事实一个字没变。
+            // 清掉它只会让 `status` 报「① 前处理 — 未做」而材料齐全,**自相矛盾**;
+            // 2026-09-27 实测就是被它带进沟里的:查了半天"标记怎么丢了",
+            // 结论是它按上面这条设计被清了,而显示上分不出"没跑过"和"跑过、状态被重起过"。
+            state.progress.preprocess = old.progress.preprocess.clone();
+            // `rev` 一路往上走,**不倒退** —— 倒退的那个号会让人以为文件是旧的
+            state.rev = old.rev;
+        }
+        note = Some(
+            "`--fresh`:什么都没收 —— 已有的核验记录清零,材料原样保留。\
+             (步 1 的完成标记保留:材料没动,那条事实没变)"
+                .to_string(),
+        );
     } else {
         // 明文里那几份材料:读得动就收,读不动就**报错**(不许当没有 ——
         // 一次静默的"没有结论"会让升级这件事本身变成一把抹掉记录的刀)
@@ -1194,5 +1221,53 @@ mod tests {
 
         // 材料原样:投影不写、内容不动
         assert_eq!(std::fs::read(fake.layout().shots_json()).unwrap(), shots_before);
+    }
+
+    /// **`--fresh` 清的是核验记录,不是「步 1 做完了」那件事。**
+    ///
+    /// 2026-09-27 实测踩过:五份项目跑过一次 `--fresh` 重做模型那部分,材料一个字节
+    /// 没动,而 `status` 从此报「① 前处理 — 未做」—— 显示上分不出"没跑过"和
+    /// "跑过、状态被重起过",查了半天"标记怎么丢了"。
+    /// 步 1 的标记记的是**这趟算法活儿跑完了没有**,材料还在,它就还成立。
+    #[test]
+    fn upgrade_fresh_keeps_the_step_one_mark_but_clears_the_checks() {
+        let fake = crate::testkit::Fake::new("upgrade-fresh-keeps-mark")
+            .with_transcript(&[(0.0, 2.0, "各位好")])
+            .with_shot(1, 2.0);
+        fake.set_shot_check(1, Some(a_check()));
+        {
+            let mut opened = fake.open();
+            opened.state_mut().progress.preprocess.mark_done();
+            opened.state_mut().progress.summarize.mark_done();
+            opened.save().unwrap();
+        }
+        let before = vidbrief_project::ProjectState::read_file(&fake.layout().state_file())
+            .unwrap()
+            .unwrap();
+        assert!(before.progress.preprocess.done && before.progress.summarize.done);
+
+        let out = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions {
+                fresh: true,
+                accept_material: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.shot_checks, 0, "核验记录该清零");
+        assert!(!out.progress_moved, "没有旧格式的进度要搬");
+
+        let after = vidbrief_project::ProjectState::read_file(&fake.layout().state_file())
+            .unwrap()
+            .unwrap();
+        assert!(after.progress.preprocess.done, "步 1 的完成标记不该被清");
+        assert!(!after.progress.summarize.done, "总结是模型产物,该清");
+        assert!(after.shots.is_empty(), "核验记录该清");
+        assert!(
+            after.rev > before.rev,
+            "rev 该往上走、不倒退({} → {})",
+            before.rev,
+            after.rev
+        );
     }
 }

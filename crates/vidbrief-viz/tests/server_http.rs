@@ -25,11 +25,37 @@ fn stage(tag: &str) -> PathBuf {
         .join(format!("viz-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("01_preprocess/shots")).unwrap();
-    std::fs::write(dir.join("project.json"), br#"{"ok":true}"#).unwrap();
+    // 一份**能渲染**的项目材料:工作台那一页是**现算**的(见 `html::workbench_page`),
+    // 静态文件那条路仍然照旧 —— 这里留一份旧快照,用来证明发出去的不是它。
+    std::fs::write(
+        dir.join("project.json"),
+        br#"{"schema_version":2,"id":"demo","name":"viz-test",
+             "created_at":"2026-09-24T21:00:00+08:00",
+             "source":{"path":"source.mp4","original":"D:/videos/demo.mp4","link":"hardlink"},
+             "glossary":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("01_preprocess/change_curve.json"),
+        br#"{"source":"source.mp4","duration":10.0,"fps_sampled":1.0,
+             "width":480,"height":270,"metric":"hist_l1_0.75+luma_0.25",
+             "generated_at":"2026-09-24T21:03:11+08:00",
+             "changes":[{"t":0.0,"score":0.0},{"t":1.0,"score":0.5}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("01_preprocess/dense_regions.json"),
+        br#"{"generated_at":"2026-09-24T21:03:11+08:00",
+             "params":{"window":8.0,"peak_threshold":0.25,"mass_k":3.0,"mass_floor":0.6,
+                       "merge_gap":4.0,"static_break":120.0},
+             "stats":{"sampled_points":2,"mass_median":0.25,"mass_threshold":0.6},
+             "regions":[]}"#,
+    )
+    .unwrap();
     // 1000 字节,内容 = 字节值 % 251,便于逐字节校验 Range
     let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(dir.join("source.mp4"), &payload).unwrap();
-    std::fs::write(dir.join("01_preprocess/workbench.html"), "<html>hi</html>").unwrap();
+    std::fs::write(dir.join("01_preprocess/workbench.html"), "<html>旧快照</html>").unwrap();
     std::fs::write(dir.join("01_preprocess/shots/a.jpg"), b"jpeg").unwrap();
     // 挂载根之外的一个文件,用来验证第二道关卡。
     // 内容用一个**不会出现在任何错误信息里**的标记 —— 否则"回显了路径"会被误判成"泄露了内容"。
@@ -172,7 +198,11 @@ fn directory_index_defaults_to_project_json() {
 
     let r = http(port, "GET", &format!("/{id}/"), None);
     assert_eq!(r.status, 200);
-    assert_eq!(r.body, br#"{"ok":true}"#);
+    assert!(
+        r.body.windows(11).any(|w| w == br#""id":"demo""#),
+        "目录默认给 project.json:{}",
+        String::from_utf8_lossy(&r.body)
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

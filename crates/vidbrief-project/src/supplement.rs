@@ -15,11 +15,19 @@ use crate::ids::ShotId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {
-    /// 该段含指代性表达(看这里 / 这边显示 / 大家看屏幕 / 这个图 / 这一段 / 形态…)。
+    /// 该组含指代性表达(看这里 / 这边显示 / 大家看屏幕 / 这个图 / 这一段 / 形态…)。
     DeicticPhrase,
-    /// 该处附近(±`window` 秒)没有任何截图。
+    /// **历史值:不再产生**(2026-09-27,[260927-16])。
+    ///
+    /// 它曾经是"该处附近(±`window` 秒)没有任何截图"单独构成的候选 —— 实测四份视频
+    /// 95~99% 的段都命中它,而 agent 一条都没补(3700 条候选、0 条 accepted):
+    /// 讲授型视频里"离上一张图超过 3 秒"几乎恒真。现在这一条只做**信息**
+    /// (出现在 [`Trigger::Both`] 里),不再单独列候选。
+    ///
+    /// **留着这个变体是为了读老文件**:已经落盘的 `supplement_requests.json` 里有它,
+    /// 删掉就等于让那些项目读不动(`deny_unknown_fields` 那一层会直接拒)。
     NoShotNearby,
-    /// 两条都命中。
+    /// 两条都命中:嘴上指了画面,附近又确实没图 —— 最该看一眼的那一类。
     Both,
 }
 
@@ -41,11 +49,11 @@ pub enum SupplementStatus {
 pub struct SupplementRequest {
     /// 项目内唯一,从 1 起。
     pub id: u32,
-    /// 建议补图的时刻(通常取该转录段的中点)。
+    /// 建议补图的时刻(取**组**的中点)。
     pub t: f64,
-    /// 触发本候选的转录段 id。
+    /// 触发本候选的那一组的**首段** id。
     pub segment_id: u32,
-    /// 该段转录原文 —— 让人一眼看出为什么它被列出来,不用回查别处。
+    /// 那一组的转录原文(**整组、现读法**)—— 让人一眼看出为什么它被列出来,不用回查别处。
     pub text: String,
     pub trigger: Trigger,
     /// 现有截图里离 `t` 最近的一张;项目里还没有截图时为 `None`。

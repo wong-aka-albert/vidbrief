@@ -244,19 +244,17 @@ pub fn stale_anchors(opened: &OpenProject, report: &Report) -> Vec<String> {
             let vidbrief_project::TopicSource::Speaker { segment, quote } = source else {
                 continue;
             };
-            let hit = transcript
-                .segments
-                .iter()
-                .find(|s| s.effective_text().contains(quote.as_str()));
-            match hit {
+            // 按**组**找(引文可以横跨几个碎段),段号 = 引文起点那一段 ——
+            // 与工具侧 `record_shot_check` 一个判据,免得"写的时候过了、复核说过期"。
+            match transcript.locate_quote(quote) {
                 None => out.push(format!(
                     "{who}引的讲者原话在转录里找不到了 ——「{}」;\
                      读者会拿它回去核,而那句话已经不在材料里",
                     short(quote, 40)
                 )),
-                Some(now) if now.id != *segment => out.push(format!(
+                Some(hit) if hit.segment != *segment => out.push(format!(
                     "{who}引的讲者原话现在落在 seg {} 里(报告上记的是 seg {segment})—— 段号飘了",
-                    now.id
+                    hit.segment
                 )),
                 Some(_) => {}
             }
@@ -409,12 +407,27 @@ pub fn build_report(
 
     // 页面要播视频(点锚点回跳),所以要有个本地服务 —— 与两个视图同一条路(§9.1)。
     // 起不起由调用方定(MCP 常驻会话 vs 命令行跑完就走,见 [`Serving`])。
+    //
+    // **起不来不算这次调用的失败**:这次调用的活是"把报告落下来",而数据与两个投影
+    // 上面已经写完了。实测(2026-09-27,样本 C 那趟):会话挂的查看服务被误关,
+    // 这里一个 `?` 把整次调用炸掉 —— 报告在盘上、`④ 报告` 却没标记,agent 拿到一个
+    // error 以为自己没成。**便利动作失败不该连坐真动作**。
+    let mut warnings = damaged;
     let url = match (report_html.as_ref(), serving) {
-        (Some(_), Serving::On { open_browser }) => Some(crate::view::serve_view(
+        (Some(_), Serving::On { open_browser }) => match crate::view::serve_view(
             opened,
             vidbrief_project::layout::REPORT_HTML_FILE,
             open_browser,
-        )?),
+        ) {
+            Ok(url) => Some(url),
+            Err(e) => {
+                warnings.push(format!(
+                    "报告已经落盘了,但**本地预览服务没起来**:{e:#}\
+                     —— 想再看那一页,重新渲染一次就会再试:`vidbrief ui <项目> --view report`"
+                ));
+                None
+            }
+        },
         _ => None,
     };
 
@@ -431,7 +444,7 @@ pub fn build_report(
         url,
         self_contained: images == ImageMode::Embedded,
         stale_anchors: stale,
-        warnings: damaged,
+        warnings,
         derived_segments,
     })
 }
@@ -777,7 +790,7 @@ mod tests {
                 checked_at: vidbrief_project::now(),
             });
         }
-        crate::conclusions::apply_corrections(opened, &[], segment_ids).unwrap();
+        crate::conclusions::apply_corrections(opened, &[], segment_ids, &[]).unwrap();
     }
 
     /// 一份"用户要的口味":详细 + 大白话。测试里当缺省用 ——

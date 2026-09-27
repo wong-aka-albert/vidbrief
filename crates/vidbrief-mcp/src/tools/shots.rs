@@ -88,7 +88,8 @@ impl VidbriefServer {
                        写进 `02_calibrate/supplement_requests.json` 并返回。\
                        **这只是候选,不是结论** —— 用户说「看这里」不代表真有个图要看,\
                        逐条自己判断;确实要补的再调 extract_shot。\
-                       再次调用会保留你上次对同一段的判断。\
+                       再次调用会保留你上次对同一组的判断(**返回里只有还没表态的那些**,\
+                       已处置的留在项目文件里,不再占你的上下文)。\
                        每一条候选都要有结论:补(`extract_shot`)或者不补(`disposition_supplements`)。",
         annotations(title = "找补图候选", read_only_hint = false, idempotent_hint = true)
     )]
@@ -99,11 +100,24 @@ impl VidbriefServer {
         let window = p.window.unwrap_or_else(vidbrief_ops::supplement_window);
         let rebuild = p.rebuild.unwrap_or(false);
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
-        let requests = blocking(move || {
+        let list = blocking(move || {
             vidbrief_ops::find_supplement_candidates(&mut opened, window, rebuild)
         })
         .await?;
-        Ok(attach_warning(json(&requests)?, slot.warning()))
+        // **交回给 agent 的只有还没表态的。** 已处置的留在文件里(那是这一轮的账,
+        // 页面与 `vidbrief status` 都看得到),但对 agent 来说它们只是上下文:
+        // 实测一份 2235 条候选的项目里全部都是"已拒绝",重跑一次又会把它们整份塞回去,
+        // 白白再顶一次上下文 —— 而 agent 对它们无事可做(改主意要重看,那是页面上的事)。
+        let pending: Vec<&vidbrief_project::SupplementRequest> = list.pending().collect();
+        Ok(attach_warning(
+            json(&serde_json::json!({
+                "window": list.window,
+                "pending": pending.len(),
+                "decided": list.requests.len() - pending.len(),
+                "requests": pending,
+            }))?,
+            slot.warning(),
+        ))
     }
 
     #[tool(
