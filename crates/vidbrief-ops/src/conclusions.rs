@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use vidbrief_project::{
-    Conclusion, CorrectionType, Confidence, RelPath, ShotCheck, Transcript,
+    Conclusion, Confidence, CorrectionType, RelPath, ShotCheck, Transcript, without_punctuation,
 };
 
 use crate::project::OpenProject;
@@ -171,6 +171,8 @@ pub struct CorrectionOutcome {
     pub applied: usize,
     /// 全稿里**改了正文**的段数(累计)。
     pub corrected: usize,
+    /// 全稿里**只加了标点 / 断句**的段数(累计,字一个没动)。
+    pub punctuated: usize,
     /// 全稿里**决定不改**的段数(累计)。
     pub kept: usize,
     /// 全稿里"存疑但未改"的段数(累计)。
@@ -293,14 +295,18 @@ pub fn apply_corrections(
              \n\
              {}\n\
              \n\
-             三种 `outcome` 各自要带什么(一次说清):\n\
+             四种 `outcome` 各自要带什么(一次说清):\n\
              - `corrected` —— 必给 `text`(**改后的整句**,不是只写改动的那个词);\
-             `type` 选填;`text` 跟原文一字不差会被拒(要保留原句就换 `kept`)\n\
+             `type` 选填;`text` 跟原文一字不差会被拒(要保留原句就换 `kept`),\
+             跟原文只差标点也会被拒(那一档叫 `punctuated`)\n\
+             - `punctuated` —— 必给 `text`(**加了标点之后的整段**);\
+             只许往原文里插标点:去掉标点之后必须跟原文一字不差(动了字就用 `corrected`);\
+             这一档不给 `note` / `reason`\n\
              - `kept` —— 必给 `note`(为什么决定不改)\n\
              - `uncertain` —— 必给 `note`(疑似是什么写法)\n\
-             三者都要给 `reason`(依据:画面文字 / 上下文 / 术语表)。\n\
+             除 `punctuated` 外都要给 `reason`(依据:画面文字 / 上下文 / 术语表)。\n\
              **一段只能有一条结论**:同一段有几处改动,合并进同一个 `text`。\n\
-             `reviewed` / `reviewed_ranges` 报的是**审过、没问题**的那些段,和上面这三个无关。",
+             `reviewed` / `reviewed_ranges` 报的是**审过、没问题**的那些段,和上面这四个无关。",
             trouble.len(),
             trouble
                 .iter()
@@ -355,6 +361,7 @@ pub fn apply_corrections(
         total_segments: fixed.segments.len(),
         applied: items.len(),
         corrected: stats.corrected,
+        punctuated: stats.punctuated,
         kept: stats.kept,
         uncertain: stats.uncertain,
         reviewed: fixed
@@ -395,6 +402,16 @@ fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
             continue;
         };
         let id = item.segment_id;
+        // `reason` 是事后复核的唯一线索 —— 除断句外都得写。schema 那边它现在是**选填**
+        // (断句不用给),所以"写没写"这条判在工具这边,和别的毛病一起一次列全。
+        if !matches!(&item.conclusion, Conclusion::Punctuated { .. })
+            && item.conclusion.reason().trim().is_empty()
+        {
+            out.push(format!(
+                "第 {id} 段没给 `reason`(依据:画面文字 / 上下文 / 术语表)—— \
+                 除 `punctuated` 外,每一种结论都要写"
+            ));
+        }
         match &item.conclusion {
             Conclusion::Corrected { text, .. } => {
                 if text.trim().is_empty() {
@@ -407,6 +424,32 @@ fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
                     out.push(format!(
                         "第 {id} 段的 `text` 和原文一字不差 —— 那不叫改;\
                          要保留原句就换成 `outcome = kept`(并写清为什么决定不改)"
+                    ));
+                } else if without_punctuation(text) == without_punctuation(&segment.text) {
+                    out.push(format!(
+                        "第 {id} 段的 `text` 跟原文**只差标点**(字一个没动)—— \
+                         这一档有专门的 `outcome = punctuated`,账上要跟'改了字'分开;\
+                         换成它,并把 `note` / `reason` 去掉"
+                    ));
+                }
+            }
+            Conclusion::Punctuated { text } => {
+                if text.trim().is_empty() {
+                    out.push(format!(
+                        "第 {id} 段说加了断句(`outcome = punctuated`),却没给 `text` —— \
+                         要的是**加了标点之后的整段**(不是只给标点)"
+                    ));
+                } else if text == &segment.text {
+                    out.push(format!(
+                        "第 {id} 段标了 `punctuated`,可 `text` 跟原文一字不差 —— 一个字都没加。\
+                         这一段要是没问题,报进 `reviewed` / `reviewed_ranges` 就够,不用单列一条"
+                    ));
+                } else if without_punctuation(text) != without_punctuation(&segment.text) {
+                    out.push(format!(
+                        "第 {id} 段标的是「只加标点」(`outcome = punctuated`),可正文里的**字**动了 —— {}。\
+                         改字要用 `outcome = corrected`(那才记 `type` / `note`);\
+                         `punctuated` 只许往原文里插标点",
+                        first_difference(&segment.text, text)
                     ));
                 }
             }
@@ -429,6 +472,42 @@ fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
     out
 }
 
+/// 第一处**字**不一样的地方,写成一句能照着改的话。
+///
+/// 只在"标的是只加标点、实际动了字"这条上用到 —— 光说"不一样"没用,
+/// 得让它看见是哪一段的哪几个字。比对在**去了标点的两份串**上做,
+/// 否则"你加的那个逗号"会被当成第一处不同。
+///
+/// 全程按字符走:中文一个字 3 字节,按字节下标切会 panic(`AGENTS.md` §1.1)。
+fn first_difference(old: &str, new: &str) -> String {
+    let a: Vec<char> = without_punctuation(old).chars().collect();
+    let b: Vec<char> = without_punctuation(new).chars().collect();
+    let at = a
+        .iter()
+        .zip(b.iter())
+        .position(|(x, y)| x != y)
+        .unwrap_or_else(|| a.len().min(b.len()));
+
+    let window = |chars: &[char]| -> String {
+        let lo = at.saturating_sub(6);
+        let hi = (at + 7).min(chars.len());
+        let mut out: String = chars[lo..hi].iter().collect();
+        if lo > 0 {
+            out.insert(0, '…');
+        }
+        if hi < chars.len() {
+            out.push('…');
+        }
+        out
+    };
+    format!(
+        "第 {} 个字起:原文「{}」,你给的「{}」",
+        at + 1,
+        window(&a),
+        window(&b)
+    )
+}
+
 /// 把一条结论校准到可以落盘 —— **只补能自动补的**。
 ///
 /// 校验已经在 [`check_items`] 那一趟里做过了(一次列全);走到这里的东西都是合规的,
@@ -449,6 +528,9 @@ fn polish(conclusion: &Conclusion, original: &str) -> Conclusion {
                 given => given.to_string(),
             },
             reason: reason.trim().to_string(),
+        },
+        Conclusion::Punctuated { text } => Conclusion::Punctuated {
+            text: text.trim().to_string(),
         },
         Conclusion::Kept { note, reason } => Conclusion::Kept {
             note: note.trim().to_string(),
@@ -519,9 +601,11 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
     // 不会出现"改过 27 + 存疑未改 0 ≠ 合计动过 40"这种事(第五轮实测)。
     let stats = fixed.stats();
     out.push_str(&format!(
-        "- 全稿 {} 段:改了 {} 段,决定不改 {} 段,存疑未改 {} 段,合计动过 {} 段\n\n",
+        "- 全稿 {} 段:**改了 {} 段**、**加了断句 {} 段**(字一个没动)、决定不改 {} 段、\
+         存疑未改 {} 段 —— 合计动过 {} 段\n\n",
         stats.total,
         stats.corrected,
+        stats.punctuated,
         stats.kept,
         stats.uncertain,
         stats.touched()
@@ -532,36 +616,82 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
         return out;
     }
 
-    out.push_str("| # | 时刻 | 原文 | 改后 | 类型 | 说明 | 依据 |\n");
-    out.push_str("|---|------|------|------|------|------|------|\n");
-    for seg in &fixed.segments {
-        let Some(conclusion) = &seg.conclusion else {
-            continue;
-        };
-        let original = raw
-            .segments
-            .iter()
-            .find(|s| s.id == seg.id)
-            .map(|s| s.text.as_str())
-            .unwrap_or(&seg.text);
-        let after = match conclusion {
-            Conclusion::Corrected { text, .. } => cell(text),
-            Conclusion::Kept { .. } => "(决定不改,保留原句)".to_string(),
-            Conclusion::Uncertain { .. } => "(存疑未改)".to_string(),
-        };
+    if stats.rewritten() > 0 {
+        out.push_str("## 动了字的\n\n");
+        out.push_str("| # | 时刻 | 原文 | 改后 | 类型 | 说明 | 依据 |\n");
+        out.push_str("|---|------|------|------|------|------|------|\n");
+        for seg in &fixed.segments {
+            let Some(conclusion) = &seg.conclusion else {
+                continue;
+            };
+            if matches!(conclusion, Conclusion::Punctuated { .. }) {
+                continue; // 断句另开一节:混在一起会把这几行淹掉
+            }
+            let original = raw
+                .segments
+                .iter()
+                .find(|s| s.id == seg.id)
+                .map(|s| s.text.as_str())
+                .unwrap_or(&seg.text);
+            let after = match conclusion {
+                Conclusion::Corrected { text, .. } => cell(text),
+                Conclusion::Punctuated { .. } => unreachable!("上面已经跳过"),
+                Conclusion::Kept { .. } => "(决定不改,保留原句)".to_string(),
+                Conclusion::Uncertain { .. } => "(存疑未改)".to_string(),
+            };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                seg.id,
+                clock(seg.start),
+                cell(original),
+                after,
+                kind_name(conclusion),
+                cell(conclusion.note()),
+                cell(conclusion.reason()),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // 断句:几百行"原文 → 只是多了逗号"的对照,贴上来只会把上面那张表淹掉。
+    // 全量本来就是**纠错稿本身**(逐段可读),这里给个头 20 条让人看一眼手感,并说清这一点。
+    let punctuated: Vec<&vidbrief_project::Segment> = fixed
+        .segments
+        .iter()
+        .filter(|s| s.is_punctuated())
+        .collect();
+    if !punctuated.is_empty() {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
-            seg.id,
-            clock(seg.start),
-            cell(original),
-            after,
-            kind_name(conclusion),
-            cell(conclusion.note()),
-            cell(conclusion.reason()),
+            "## 只加了断句的({} 段)\n\n\
+             标点加在哪儿,**读纠错稿最清楚**(`{}`,逐段可读)。\
+             这里只列前 {} 条,免得把这份对照表撑成几百行。\n\n",
+            punctuated.len(),
+            vidbrief_project::layout::TRANSCRIPT_FIXED_FILE,
+            PUNCTUATED_SHOWN.min(punctuated.len()),
         ));
+        out.push_str("| # | 时刻 | 原文 | 加了标点之后 |\n");
+        out.push_str("|---|------|------|------|\n");
+        for seg in punctuated.iter().take(PUNCTUATED_SHOWN) {
+            let original = raw
+                .segments
+                .iter()
+                .find(|s| s.id == seg.id)
+                .map(|s| s.text.as_str())
+                .unwrap_or(&seg.text);
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                seg.id,
+                clock(seg.start),
+                cell(original),
+                cell(seg.effective_text()),
+            ));
+        }
     }
     out
 }
+
+/// 对照表里断句那一节列多少条(全量在纠错稿里)。
+const PUNCTUATED_SHOWN: usize = 20;
 
 /// Markdown 表格单元格:竖线会把列拆掉,换行会把行拆掉,都得先拍平。
 fn cell(text: &str) -> String {
@@ -1207,6 +1337,8 @@ mod tests {
             (2.0, 4.0, "乙"),
             (4.0, 6.0, "丙"),
             (6.0, 8.0, "丁"),
+            (8.0, 10.0, "戊"),
+            (10.0, 12.0, "己"),
         ]);
         let mut opened = fake.open();
         let err = apply_corrections(
@@ -1253,6 +1385,23 @@ mod tests {
                         reason: "同上".into(),
                     },
                 },
+                // ⑤ 标着"只加标点",实际把字改动了
+                CorrectionInput {
+                    segment_id: 5,
+                    conclusion: Conclusion::Punctuated {
+                        text: "戊戊。".into(),
+                    },
+                },
+                // ⑥ 走 `corrected`,却跟原文只差标点
+                CorrectionInput {
+                    segment_id: 6,
+                    conclusion: Conclusion::Corrected {
+                        text: "己。".into(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "断句".into(),
+                    },
+                },
             ],
             &[],
             &[],
@@ -1265,12 +1414,15 @@ mod tests {
             ("第 2 段", "却没写 `note`"),
             ("第 3 段", "却没写 `note`"),
             ("第 4 段", "报了两次"),
+            ("第 5 段", "字**动了"),
+            ("第 6 段", "只差标点"),
         ] {
             assert!(err.contains(who) && err.contains(what), "{who}{what} 没报出来:\n{err}");
         }
-        // 三种 outcome 的规矩也一并说清 —— 一次交完,省得再来回
+        // 四种 outcome 的规矩也一并说清 —— 一次交完,省得再来回
         assert!(err.contains("一次说清"), "{err}");
         assert!(err.contains("改完再交一次"), "{err}");
+        assert!(err.contains("punctuated"), "断句那一档的规矩要说清:{err}");
         assert!(
             !fake.layout().transcript_fixed().exists(),
             "整批拒绝时不该落下半个文件"
@@ -1294,6 +1446,150 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("note"), "{err}");
+    }
+
+    // ── 只加标点 / 断句(2026-09-27,清账三十八)──────────────────────────
+
+    /// **断句是单独一档**:字一个没动,但它算"动过"、算"审过"。
+    #[test]
+    fn punctuation_is_recorded_apart_from_corrections() {
+        let fake = Fake::new("concl-punct").with_transcript(&[
+            (0.0, 2.0, "今天我们来讲一个列表"),
+            (2.0, 4.0, "之所以把它放在一开始"),
+        ]);
+        let mut opened = fake.open();
+
+        let outcome = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Punctuated {
+                    text: "今天我们来讲一个列表。".into(),
+                },
+            }],
+            &[2],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            (outcome.punctuated, outcome.corrected),
+            (1, 0),
+            "断句不该混进'改了'"
+        );
+        assert_eq!(outcome.reviewed, 2, "加了断句的段当然算审过");
+
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.segments[0].effective_text(), "今天我们来讲一个列表。");
+        assert_eq!(fixed.segments[0].text, "今天我们来讲一个列表", "原文一个字不动");
+        assert!(fixed.segments[0].is_punctuated());
+        let s = fixed.stats();
+        assert_eq!((s.punctuated, s.corrected, s.clean), (1, 0, 1));
+
+        // 对照表:断句另开一节,并说清全量在纠错稿里(不把表撑成几百行)
+        let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
+        assert!(diff.contains("只加了断句的(1 段)"), "{diff}");
+        assert!(diff.contains("加了断句 1 段"), "{diff}");
+    }
+
+    /// 标点里**顺手改了个字** → 拒,并指到具体是第几个字。
+    #[test]
+    fn punctuation_that_sneaks_in_a_character_is_refused() {
+        let fake = Fake::new("concl-punct-char").with_transcript(&[(0.0, 2.0, "今天我们来讲一个列表")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                // 把「列表」改成了「例子」 —— 那不叫断句
+                conclusion: Conclusion::Punctuated {
+                    text: "今天我们来讲一个例子。".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("第 9 个字起"), "要指出是哪儿动了:\n{err}");
+        assert!(err.contains("corrected"), "要告诉它改用哪一个:\n{err}");
+        assert!(
+            !fake.layout().transcript_fixed().exists(),
+            "整批拒绝时不该落下半个文件"
+        );
+    }
+
+    /// 没加任何标点 → 拒(没问题的段报 `reviewed` 就够,不该单列一条)。
+    #[test]
+    fn punctuation_that_adds_nothing_is_refused() {
+        let fake = Fake::new("concl-punct-noop").with_transcript(&[(0.0, 2.0, "各位好")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Punctuated {
+                    text: "各位好".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("一字不差"), "{err}");
+        assert!(err.contains("reviewed"), "要告诉它该报进哪里:{err}");
+    }
+
+    /// `corrected` 跟原文**只差标点** → 拒,并点名该换成 `punctuated`。
+    #[test]
+    fn a_correction_that_only_adds_punctuation_is_refused() {
+        let fake = Fake::new("concl-punct-as-corrected").with_transcript(&[(0.0, 2.0, "各位好")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "各位好,".into(),
+                    kind: CorrectionType::Other,
+                    note: String::new(),
+                    reason: "断句".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("只差标点"), "{err}");
+        assert!(err.contains("punctuated"), "要告诉它改用哪一个:{err}");
+    }
+
+    /// `reason` 现在是选填(断句不用给)—— "其余三种必须写"这条就落在工具这边。
+    #[test]
+    fn a_missing_reason_is_reported() {
+        let fake = Fake::new("concl-noreason").with_transcript(&[(0.0, 2.0, "甲")]);
+        let mut opened = fake.open();
+
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Kept {
+                    note: "不改".into(),
+                    reason: String::new(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("没给 `reason`"), "{err}");
     }
 
     #[test]

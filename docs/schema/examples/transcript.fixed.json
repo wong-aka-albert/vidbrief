@@ -18,7 +18,10 @@
       "start": 2.5,
       "end": 6.0,
       "text": "今天用一个很短的小样例过一遍流程",
-      "conclusion": null,
+      "conclusion": {
+        "outcome": "punctuated",
+        "text": "今天用一个很短的小样例,过一遍流程。"
+      },
       "checked_at": "2026-09-24T21:20:00+08:00"
     },
     {

@@ -74,7 +74,7 @@ pub use state::{
 pub use supplement::{SupplementRequest, SupplementRequests, SupplementStatus, Trigger};
 pub use transcript::{
     Conclusion, CorrectionType, GroupReview, GroupRule, QuoteHit, Segment, SegmentGroup,
-    SegmentReview, SegmentStats, Transcript,
+    SegmentReview, SegmentStats, Transcript, is_punctuation, without_punctuation,
 };
 /// 当前时刻,带本地 UTC 偏移(如 `2026-09-24T21:00:00+08:00`)。
 ///

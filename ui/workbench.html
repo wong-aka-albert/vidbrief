@@ -425,6 +425,7 @@ function groupNode(g) {
   const body = D.segments.filter((s) => s.id >= g.from && s.id <= g.to);
   const marks = body.filter((s) => s.conclusion);
   const changed = marks.filter((s) => s.conclusion.label === "改了").length;
+  const split = marks.filter((s) => s.conclusion.label === "加了断句").length;
   // 筛选口径与逐段那版一致:有结论 → touched;其余按组自己的核验状态
   box.dataset.f = marks.length ? "touched" : g.state;
 
@@ -439,10 +440,11 @@ function groupNode(g) {
   ghead.appendChild(el("span", "spacer"));
   const tags = el("div", "tags");
   if (changed) tags.appendChild(el("span", "badge ok", `改了 ${changed} 段`));
-  if (!marks.length) {
-    tags.appendChild(el("span", "badge" + (g.state === "unchecked" ? "" : " ok"),
-      g.state === "unchecked" ? "未核验" : g.state === "needs_user" ? "存疑未改" : "核验过"));
-  }
+  // 断句与改字**分开挂**:断句几乎每组都有(全稿都加了标点),混进"改了"里
+  // 就再也看不出哪一组真动过字。
+  if (split) tags.appendChild(el("span", "badge dim", `断句 ${split} 段`));
+  tags.appendChild(el("span", "badge" + (g.state === "unchecked" ? "" : " ok"),
+    g.state === "unchecked" ? "未核验" : g.state === "needs_user" ? "存疑未改" : "核验过"));
   ghead.appendChild(tags);
   box.appendChild(ghead);
 
@@ -490,16 +492,15 @@ function segNode(s) {
   row.appendChild(tags);
 
   const what = el("div", "what");
-  if (s.conclusion && s.conclusion.label === "改了") {
+  // 改字的、只加断句的,**都把原文与现读法并排** —— 断句要看的正是"标点加在哪儿"
+  if (s.conclusion && (s.conclusion.label === "改了" || s.conclusion.label === "加了断句")) {
     what.appendChild(el("span", "line old", s.text));
     what.appendChild(el("span", "line new", s.effective));
   } else {
     what.appendChild(el("span", "line", s.effective));
   }
-  if (s.conclusion) {
-    what.appendChild(el("div", "why",
-      `${s.conclusion.note}${s.conclusion.reason ? " —— " + s.conclusion.reason : ""}`));
-  }
+  const why = `${s.conclusion ? s.conclusion.note : ""}${s.conclusion && s.conclusion.reason ? " —— " + s.conclusion.reason : ""}`;
+  if (why.trim()) what.appendChild(el("div", "why", why));
   if (s.checked_at) what.appendChild(el("span", "at", `写于 ${shortAt(s.checked_at)}`));
   row.appendChild(what);
   return row;
@@ -899,6 +900,7 @@ function mount() {
   {
     const total = D.segments.length;
     const changed = D.segments.filter((s) => s.conclusion && s.conclusion.label === "改了").length;
+    const split = D.segments.filter((s) => s.conclusion && s.conclusion.label === "加了断句").length;
     const kept = D.segments.filter((s) => s.conclusion && s.conclusion.label === "决定不改").length;
     const uncertain = D.segments.filter((s) => s.state === "needs_user").length;
     const unchecked = D.segments.filter((s) => s.state === "unchecked").length;
@@ -906,7 +908,7 @@ function mount() {
     const gTotal = (D.groups || []).length;
     const gUn = (D.groups || []).filter((g) => g.state === "unchecked").length;
     $("#segCounts").textContent =
-      `共 ${total} 段 · ${gTotal} 组 · 改过 ${changed} · 决定不改 ${kept} · 存疑 ${uncertain} · 未核验 ${gUn} 组`;
+      `共 ${total} 段 · ${gTotal} 组 · 改过 ${changed} · 断句 ${split} · 决定不改 ${kept} · 存疑 ${uncertain} · 未核验 ${gUn} 组`;
   }
   const list = $("#segList");
   const rows = [];

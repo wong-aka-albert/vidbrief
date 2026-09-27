@@ -340,7 +340,12 @@ fn segment_digest(s: &Segment) -> Option<(String, String)> {
     if s.effective_text() == s.text {
         return None;
     }
-    Some((s.id.to_string(), short(&[s.effective_text(), "corrected"])))
+    let kind = if s.is_punctuated() {
+        "punctuated"
+    } else {
+        "corrected"
+    };
+    Some((s.id.to_string(), short(&[s.effective_text(), kind])))
 }
 
 /// 一张截图的"材料":留用还是丢弃,加上当时的看图结论。

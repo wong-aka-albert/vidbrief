@@ -119,20 +119,25 @@ pub struct RecordShotCheckParams {
 pub struct CorrectionItem {
     /// 转录段 id(`transcript.json` 里的序号,从 1 起)。
     pub segment_id: u32,
-    /// 这一段是什么结论 —— **三种各自要带什么,见下面的字段说明**:
+    /// 这一段是什么结论 —— **四种各自要带什么,见下面的字段说明**:
     ///
     /// | `outcome` | 必给 | 说明 |
     /// |-----------|------|------|
-    /// | `corrected` | `text`(改后的**整句**) | 改了正文 |
+    /// | `corrected` | `text`(改后的**整句**) | 改了字 |
+    /// | `punctuated` | `text`(加了标点后的整句) | **只加标点 / 断句**,一个字都不改 |
     /// | `kept` | `note`(为什么决定不改) | 看过,决定保留原句 |
     /// | `uncertain` | `note`(疑似是什么写法) | 定不了,留给用户裁决 |
     ///
-    /// 三者都要给 `reason`。**同一段只能有一条结论**:一段里有几处改动,
+    /// 除 `punctuated` 外都要给 `reason`。**同一段只能有一条结论**:一段里有几处改动,
     /// 合并进同一个 `text`(报两条的话,后一条会盖掉前一条)。
     pub outcome: CorrectionOutcomeArg,
-    /// **`outcome = corrected` 时必给**:改后的**整句** ——
+    /// **`outcome = corrected` / `punctuated` 时必给**:整段文本 ——
     /// 不是只写改动的那个词(那是 `note` / `reason` 里的东西)。
-    /// **它必须和原文不一样** —— 想保留原句就用 `kept`。
+    ///
+    /// - `corrected`:改后的整句。**必须和原文不一样** —— 想保留原句就用 `kept`;
+    /// - `punctuated`:加了标点之后的整段。**只许插标点** —— 去掉标点与空白之后
+    ///   必须跟原文一字不差(动了字就用 `corrected`,工具会把这两者分开);
+    ///   一个字没加也会被拒(那一段没问题的话,报进 `reviewed` 就够)。
     #[serde(default)]
     pub text: Option<String>,
     /// `outcome = corrected` 时给:错的性质(`homophone` / `terminology` / `number` / `other`)。
@@ -140,10 +145,13 @@ pub struct CorrectionItem {
     pub kind: Option<CorrectionTypeArg>,
     /// 改动内容,如 `派森 → Python`。
     /// **`kept` / `uncertain` 时必给**(前者说为什么不改,后者说疑似是什么写法)——
-    /// 否则这条记录没有信息量。`corrected` 不给就按前后缀差异自动掐出来。
+    /// 否则这条记录没有信息量。`corrected` 不给就按前后缀差异自动掐出来;
+    /// `punctuated` **不用给**(标点加在哪儿,`text` 自己说得最清楚)。
     #[serde(default)]
     pub note: Option<String>,
-    /// 判断依据(画面文字 / 上下文 / 术语表)。**必须写**,这是事后复核的唯一线索。
+    /// 判断依据(画面文字 / 上下文 / 术语表)。**`punctuated` 不用给**,其余三种必须写 ——
+    /// 这是事后复核的唯一线索。
+    #[serde(default)]
     pub reason: String,
 }
 
@@ -152,8 +160,10 @@ pub struct CorrectionItem {
 #[schemars(inline)] // 内联进 schema,不落 `$defs`(见 `tool_schemas_are_self_contained`)
 #[serde(rename_all = "snake_case")]
 pub enum CorrectionOutcomeArg {
-    /// 改了正文。
+    /// 改了字。
     Corrected,
+    /// **只加了标点 / 断句** —— 一个字都没动(ASR 的输出几乎不带标点,这一档专门记它)。
+    Punctuated,
     /// 看过,**决定保留原句**。
     Kept,
     /// 看过,但定不了 —— 留给用户裁决。
@@ -286,26 +296,31 @@ impl VidbriefServer {
     }
 
     #[tool(
-        description = "把转录纠错写回 `02_calibrate/transcript.fixed.json`(原始转录永不就地改写),\
+        description = "把转录核对的结果写回 `02_calibrate/transcript.fixed.json`(原始转录永不就地改写),\
                        并刷新人可核对的 `transcript.diff.md`。可以分批多次调用。\
+                       两件事都在这里报:**改错字** + **加标点/断句**(ASR 的输出几乎不带标点,\
+                       所以通读时顺手把断句加上 —— 加过之后 `get_transcript` 读到的就是带标点的那一版)。\
                        纠错依据的优先级:**关键帧画面上的文字 > 上下文语义 > 术语表**。\
                        只改明确的识别错误,不润色、不改语序;数字/单位/时间除非明显错了否则保留;\
                        没把握的别改,标 `uncertain` 并在 note 里写疑似写法。\
                        \n\n\
-                       **三种 `outcome` 各自要带什么(一次说清,别一条一条试)**:\
-                       `corrected` 必给 `text`(**改后的整句**,不是只写改动的那个词)、`type` 选填;\
+                       **四种 `outcome` 各自要带什么(一次说清,别一条一条试)**:\
+                       `corrected`(改了字)必给 `text`(**改后的整句**,不是只写改动的那个词)、`type` 选填;\
+                       `punctuated`(**只加标点/断句,字一个不动**)必给 `text`(**加了标点之后的整段**)——\
+                       去掉标点与空白后必须跟原文一字不差,动了字就用 `corrected`,一个字没加也会被拒;\
                        `kept`(看过决定不改)必给 `note`(为什么);\
                        `uncertain`(定不了)必给 `note`(疑似是什么写法);\
-                       三者都要给 `reason`(依据)。**同一段只能有一条结论** ——\
+                       除 `punctuated` 外都要给 `reason`(依据)。**同一段只能有一条结论** ——\
                        一段里几处改动合并进同一个 `text`;\
-                       `text` 跟原文一字不差会被拒(那不叫改,要保留原句就换 `kept`)。\
+                       `text` 跟原文一字不差会被拒(那不叫改,要保留原句就换 `kept`),\
+                       跟原文只差标点也会被拒(那一档叫 `punctuated`)。\
                        一批里所有问题**一次全报**给你,改完再交一次即可。\
                        \n\n\
                        **审过、没问题的段用 `reviewed` 报上来**(如 `[1,2,3,…]`);\
                        一整片没问题就用 `reviewed_ranges` 报闭区间(如一条 from 5 to 300),两者取并集;\
                        否则那些段在系统里跟'压根没审'分不开 —— 而审核门拦的就是跳段。\
-                       改过的段自动算审过,不用重复列。",
-        annotations(title = "写回转录纠错", read_only_hint = false, idempotent_hint = true)
+                       改过、加过断句的段自动算审过,不用重复列。",
+        annotations(title = "写回转录结论", read_only_hint = false, idempotent_hint = true)
     )]
     async fn apply_corrections(
         &self,
@@ -314,7 +329,7 @@ impl VidbriefServer {
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let mut items = Vec::with_capacity(p.corrections.len());
         for c in p.corrections {
-            // 三种结论在这里拼成落盘用的那一个枚举 —— 缺件当场退回去,
+            // 四种结论在这里拼成落盘用的那一个枚举 —— 缺件当场退回去,
             // 而不是让它带着"说要改、文本空着"往下走
             let conclusion = match c.outcome {
                 CorrectionOutcomeArg::Corrected => {
@@ -330,6 +345,16 @@ impl VidbriefServer {
                         note: c.note.unwrap_or_default(),
                         reason: c.reason,
                     }
+                }
+                CorrectionOutcomeArg::Punctuated => {
+                    let Some(text) = c.text.filter(|t| !t.trim().is_empty()) else {
+                        return Err(failed(format!(
+                            "第 {} 段 `outcome = punctuated` 却没给 `text` —— \
+                             要的是**加了标点之后的整段**",
+                            c.segment_id
+                        )));
+                    };
+                    vidbrief_project::Conclusion::Punctuated { text }
                 }
                 CorrectionOutcomeArg::Kept => vidbrief_project::Conclusion::Kept {
                     note: c.note.unwrap_or_default(),

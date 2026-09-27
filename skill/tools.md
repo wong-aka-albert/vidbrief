@@ -10,7 +10,7 @@
 
 一共 25 件工具。
 
-- **`apply_corrections`** — 把转录纠错写回 `02_calibrate/transcript.fixed.json`(原始转录永不就地改写),并刷新人可核对的 `transcript.diff.md`。
+- **`apply_corrections`** — 把转录核对的结果写回 `02_calibrate/transcript.fixed.json`(原始转录永不就地改写),并刷新人可核对的 `transcript.diff.md`。
   必填:`corrections`、`project_id`
 - **`approve`** — 记下「**用户拍板了悬着的那一批**」—— 只对'等人拍板'那一类有效。
   必填:`project_id`

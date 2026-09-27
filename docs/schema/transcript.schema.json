@@ -69,7 +69,7 @@
             "description": "ASR 原始输出,永不就地改写"
           },
           "conclusion": {
-            "description": "对这一段下的结论。null = 没话说(也可能还没看过 —— 看 checked_at)。四种结论互斥且穷尽:corrected 改了 / kept 决定保留原句 / uncertain 存疑留给人 / null 没问题。**「改了」的文本就在它里面**,不给它单开一栏 —— 那样两者能各说各话(实测:结论说要改、文本栏空着,数数时整整一档掉在地上)。⚠️ **投影**:判据在 state.bin(见 docs/DESIGN.md §4.10);原始转录里恒为 null",
+            "description": "对这一段下的结论。null = 没话说(也可能还没看过 —— 看 checked_at)。五种结论互斥且穷尽:corrected 改了字 / punctuated **只加标点(字一个没动)** / kept 决定保留原句 / uncertain 存疑留给人 / null 没问题。**「改了」与「加了标点」的文本就在它里面**,不给它单开一栏 —— 那样两者能各说各话(实测:结论说要改、文本栏空着,数数时整整一档掉在地上)。⚠️ **投影**:判据在 state.bin(见 docs/DESIGN.md §4.10);原始转录里恒为 null",
             "oneOf": [
               {
                 "type": "null"
@@ -87,7 +87,7 @@
                 "properties": {
                   "outcome": {
                     "const": "corrected",
-                    "description": "改了 —— 新文本就在这条里"
+                    "description": "改了字 —— 新文本就在这条里"
                   },
                   "text": {
                     "type": "string",
@@ -113,6 +113,25 @@
                     "type": "string",
                     "minLength": 1,
                     "description": "判断依据(画面文字 / 上下文 / 术语表)"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "outcome",
+                  "text"
+                ],
+                "properties": {
+                  "outcome": {
+                    "const": "punctuated",
+                    "description": "**只加标点 / 断句** —— 一个字都没动。判据:去掉标点与空白之后必须与 text(ASR 原文)一字不差;工具按这条自检,动了字就退回收成 corrected。单开一档是为了账:断句会把几乎每段都写一遍,混进 corrected 里,真改了字的那几段就找不出来了"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "加了标点之后的整段"
                   }
                 }
               },

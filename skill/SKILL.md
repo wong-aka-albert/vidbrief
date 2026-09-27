@@ -20,7 +20,8 @@ vidbrief 把"长视频 → 图文总结"拆成四步,每一步的产物用户能
    作业跑在独立进程里,默认只等 180 秒;等不够就再调一次 `preprocess` 接着等
    (`preprocess_progress` 看进度,`preprocess_result` 取结果)。
 2. **校准**:逐张看图(`record_shot_check`)、通读转录(`get_transcript` 按**组**给,
-   一组是一口气说完的一小段;改动用 `apply_corrections` 报回)。
+   一组是一口气说完的一小段;改动用 `apply_corrections` 报回 —— **加断句也在这一趟报**,
+   ASR 的输出几乎不带标点)。
    **画面是第一依据** —— 转录听错的名称、版本号、术语,只有看图能改对。→ 看 `workflow.md` §2
 3. **总结**(`write_summary`):图文互证之后写 —— **一段一段交**,每段带它讲的时刻
    (`t`);最后单独交一条**总述**(不带 `t`)。这一段就是报告页上的一条。→ `workflow.md` §3

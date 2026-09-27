@@ -242,6 +242,9 @@ enum StoredConclusion {
         note: String,
         reason: String,
     },
+    Punctuated {
+        text: String,
+    },
     Kept {
         note: String,
         reason: String,
@@ -266,6 +269,7 @@ impl From<&Conclusion> for StoredConclusion {
                 note: note.clone(),
                 reason: reason.clone(),
             },
+            Conclusion::Punctuated { text } => Self::Punctuated { text: text.clone() },
             Conclusion::Kept { note, reason } => Self::Kept {
                 note: note.clone(),
                 reason: reason.clone(),
@@ -292,6 +296,7 @@ impl From<&StoredConclusion> for Conclusion {
                 note: note.clone(),
                 reason: reason.clone(),
             },
+            StoredConclusion::Punctuated { text } => Self::Punctuated { text: text.clone() },
             StoredConclusion::Kept { note, reason } => Self::Kept {
                 note: note.clone(),
                 reason: reason.clone(),

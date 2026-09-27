@@ -49,13 +49,17 @@ Options:
                            的入参一致(少了 project_id):
                            {\"corrections\":[{\"segment_id\":1,\"outcome\":\"corrected\",
                              \"text\":\"改后的整句\",\"type\":\"terminology\",
-                             \"note\":\"派森 → Python\",\"reason\":\"画面文字\"}],
-                            \"reviewed\":[2,3,4],
+                             \"note\":\"派森 → Python\",\"reason\":\"画面文字\"},
+                            {\"segment_id\":2,\"outcome\":\"punctuated\",
+                             \"text\":\"加了标点之后的整段。\"}],
+                            \"reviewed\":[3,4],
                             \"reviewed_ranges\":[{\"from\":5,\"to\":300}]}
 
 说明:
-  outcome 三种:corrected(改了,必须给 text)/ kept(决定保留原句)/ uncertain(定不了,留给人)。
-  **改成跟原文一字不差会被拒收** —— 要保留原句就用 kept。
+  outcome 四种:corrected(改了字,必须给 text)/ punctuated(**只加标点 / 断句**,必须给 text,
+  字一个不动:去掉标点后要跟原文一字不差)/ kept(决定保留原句)/ uncertain(定不了,留给人)。
+  **改成跟原文一字不差会被拒收** —— 要保留原句就用 kept;跟原文**只差标点**也会被拒 —— 那是 punctuated。
+  reason 除 punctuated 外都要给(依据)。
   reviewed / reviewed_ranges 是「审过、没问题」的段:逐段点名,或整片报一个闭区间,两种取并集。
   不报等于没审,审核门会拦。
   走的是和 MCP 工具同一套代码、同一把锁、同一个门。
@@ -740,12 +744,13 @@ fn cmd_correct(args: &[String]) -> Result<()> {
     println!("项目     {id}");
     println!("本次写入 {} 条", outcome.applied);
     println!(
-        "全稿     {} 段:改了 {} 段 / 决定不改 {} 段 / 存疑未改 {} 段 / 合计动过 {} 段",
+        "全稿     {} 段:改了 {} 段 / 加了断句 {} 段 / 决定不改 {} 段 / 存疑未改 {} 段 / 合计动过 {} 段",
         outcome.total_segments,
         outcome.corrected,
+        outcome.punctuated,
         outcome.kept,
         outcome.uncertain,
-        outcome.corrected + outcome.kept + outcome.uncertain
+        outcome.corrected + outcome.punctuated + outcome.kept + outcome.uncertain
     );
     println!("核验过   {} 段", outcome.reviewed);
     println!("纠错稿   {}", outcome.fixed_path.display());
@@ -1076,6 +1081,9 @@ struct CorrectItem {
     kind: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    /// 依据。**除 `punctuated` 外都要给** —— 那条判在工具那边(`check_items`),
+    /// 这里不设成必填,免得断句条目得硬塞一句空话进去。
+    #[serde(default)]
     reason: String,
 }
 
@@ -1108,6 +1116,16 @@ impl CorrectItem {
                     reason: self.reason,
                 }
             }
+            "punctuated" => {
+                let Some(text) = self.text.filter(|t| !t.trim().is_empty()) else {
+                    bail!(
+                        "第 {} 段 `outcome = punctuated` 却没给 `text` —— \
+                         要的是加了标点之后的整段",
+                        self.segment_id
+                    );
+                };
+                Conclusion::Punctuated { text }
+            }
             "kept" => Conclusion::Kept {
                 note: self.note.unwrap_or_default(),
                 reason: self.reason,
@@ -1117,7 +1135,7 @@ impl CorrectItem {
                 reason: self.reason,
             },
             other => bail!(
-                "第 {} 段的 `outcome` 只能是 corrected / kept / uncertain,收到 `{other}`",
+                "第 {} 段的 `outcome` 只能是 corrected / punctuated / kept / uncertain,收到 `{other}`",
                 self.segment_id
             ),
         })

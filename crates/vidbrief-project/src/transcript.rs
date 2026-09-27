@@ -72,10 +72,117 @@ pub enum Conclusion {
         /// 判断依据(画面文字 / 上下文 / 术语表)。
         reason: String,
     },
+    /// **只加标点 / 断句** —— 一个字都没动。
+    ///
+    /// # 为什么单开一档,而不是塞进 `Corrected`
+    ///
+    /// ASR 的输出几乎不带标点(实测:五份材料 4761 段里只有 36 段带句号,其余全是
+    /// 一串没有逗号句号的字)。于是"这段话在哪儿断"这件事**从来没人做过**,而
+    /// 它和"改错字"是两件事:
+    ///
+    /// - **账要分得开**:断句会把几乎每一段都写一遍(`touched` 从 19 段变 690 段),
+    ///   混进"改了正文"里,那 18 段真改了字的就再也找不出来了;
+    /// - **复核的人只关心前者**:改字是要人回头看的,标点不是。
+    ///
+    /// # 判据(工具核得动的那一半)
+    ///
+    /// **去掉标点与空白之后,必须和原文一字不差**([`without_punctuation`])。
+    /// "在哪儿断句"是判断,归 agent;但**顺手改个字**不行 —— 那是 `Corrected`,
+    /// 而工具能自己把这两者分开,就不该让它们混在一个格子里。
+    ///
+    /// 所以这一档**不收 `note` / `reason`**:信息全在 `text` 里(标点加在哪儿),
+    /// 逼它写一句"我加了标点"只是让每条多吐十来个字。
+    Punctuated {
+        /// 加了标点之后的**整段**(不是只给标点)。
+        text: String,
+    },
     /// 看过,**决定保留原句**(比如"上一轮那处改写是错的,恢复原文")。
     Kept { note: String, reason: String },
     /// 看过,但定不了 —— 留给用户裁决。疑似写法写在 `note` 里。
     Uncertain { note: String, reason: String },
+}
+
+/// 这个字符算不算标点 / 空白 —— 「只加了标点」的判据就是它。
+///
+/// 收得**宽**一点:全角半角、各种括号引号、破折号省略号,加上一切空白。
+/// 判的是"**字有没有被动过**",不是"标点写得合不合规范" —— 收窄了只会误伤
+/// (「他写『』而原文是""」不值得拒一条)。
+pub fn is_punctuation(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '？'
+                | '！'
+                | '…'
+                | '—'
+                | '～'
+                | '·'
+                | '•'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '【'
+                | '】'
+                | '〔'
+                | '〕'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '－'
+                | '\u{3000}' // 全角空格(写成转义:源码里不留全角字符,免得被字符扫描绊住)
+                | ','
+                | '.'
+                | '!'
+                | '?'
+                | ';'
+                | ':'
+                | '\''
+                | '"'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '-'
+                | '_'
+                | '/'
+                | '\\'
+                | '|'
+                | '+'
+                | '='
+                | '*'
+                | '&'
+                | '^'
+                | '%'
+                | '$'
+                | '#'
+                | '@'
+                | '~'
+                | '`'
+        )
+}
+
+/// 去掉所有标点与空白之后剩下的字。
+///
+/// 两个用处:「只加了标点」的判据、以及**引文比对**([`Transcript::locate_quote`])——
+/// 引文抄的时候带不带标点,不该决定它找不找得到。
+pub fn without_punctuation(text: &str) -> String {
+    text.chars().filter(|c| !is_punctuation(*c)).collect()
 }
 
 impl Conclusion {
@@ -85,6 +192,8 @@ impl Conclusion {
             Self::Corrected { note, .. } | Self::Kept { note, .. } | Self::Uncertain { note, .. } => {
                 note
             }
+            // 断句没有说明可写:标点加在哪儿,`text` 自己说得最清楚
+            Self::Punctuated { .. } => "",
         }
     }
 
@@ -94,10 +203,11 @@ impl Conclusion {
             Self::Corrected { reason, .. }
             | Self::Kept { reason, .. }
             | Self::Uncertain { reason, .. } => reason,
+            Self::Punctuated { .. } => "",
         }
     }
 
-    /// 错的性质 —— 只有"改了"才有。
+    /// 错的性质 —— 只有"改了"才有(断句不改字,没有"什么错"可言)。
     pub fn kind(&self) -> Option<CorrectionType> {
         match self {
             Self::Corrected { kind, .. } => Some(*kind),
@@ -109,6 +219,7 @@ impl Conclusion {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Corrected { .. } => "改了",
+            Self::Punctuated { .. } => "加了断句",
             Self::Kept { .. } => "决定不改",
             Self::Uncertain { .. } => "存疑未改",
         }
@@ -177,6 +288,7 @@ impl Segment {
     pub fn effective_text(&self) -> &str {
         match &self.conclusion {
             Some(Conclusion::Corrected { text, .. }) => text,
+            Some(Conclusion::Punctuated { text }) => text,
             _ => &self.text,
         }
     }
@@ -184,6 +296,11 @@ impl Segment {
     /// 是否被真的改过(区别于"决定不改"和"存疑未改")。
     pub fn is_corrected(&self) -> bool {
         matches!(self.conclusion, Some(Conclusion::Corrected { .. }))
+    }
+
+    /// 是否只加了标点(字一个没动)。
+    pub fn is_punctuated(&self) -> bool {
+        matches!(self.conclusion, Some(Conclusion::Punctuated { .. }))
     }
 
     /// 是否被标为存疑但未修改。
@@ -305,7 +422,7 @@ fn migrate_legacy(
     }
 }
 
-/// 全稿按状态分区数出来的数。**五类互斥且穷尽,和 = 总段数。**
+/// 全稿按状态分区数出来的数。**六类互斥且穷尽,和 = 总段数。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct SegmentStats {
     pub total: usize,
@@ -315,6 +432,8 @@ pub struct SegmentStats {
     pub clean: usize,
     /// 改了正文。
     pub corrected: usize,
+    /// **只加了标点 / 断句**(字一个没动)。
+    pub punctuated: usize,
     /// 决定保留原句。
     pub kept: usize,
     /// 存疑留给人。
@@ -322,8 +441,13 @@ pub struct SegmentStats {
 }
 
 impl SegmentStats {
-    /// 留下过结论的段数(= 改了 + 决定不改 + 存疑)。
+    /// 留下过结论的段数(= 改了 + 加了断句 + 决定不改 + 存疑)。
     pub fn touched(&self) -> usize {
+        self.corrected + self.punctuated + self.kept + self.uncertain
+    }
+
+    /// **动了正文**的段数(改了字)。断句不算 —— 这是人回头要核的那一档。
+    pub fn rewritten(&self) -> usize {
         self.corrected + self.kept + self.uncertain
     }
 }
@@ -578,11 +702,25 @@ impl Transcript {
     /// 落在哪一段由**拼起来的串里那个起点**决定(不是"第一个能装的段"——
     /// 那样报出来的段号会比真正的起点靠前,而段号正是留给人事后回去核对的定位)。
     ///
-    /// 读的是 [`Segment::effective_text`](纠错后的现读法):引文是照着**现在读到的
-    /// 材料**抄的,而材料唯一会变的途径就是纠错。
+    /// 读的是 [`Segment::effective_text`](纠错 + 断句之后的现读法):引文是照着
+    /// **现在读到的材料**抄的,而材料会变的途径有两条(纠错、加断句)。
+    ///
+    /// # 比的时候**不看标点**(2026-09-27 起)
+    ///
+    /// 两边都先过一遍 [`without_punctuation`]:引文抄的时候带不带标点、带的是哪一种
+    /// (「,」还是「，」),都不该决定它找不找得到 —— 判的是"**这些字**在不在材料里"。
+    ///
+    /// 不这么做就有个躲不开的坑:断句是**后来**才加上去的,而证据是**当时**抄的 ——
+    /// 一段话中间被加了逗号之后,当初那句一字不差的引文就"找不到了",
+    /// 门会反过来指责一条本来正确的证据(实测:五份材料重审的那一趟,
+    /// 旧证据与新标点全是这么撞的)。
     pub fn locate_quote(&self, quote: &str) -> Option<QuoteHit> {
         let quote = quote.trim();
         if quote.is_empty() {
+            return None;
+        }
+        let needle = without_punctuation(quote);
+        if needle.is_empty() {
             return None;
         }
         for group in self.groups() {
@@ -590,16 +728,20 @@ impl Transcript {
                 Some(s) => s,
                 None => continue,
             };
-            let joined = group.text(self);
-            // 每段在拼串里的起点(字节)—— 只用来比大小,**不拿来切片**,
-            // 所以中文的多字节在这里不构成裸切片风险(AGENTS §1.1)。
+            // 拼串也去标点,两份归一过的串才能逐字对上。每段在**归一串**里的起点
+            // (字节)—— 只用来比大小,**不拿来切片**,所以中文的多字节在这里
+            // 不构成裸切片风险(AGENTS §1.1)。
+            let mut joined = String::new();
             let mut starts: Vec<(usize, u32)> = Vec::with_capacity(segs.len());
-            let mut cursor = 0usize;
             for seg in segs {
-                starts.push((cursor, seg.id));
-                cursor += seg.effective_text().len();
+                starts.push((joined.len(), seg.id));
+                for ch in seg.effective_text().chars() {
+                    if !is_punctuation(ch) {
+                        joined.push(ch);
+                    }
+                }
             }
-            let Some(at) = joined.find(quote) else {
+            let Some(at) = joined.find(&needle) else {
                 continue;
             };
             let anchor = starts
@@ -672,9 +814,10 @@ impl Transcript {
             ..Default::default()
         };
         for seg in &self.segments {
-            // 五类,互斥且穷尽 —— 每个段只进一个桶,所以下面那条断言是白送的保障
+            // 六类,互斥且穷尽 —— 每个段只进一个桶,所以下面那条断言是白送的保障
             match (&seg.conclusion, seg.checked_at.is_some()) {
                 (Some(Conclusion::Corrected { .. }), _) => s.corrected += 1,
+                (Some(Conclusion::Punctuated { .. }), _) => s.punctuated += 1,
                 (Some(Conclusion::Kept { .. }), _) => s.kept += 1,
                 (Some(Conclusion::Uncertain { .. }), _) => s.uncertain += 1,
                 (None, true) => s.clean += 1,
@@ -682,7 +825,7 @@ impl Transcript {
             }
         }
         debug_assert_eq!(
-            s.unchecked + s.clean + s.corrected + s.kept + s.uncertain,
+            s.unchecked + s.clean + s.corrected + s.punctuated + s.kept + s.uncertain,
             s.total,
             "分区必须盖满全稿 —— 漏一档就是那次 27+0≠40"
         );
@@ -743,6 +886,26 @@ mod tests {
         assert!(t.segments[0].is_corrected());
     }
 
+    /// **只加标点**:现读法跟着变,原文一个字不动,而且它不算"改了字"。
+    #[test]
+    fn punctuation_changes_the_reading_but_not_the_characters() {
+        let mut t = transcript();
+        t.segments[0].conclusion = Some(Conclusion::Punctuated {
+            text: "各位好。".into(),
+        });
+        assert_eq!(t.segments[0].effective_text(), "各位好。");
+        assert_eq!(t.segments[0].text, "各位好");
+        assert!(t.segments[0].is_punctuated());
+        assert!(!t.segments[0].is_corrected());
+        assert_eq!(
+            without_punctuation(t.segments[0].effective_text()),
+            without_punctuation(&t.segments[0].text),
+            "去掉标点之后必须还是那句原文"
+        );
+        assert_eq!(Conclusion::Punctuated { text: "x".into() }.label(), "加了断句");
+        assert!(Conclusion::Punctuated { text: "x".into() }.kind().is_none());
+    }
+
     #[test]
     fn uncertain_does_not_change_text() {
         let mut t = transcript();
@@ -755,37 +918,60 @@ mod tests {
         assert_eq!(t.segments[0].effective_text(), "各位好");
     }
 
-    /// **五类互斥且穷尽,和必须等于总段数。**
+    /// **六类互斥且穷尽,和必须等于总段数。**
     ///
     /// 这条钉的是那次 27+0≠40:以前"改了多少段"是从两个自由字段推出来的,
     /// 推法一变数就变,还有一整档("有结论、正文没动")掉在地上没人算。
+    /// 后来又多了"只加标点"这一档 —— 它同样是"有结论、字没动",但**不该混进"改了"**:
+    /// 断句之后几乎每一段都会进这个桶,混着数,那几段真改了字的就再也找不出来了。
     #[test]
     fn the_partition_covers_every_segment() {
+        let seg = |id: u32, start: f64, text: &str| Segment {
+            id,
+            start,
+            end: start + 2.0,
+            text: text.to_string(),
+            conclusion: None,
+            checked_at: None,
+        };
         let mut t = transcript();
-        // 1 改了 / 2 决定不改 / 3 存疑,全都没核验戳 vs 有戳,四种结论各来一遍
-        t.segments[0].conclusion = Some(corrected("各位好,开始"));
-        t.segments[0].checked_at = Some(crate::now());
-        t.segments[1].conclusion = Some(Conclusion::Kept {
+        t.segments = vec![
+            seg(1, 0.0, "派森列表"),
+            seg(2, 2.0, "今天是第一个样例"),
+            seg(3, 4.0, "原句通顺"),
+            seg(4, 6.0, "元祖类型"),
+            seg(5, 8.0, "这一段没话说"),
+            seg(6, 10.0, "这一段还没看"),
+        ];
+        // 1 改了 / 2 只加标点 / 3 决定不改 / 4 存疑 / 5 看过没问题 / 6 还没看
+        t.segments[0].conclusion = Some(corrected("Python 列表"));
+        t.segments[1].conclusion = Some(Conclusion::Punctuated {
+            text: "今天是第一个样例。".into(),
+        });
+        t.segments[2].conclusion = Some(Conclusion::Kept {
             note: "上一轮那处改写是错的".into(),
             reason: "原句通顺".into(),
         });
-        t.segments[1].checked_at = Some(crate::now());
-        t.segments[2].conclusion = Some(Conclusion::Uncertain {
+        t.segments[3].conclusion = Some(Conclusion::Uncertain {
             note: "疑似漏字".into(),
             reason: "听不清".into(),
         });
-        t.segments[2].checked_at = Some(crate::now());
+        for index in 0..5 {
+            t.segments[index].checked_at = Some(crate::now());
+        }
 
         let s = t.stats();
-        assert_eq!(s.total, 3);
+        assert_eq!(s.total, 6);
         assert_eq!(s.corrected, 1);
+        assert_eq!(s.punctuated, 1);
         assert_eq!(s.kept, 1);
         assert_eq!(s.uncertain, 1);
-        assert_eq!(s.clean, 0);
-        assert_eq!(s.unchecked, 0);
-        assert_eq!(s.touched(), 3, "留下过结论的就是这三段");
+        assert_eq!(s.clean, 1);
+        assert_eq!(s.unchecked, 1);
+        assert_eq!(s.touched(), 4, "留下过结论的是这四段");
+        assert_eq!(s.rewritten(), 3, "动了字的三段(断句不算)");
         assert_eq!(
-            s.unchecked + s.clean + s.corrected + s.kept + s.uncertain,
+            s.unchecked + s.clean + s.corrected + s.punctuated + s.kept + s.uncertain,
             s.total
         );
 
@@ -794,7 +980,7 @@ mod tests {
             seg.conclusion = None;
             seg.checked_at = None;
         }
-        assert_eq!(t.stats().unchecked, 3);
+        assert_eq!(t.stats().unchecked, 6);
         assert_eq!(t.stats().touched(), 0);
 
         // 只有戳、没有结论 → "看过、没问题"
@@ -802,8 +988,11 @@ mod tests {
             seg.checked_at = Some(crate::now());
         }
         let s = t.stats();
-        assert_eq!(s.clean, 3);
-        assert_eq!(s.unchecked + s.clean + s.corrected + s.kept + s.uncertain, s.total);
+        assert_eq!(s.clean, 6);
+        assert_eq!(
+            s.unchecked + s.clean + s.corrected + s.punctuated + s.kept + s.uncertain,
+            s.total
+        );
     }
 
     /// "决定不改"和"改了"是两种结论,别混 —— 前者正文一个字没动。
@@ -1002,6 +1191,20 @@ mod tests {
         assert_eq!(after.groups(), before, "组不该跟着纠错漂移");
     }
 
+    /// **加了标点也不会重划组** —— 划界读的是 ASR 原文(永不就地改写)。
+    ///
+    /// 这条要是反了,agent 校准到一半(刚给前 200 段加了标点)手上的组号会整个换一茬;
+    /// 而且"往哪儿加标点"会间接决定"哪几段算一组",核验单位就跟着文本漂了。
+    #[test]
+    fn punctuation_does_not_resplit_the_groups() {
+        let mut t = transcript();
+        let before = t.groups();
+        t.segments[0].conclusion = Some(Conclusion::Punctuated {
+            text: "各位好。".into(),
+        });
+        assert_eq!(t.groups(), before, "组按原文划,断句是后加的");
+    }
+
     /// 组的核验状态:**组内全核过才算核过**;有未核验的压过"等用户拍板"。
     #[test]
     fn a_group_is_checked_only_when_all_of_its_segments_are() {
@@ -1096,6 +1299,30 @@ mod tests {
         let mut t = transcript();
         t.segments[0].conclusion = Some(corrected("各位好,咱们开始"));
         assert_eq!(t.locate_quote("各位好,咱们开始").unwrap().segment, 1);
+    }
+
+    /// **标点不影响引文落在哪儿**(2026-09-27 起)。
+    ///
+    /// 两边都去掉标点再比。不这么做就有个躲不开的坑:断句是**后来**加上的,
+    /// 而证据是**当时**抄的 —— 一段话中间被插了逗号之后,当初那句一字不差的引文
+    /// 就"找不到了",工具会反过来指责一条本来正确的证据。
+    #[test]
+    fn a_quote_is_found_whatever_punctuation_either_side_has() {
+        let mut t = transcript();
+        t.segments[1].conclusion = Some(Conclusion::Punctuated {
+            text: "今天用一个很短的小样例,过一遍流程。".into(),
+        });
+
+        // 抄的时候没带标点(断句之前抄的)
+        assert_eq!(t.locate_quote("小样例过一遍流程现在是讲解人画面").unwrap().segment, 2);
+        // 抄的时候带了标点,但用的是半角/别的写法
+        assert_eq!(
+            t.locate_quote("今天用一个很短的小样例,过一遍流程").unwrap().segment,
+            2
+        );
+        assert_eq!(t.locate_quote("今天用一个很短的小样例 过一遍流程").unwrap().segment, 2);
+        // 字换了就找不到 —— 松的只是标点,不是字
+        assert!(t.locate_quote("今天用一个很短的小例子,过一遍流程").is_none());
     }
 
     /// 一组落在哪一段上:`group_holding` 反向查。

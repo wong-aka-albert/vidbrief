@@ -380,10 +380,10 @@ pub struct SegmentView {
     pub end: f64,
     /// 当前有效的文本(有改动就是改后的那一版)。
     pub text: String,
-    /// 对这一段下的结论:`corrected` 改了 / `kept` 决定保留原句 /
-    /// `uncertain` 存疑留给人 / **键不在** = 没话说(也可能还没看过)。
+    /// 对这一段下的结论:`corrected` 改了字 / `punctuated` 只加了标点(字一个没动)/
+    /// `kept` 决定保留原句 / `uncertain` 存疑留给人 / **键不在** = 没话说(也可能还没看过)。
     ///
-    /// **一个字段说清四种状态**,不给"改没改""存没存疑"各开一个布尔 ——
+    /// **一个字段说清五种状态**,不给"改没改""存没存疑""断没断句"各开一个布尔 ——
     /// 两个字段能表达同一件事时,迟早填成两样。
     ///
     /// 三个 `Option` 字段在 `None` 时**整个键都不写出去**(不是写 `null`):
@@ -404,6 +404,7 @@ impl SegmentView {
             Some(c) => (
                 Some(match c {
                     vidbrief_project::Conclusion::Corrected { .. } => "corrected",
+                    vidbrief_project::Conclusion::Punctuated { .. } => "punctuated",
                     vidbrief_project::Conclusion::Kept { .. } => "kept",
                     vidbrief_project::Conclusion::Uncertain { .. } => "uncertain",
                 }),
