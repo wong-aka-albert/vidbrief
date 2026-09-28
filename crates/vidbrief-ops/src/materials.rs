@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use vidbrief_project::{
-    ChangeCurve, DenseRegions, GroupReview, GroupRule, RelPath, Segment, SegmentGroup, Shot, ShotId,
-    Shots, SupplementRequests, Transcript,
+    ChangeCurve, DenseRegions, GroupReview, GroupRule, Layout, RelPath, Segment, SegmentGroup, Shot,
+    ShotId, Shots, SupplementRequests, Transcript,
 };
 
 use crate::inspect::ShotCounts;
@@ -201,17 +201,137 @@ pub fn content_mismatches_of(
     out
 }
 
-/// 把转录的**投影**(`transcript.fixed.json`)写出去。
+/// 把转录的**投影**(`transcript.fixed.json` + `transcript.read.md`)写出去。
 ///
-/// 结论本身在状态里;这里写的是一份**给人读的全文**:原文 + 当前结论 ——
+/// 结论本身在状态里;这里写的是**给人读的全文**:原文 + 当前结论 ——
 /// 核对纠错、看视图都不用先解状态文件。
 ///
 /// `merged` 必须是**原文叠上状态之后**的那一份(调用方手上就有)。
-pub fn save_transcript_projection(opened: &OpenProject, merged: &Transcript) -> Result<()> {
-    let path = opened.layout().transcript_fixed();
+/// 只吃 `Layout`:写投影不需要"打开的项目"(`upgrade` 那条路手上就只有一个 layout)。
+pub fn save_transcript_projection(layout: &Layout, merged: &Transcript) -> Result<()> {
+    let path = layout.transcript_fixed();
     merged
         .save(&path)
+        .with_context(|| format!("写入 {} 失败", path.display()))?;
+    save_transcript_read(layout, merged)
+}
+
+/// 把转录的**人读投影**(`transcript.read.md`)写出去。
+///
+/// 为什么要它、为什么不算材料:见 [`vidbrief_project::layout::TRANSCRIPT_READ_FILE`]
+/// 的文档。一句话:agent 会拿宿主的 `read` 去通读材料(实测花 153k 字符读一份
+/// 正文只有 5.9k 字的 JSON),所以**正门得比侧门好走** —— 这份一行一段、只有
+/// 段号 + 时刻 + 现读法,读它便宜四五倍,而且读到的永远是对的。
+///
+/// 它和 `workbench.html` 同类:**投影**,谁都能刷,没人拿它当判据;写失败不该拦住
+/// 主流程(调用方自己决定要不要报),但这里仍然返回错误——真正想忽略的是调用方。
+pub fn save_transcript_read(layout: &Layout, merged: &Transcript) -> Result<()> {
+    let path = layout.transcript_read();
+    let md = render_transcript_read(merged);
+    vidbrief_project::write_atomic_str(&path, &md)
         .with_context(|| format!("写入 {} 失败", path.display()))
+}
+
+/// 转录 → 人读的那份 Markdown(纯函数,好测)。
+///
+/// 形状定死在这里:一行一段 —— `段号  时刻  现读法`,改过的段尾挂一句 `← 改了(…)`;
+/// 组头照 [`SegmentGroup`] 现算,带上这一组的核验状态(那是**门**的口径,同一个函数)。
+pub fn render_transcript_read(transcript: &Transcript) -> String {
+    let stats = transcript.stats();
+    let groups = transcript.groups();
+    let unchecked_groups = groups
+        .iter()
+        .filter(|g| g.review(transcript) == GroupReview::Unchecked)
+        .count();
+
+    let mut out = String::with_capacity(transcript.segments.len() * 40 + 512);
+    out.push_str("# 转录 · 现读法(给人读的那一份)\n\n");
+    out.push_str(
+        "> 一行一段:**段号 · 时刻 · 现读法**(改过的字、加过的标点都在正文里)。\n\
+         > **时刻一律是秒**(自视频起算,两位小数以内、末尾的零去掉)—— 跟 `transcript.json` 的 \
+         `start`、`shots.json` 的 `t`、状态里的时刻**是同一个数**,抄回来不用折算;\n\
+         > `m:ss` 那种写法只出现在给人看视频的页面上(`workbench.html` / `report.html`),不是材料的口径。\n\
+         > 机器读的是 `01_preprocess/transcript.json`(原始,**永不就地改写**);\
+         **判据在 `state.bin`**,这份只是投影。\n\
+         > **要改材料请走 `apply_corrections`** —— 这份每次写结论时重生成,手改它没用(下一次就盖回去)。\n\
+         > 组(`#N`)是**现算**的浅特征分组(一口气说完的一小段),核验与报账的单位是组。\n\n",
+    );
+    out.push_str(&format!(
+        "共 {} 段 · {} 组 · 改了 {} · 加了断句 {} · 决定不改 {} · 存疑 {} · 未核验 {} 组\n",
+        stats.total,
+        groups.len(),
+        stats.corrected,
+        stats.punctuated,
+        stats.kept,
+        stats.uncertain,
+        unchecked_groups,
+    ));
+    out.push_str(&format!("生成于 {}\n", vidbrief_project::now()));
+
+    for group in &groups {
+        let state = match group.review(transcript) {
+            GroupReview::Unchecked => "未核验",
+            GroupReview::Checked => "核验过",
+            GroupReview::NeedsUser => "存疑未改",
+        };
+        out.push_str(&format!(
+            "\n## #{} · {} · {}–{}s · {}\n",
+            group.id,
+            group.label(),
+            seconds(group.start),
+            seconds(group.end),
+            state,
+        ));
+        let Some(segs) = transcript.segment_slice(group) else {
+            continue;
+        };
+        for seg in segs {
+            out.push_str(&format!("{}  {}  {}", seg.id, seconds(seg.start), seg.effective_text()));
+            match &seg.conclusion {
+                // 「加了断句」不标 —— 标点在正文里自己看得见,标出来只会把每一行都弄脏
+                Some(vidbrief_project::Conclusion::Corrected { note, .. }) => {
+                    out.push_str(&format!("   ← 改了({})", clip(note.trim(), 40)));
+                }
+                Some(vidbrief_project::Conclusion::Uncertain { note, .. }) => {
+                    out.push_str(&format!("   ← 存疑:{}", clip(note.trim(), 40)));
+                }
+                _ => {}
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// 太长的一句掐掉 —— 这里的括号是**提示**,不是正文(逐字的对照在 `transcript.diff.md`)。
+///
+/// 自动生成的 note 是按前后缀差异掐出来的,能长到四十多字(「我们不讲动能后面的内容没有办法展开
+/// → 说我们不讲动能,后面的内容没有办法展开。」)—— 挂在每一行后面会把这份投影弄脏,
+/// 而它的用处只是"这里动过哪儿,去看对照表"。按字符掐,不碰字节下标(AGENTS §1.1)。
+fn clip(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(limit).collect();
+    out.push('…');
+    out
+}
+
+/// **材料里的时刻一律秒** —— 两位小数以内、末尾的零去掉,于是它跟 JSON / 状态里那个数
+/// **是同一个数**(实测五份材料的所有时刻都只有 0/1/2 位小数,不会丢精度),抄回来不用折算。
+///
+/// 为什么不是 `m:ss`:那份写法是**给人对着视频看的标签**,只配出现在页面上。放在材料里有三宗罪:
+/// ①跟别处对齐要折算;②多一层进制就多一个出错的地方 —— 2026-09-28 实测,原来的 `m:ss`
+/// 是"先切分钟、再四舍五入秒",59.6 秒会被印成 `0:60`,五份材料里一共 48 处这种不存在的时刻
+/// (`0:60` / `12:60` / `14:60`);③agent 抄引文、抄时刻时,折算一次就多一次抄错的机会。
+pub fn seconds(t: f64) -> String {
+    let text = format!("{:.2}", t.max(0.0));
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// 截图分档计数(留用 / 未校准 / 值得再看)。
@@ -698,6 +818,143 @@ mod tests {
         assert_eq!(cut.changes.len(), 2);
         assert_eq!(cut.changes[0].t, 1.0);
         assert!(change_curve(&opened, Some((3.0, 1.0))).is_err());
+    }
+
+    // ── 人读投影(transcript.read.md,2026-09-27 清账三十九)──────────────
+
+    /// **材料里的时刻一律秒**(2026-09-28 起)。
+    ///
+    /// 原来写的是 `m:ss`,做法是"先切分钟、再把剩下的秒四舍五入到整秒" ——
+    /// 59.6 秒会被印成 `0:60`(一个不存在的时刻)。五份材料实测 48 处,而且就印在
+    /// agent 通读用的那份投影里。现在改成秒:跟 JSON 里那个数是同一个,
+    /// 既不用折算,也没有"进位到 60"这回事。
+    #[test]
+    fn the_time_unit_is_seconds() {
+        assert_eq!(seconds(0.0), "0");
+        assert_eq!(seconds(188.6), "188.6");
+        assert_eq!(seconds(985.43), "985.43");
+        assert_eq!(seconds(-1.0), "0", "负的当 0");
+        // 就是这些值把 `m:ss` 那版逼出 `0:60` / `14:60` 的
+        assert_eq!(seconds(59.6), "59.6");
+        assert_eq!(seconds(899.6), "899.6");
+        assert_eq!(seconds(60.0), "60");
+        // 浮点脏值(`shots.json` 里真有 `448.7999999999999`)不该原样印出来
+        assert_eq!(seconds(448.7999999999999), "448.8");
+    }
+
+    /// 一行一段:段号 + 时刻 + **现读法**;改过的段挂一句改动,组头带核验状态。
+    #[test]
+    fn the_read_projection_is_one_line_per_segment_in_the_current_reading() {
+        let fake = Fake::new("materials-read").with_transcript(&[
+            (0.0, 2.0, "派森列表"),
+            (2.0, 4.0, "各位好"),
+            (4.0, 6.0, "元祖类型"),
+        ]);
+        let mut opened = fake.open();
+        crate::apply_corrections(
+            &mut opened,
+            &[
+                // 1:改了字(顺带自动生成 note「派森 → Python」)
+                crate::CorrectionInput {
+                    segment_id: 1,
+                    conclusion: vidbrief_project::Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: vidbrief_project::CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "画面文字".into(),
+                    },
+                },
+                // 2:只加标点
+                crate::CorrectionInput {
+                    segment_id: 2,
+                    conclusion: vidbrief_project::Conclusion::Punctuated {
+                        text: "各位好。".into(),
+                    },
+                },
+            ],
+            &[3],
+            &[],
+        )
+        .unwrap();
+
+        let (merged, _, _) = effective_transcript(&opened).unwrap();
+        let md = render_transcript_read(&merged);
+
+        assert!(md.contains("1  0  Python 列表"), "要用现读法:\n{md}");
+        assert!(md.contains("← 改了("), "改过的段要挂一句:\n{md}");
+        assert!(md.contains("2  2  各位好。"), "标点要看得见:\n{md}");
+        assert!(md.contains("## #1 · seg 1–3 · 0–6s"), "组头要用秒:\n{md}");
+        assert!(md.contains("核验过"), "组头要带核验状态:\n{md}");
+        assert!(md.contains("加了断句 1"), "表头要有账:\n{md}");
+
+        // **不是 JSON**:一行一段,而且没有结构壳可啃(这就是它比 JSON 便宜的原因)
+        let body: Vec<&str> = md
+            .lines()
+            .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .collect();
+        assert_eq!(body.len(), 3, "三行三段:\n{md}");
+        assert!(!md.contains("\"conclusion\""), "正文里不该出现 JSON 壳:\n{md}");
+        assert!(!md.contains("\"start\""), "正文里不该出现 JSON 壳:\n{md}");
+
+        // 落盘那一步也走一遍(① 与 ② 都调它)
+        save_transcript_read(fake.layout(), &merged).unwrap();
+        let on_disk = std::fs::read_to_string(fake.layout().transcript_read()).unwrap();
+        assert!(on_disk.contains("Python 列表"), "{on_disk}");
+    }
+
+    /// 没核验过的组报「未核验」—— 这份投影要能当"还剩哪儿没看"的地图用。
+    #[test]
+    fn the_read_projection_marks_the_unchecked_groups() {
+        let fake = Fake::new("materials-read-unchecked").with_transcript(&[(0.0, 2.0, "甲")]);
+        let opened = fake.open();
+        let (merged, _, _) = effective_transcript(&opened).unwrap();
+        let md = render_transcript_read(&merged);
+        assert!(md.contains("未核验"), "{md}");
+        assert!(md.contains("未核验 1 组"), "表头也要报:\n{md}");
+    }
+
+    /// 自动掐出来的 note 能长到五十来字 —— 挂在这儿要掐短(逐字对照在 diff.md)。
+    #[test]
+    fn the_read_projection_clips_long_change_notes() {
+        // 公共前后缀 + 两边各四十字的改动 → `changed_span` 会吐一条五十来字的 note
+        let old = format!("今天我们来{}就这样吧", "甲".repeat(40));
+        let new = format!("今天我们来{}就这样吧", "乙".repeat(40));
+        let fake = Fake::new("materials-read-clip").with_transcript(&[(0.0, 2.0, &old)]);
+        let mut opened = fake.open();
+        crate::apply_corrections(
+            &mut opened,
+            &[crate::CorrectionInput {
+                segment_id: 1,
+                conclusion: vidbrief_project::Conclusion::Corrected {
+                    text: new.clone(),
+                    kind: vidbrief_project::CorrectionType::Other,
+                    note: String::new(),
+                    reason: "上下文".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let (merged, _, _) = effective_transcript(&opened).unwrap();
+        let md = render_transcript_read(&merged);
+        let line = md
+            .lines()
+            .find(|l| l.contains("← 改了("))
+            .expect("这一行该有改动标记");
+        let note: String = line
+            .split("← 改了(")
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("括号里该是改动说明")
+            .to_string();
+        assert!(note.ends_with('…'), "长 note 该被掐掉:{line}");
+        assert!(
+            note.chars().count() <= 41,
+            "括号里该掐到 40 字上下,现在是 {}:{line}",
+            note.chars().count()
+        );
     }
 
     /// 没结论的段,`outcome`/`note`/`reason` 三个键**整个不写出去**(不是写 `null`)——

@@ -166,7 +166,11 @@ fn bad_evidence(opened: &OpenProject, shots: &vidbrief_project::Shots, transcrip
             });
             continue;
         };
-        if !group.text(t).contains(quote) {
+        // 判据与记录凭据时**同一套**(`Transcript::group_holds_quote`:不看标点、
+        // 认原文与现读法两版)。从前这里自己写了一句 `group.text(t).contains(quote)`,
+        // 比记录那边严得多 —— 于是"先看图、后改字"这种正常顺序下,
+        // 早先抄的引文会被门判成假的(样本 A 那趟 10 张图全中)。
+        if !t.group_holds_quote(&group, quote) {
             bad.push(BadEvidence {
                 shot: id,
                 why: format!(
@@ -993,8 +997,13 @@ mod tests {
 
     /// **凭据对不上材料 → 拦,而且说清是哪一条、哪里对不上。**
     ///
-    /// 这是「结论必须带能拿去对的东西」那条的落地。三种对不上:
-    /// 没凭据 / 段里那句话已经不是这么写的 / 引的段不在了。
+    /// 这是「结论必须带能拿去对的东西」那条的落地。两种对不上:
+    /// 没凭据 / 那句话**两版都不是**(编的)。引的段不在了另说。
+    ///
+    /// **不拦"材料后来改过"**(2026-09-27 晚改):判据的本意是"这句话真的在材料里"
+    /// (防编造),而**原文与现读法都是材料的真身** —— 先看图、后改字是正常顺序,
+    /// 早先抄的引文不该因为后来的纠错反过来被判不合格
+    /// (样本 A 那趟实测:10 张图的凭据全被这条挡下,一条都没编)。
     #[test]
     fn evidence_is_checked_against_the_material() {
         let fake = two_shots("review-evidence");
@@ -1028,7 +1037,8 @@ mod tests {
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("不是这么写的"), "要说清哪里对不上:{err}");
 
-        // ③ 材料后来被改过 —— 结论是照着旧文下的,该重看
+        // ③ **材料后来改过** —— 旧引文按"改前的原文"仍认(那是材料的真身之一),
+        //    门不再拿它拦;真正编的(两版都不是)才拦。
         set_evidence(
             &mut opened,
             Some(vidbrief_project::Evidence {
@@ -1049,6 +1059,16 @@ mod tests {
                 }],
             &[], &[])
         .unwrap();
+        gate_calibrate(&opened).expect("抄的是改前的原文,仍该认 —— 先看图后改字是正常顺序");
+
+        // ④ 两版都不是 → 照旧拦(编造还是编造)
+        set_evidence(
+            &mut opened,
+            Some(vidbrief_project::Evidence {
+                segment: 2,
+                quote: "画面右上角写着 Python 列表".into(),
+            }),
+        );
         let err = gate_calibrate(&opened).unwrap_err().to_string();
         assert!(err.contains("s001"), "{err}");
         assert!(err.contains("不是这么写的"), "{err}");

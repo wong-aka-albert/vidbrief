@@ -288,4 +288,36 @@ mod tests {
             offenders.join("\n")
         );
     }
+
+    /// **`apply_corrections` 的口径要投放到 agent 真正读得到的地方。**
+    ///
+    /// 2026-09-28 实测(样本 D):agent 要把自己前一版改错的字退回原文,
+    /// 两条判据都拒它,于是判定「没有对应档位」—— 靠猜试出 `kept`。
+    /// 当时只补了工具 description 里的那张表和两条拒词,漏了 `outcome` 的
+    /// **枚举变体注释**(它生成的 `oneOf[].description` 才是模型选值时看的),
+    /// 一验 MCP 投放文本才发现还是旧的「看了,决定保留原句」。
+    ///
+    /// 所以这条判据钉的是**投放面**:description 与入参 schema 两处都要说得出
+    /// 「这一段按原文算」和「退回原文」—— 改一处漏一处,这里就红。
+    /// (同一条毛病在这个仓里出过不止一次:见 `group_holds_quote` 那条注释。)
+    #[test]
+    fn the_revert_wording_reaches_the_agent() {
+        let tools = VidbriefServer::new().tools_for_test();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "apply_corrections")
+            .expect("apply_corrections 不在工具表里");
+        let description = tool.description.as_deref().unwrap_or("").to_string();
+        let schema = serde_json::to_string(&serde_json::Value::Object((*tool.input_schema).clone()))
+            .expect("schema 序列化");
+
+        for (what, blob) in [("description", description.as_str()), ("入参 schema", schema.as_str())] {
+            for needle in ["这一段按原文算", "退回原文"] {
+                assert!(
+                    blob.contains(needle),
+                    "{what} 里没有「{needle}」—— 退回原文这条口径没投放到 agent 读得到的地方"
+                );
+            }
+        }
+    }
 }

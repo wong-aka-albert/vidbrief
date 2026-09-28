@@ -31,15 +31,21 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// 顺序很重要。没有音轨的视频(如合成回归素材)压根不需要 whisper,
 /// 先 `Config::resolve()` 会因为"找不到模型"而失败 —— 那是在为一个**根本不需要**的东西报错。
 /// 用户没装 whisper 却被要求装,只因为这个视频没有音轨。
+///
+/// `preferred_model` = 这个项目**上次用的模型名**(`inputs.json` 里那栏,第一次跑给 `None`)。
+/// 环境变量没设时优先它 —— 免得"这台机器默认挑哪个"悄悄把项目的转录换掉
+/// (换了模型 = 那份转录的核验戳与结论全作废),详见
+/// [`Config::resolve_preferring`](whisper::Config::resolve_preferring)。
 pub fn transcribe_project(
     video: &Path,
     layout: &Layout,
     meta: &VideoMeta,
+    preferred_model: Option<&str>,
 ) -> Result<Option<Transcript>> {
     if !has_audio(video)? {
         return Ok(None);
     }
-    let cfg = Config::resolve()?;
+    let cfg = Config::resolve_preferring(preferred_model)?;
     transcribe(video, layout, meta, &cfg)
 }
 

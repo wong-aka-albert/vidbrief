@@ -124,6 +124,8 @@ projects/<project-name>/
 │   ├── change_curve.json        # 差帧图:逐时刻变化率(§4.3)
 │   ├── dense_regions.json       # 算法识别出的"变化密集区"(§4.4)
 │   ├── transcript.json          # 结构化转录(原始,永不就地改写)
+│   ├── transcript.read.md       # **人读投影**:一行一段(段号 · 时刻 · 现读法),**时刻是秒**,
+│   │                            #   读它比读 JSON 便宜四五倍 —— 投影不是材料,谁都能刷(§4.5)
 │   ├── transcript.srt/.txt/.vtt # whisper 原始输出(便于人工核对)
 │   ├── shots.json               # 截图清单 + agent 的校准结论(§4.6)
 │   ├── shots/                   # 步 1 抽出的截图
@@ -307,6 +309,31 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 - `01_preprocess/transcript.json` —— 步 1 产出,**原始**。`conclusion` **恒为 `null`**。
 - `02_calibrate/transcript.fixed.json` —— 步 2 产出,**全量副本** + 填结论。
 
+还有**第三份**:`01_preprocess/transcript.read.md` —— **人读投影**,一行一段
+(段号 · 时刻 · 现读法),组头带核验状态。
+
+> **时刻一律是秒**(2026-09-28,清账四十):跟 `transcript.json` 的 `start`、`shots.json`
+> 的 `t`、状态里的时刻**是同一个数**(两位小数以内、末尾的零去掉),抄回来不用折算。
+> `m:ss` 那种写法只是**给人对着视频看的标签**,只出现在页面上(`workbench.html` /
+> `report.html` / `report.md`),不是材料的口径 —— 材料里放它有三宗罪:要折算、
+> 多一层进制就多一个出错的地方、agent 抄时刻时多一次抄错的机会。
+> 实测:旧的 `m:ss` 实现是"先切分钟、再把剩下的秒四舍五入到整秒",59.6 秒会被印成
+> `0:60`,五份材料里一共 **48 处**这种不存在的时刻,而且全印在 agent 通读用的那份投影里。
+
+> **为什么要它(2026-09-27,清账三十九,实测驱动)**:项目目录就在 agent 的工作区里,
+> 它自带 `read`/`grep`/`shell`,伸手就够着材料 —— 实测 05 那趟重审,它**分 12 页把
+> `transcript.json` 整份读完**(offset 1 → 5601),花了 **153k 字符**,而那份 JSON 里
+> 真正的中文只有 **5,888 字**(结构壳占 20 倍);同一份材料走 `get_transcript` 只要 58k。
+> **堵是堵不住的**(材料是明文,这是有意的),所以按这个项目一贯的办法办:
+> **把正门修得比侧门好走**。这份投影 05 实测 **22.5k 字符 vs JSON 106k —— 便宜 4.7 倍**,
+> 而且读到的**永远是对的**(现读法、组、核验状态),不会像读原始 JSON 那样拿到一版
+> 没纠错、没断句的旧文。
+>
+> 它是**投影**(与 `workbench.html` 同类):① 写完转录刷一次、② 每次落结论再刷一次,
+> **没人拿它当判据**(判据在 `state.bin`)、不进内容底账;手改它下一次就被盖回去。
+> 提示词侧同时写死一句(§10.4 的 P2 与 `skill/`):**读材料走 `get_transcript` 或这份 `.md`,
+> 别去 read/grep `transcript.json`**。
+
 ```jsonc
 {
   "source": "source/video.mp4",
@@ -346,9 +373,15 @@ ASR 的输出**几乎不带标点**:五份材料实测 4761 段里只有 36 段�
 
 - **账要分得开**:断句会把几乎每一段都写一遍(实测 `touched` 从 19 段跳到 690 段),
   混进 `corrected` 里,那几段真改了字的就再也找不出来;
-- **判据工具核得动**:`punctuated` 的 `text` **去掉标点与空白之后必须和原文一字不差**
+- **判据工具核得动**:`punctuated` 的 `text` **去掉标点与空白之后必须和「现读法」一字不差**
   (`without_punctuation`,收得很宽:全角半角、括号引号、一切空白)。顺手改个字会被拒,
-  并指到"第几个字起不一样"—— 「在哪儿断句」是判断(归 agent),"不许改字"是形状(归工具);
+  并指到"第几个字起不一样",还把材料里现在那一版摆出来 ——
+  「在哪儿断句」是判断(归 agent),"不许改字"是形状(归工具)。
+  **比的是现读法不是原文**:一段改过字之后再拿原文加标点,等于把刚改好的字悄悄退回去
+  (2026-09-27 实测:agent 第一版就是这么发的,拒掉之后它才改用 `corrected` 报);
+- **一字没加的 = 看过、没问题**:材料自带标点时(whisper 对有些视频会吐 ASCII 标点)
+  一整批能有一二十段"本来就断过句",为它们把整批打回去重发的代价是几万 token,
+  所以这一档**不报错**,直接折成「看过、没问题」(回执里 `folded` 报数);
 - 反过来,`corrected` 的 `text` 若与原文**只差标点**,也会被拒并提示改用 `punctuated` ——
   同一个意思只留一种写法,账才对得上。
 
@@ -707,6 +740,17 @@ MCP 走 **stdio 时是 1:1**——每个 agent 会话由客户端拉起**自己�
 
 **按内容算,不按文件字节算**:换个缩进、重排键序不算材料变了(那是同一份内容换个写法),
 改一栏**投影**状态也不算(那本来就允许人手改)。
+
+**指纹里的浮点必须能精确往返**(2026-09-28 实测的坑,见 [260928-05]):候选里那些
+"算出来的小数"(`t` 取组中点、`gap` 是到最近一张图的距离)会落在 `934.3499999999999`
+这一档,而 `serde_json` **默认**的浮点解析是 best-effort —— 读回来差 1~3 个 ULP。
+底账是"写盘那一刻、拿内存值"算的,门是"读回文件"算的 —— 于是同一份内容出现两个指纹,
+门把手没碰过的材料喊成"被人改过"(而且症状很怪:同一条链上 `find` 中招、`disposition`
+反而放行,因为后者的输入本来就取自文件)。修法是 workspace 里
+`serde_json = { version = "1", features = ["float_roundtrip"] }` —— 这是**正确性**开关,
+不是性能选项。有测试盯着那份声明(`workspace_manifest_keeps_float_roundtrip`;
+⚠️ 行为测试抓不住它:`cargo test` 的 feature 是并集,dev-dependency `jsonschema`
+自带 `float_roundtrip`,所以这个坑**只在发布二进制里露头**)。
 
 门开口之前先对一遍;对不上就拦,并且点名两条去路:
 
@@ -1384,6 +1428,12 @@ skill/
 > 都不该决定它找不找得到。不这么做就有个躲不开的坑:断句是**后来**加上的,
 > 证据是**当时**抄的 —— 中间被插了逗号之后,当初那句一字不差的引文就"找不到了",
 > 工具会反过来指责一条本来正确的证据。
+>
+> **改过字的段:原文与现读法两版都认**(2026-09-27 晚):校准的顺序是"先看图、后改字",
+> 早先抄下的引文会被后来的纠错"追认"成旧写法 —— 那**不是**编造(两版都是材料的真身),
+> 不该拦。样本 A 那趟实测:门把 **10 张图**的凭据全判成"对不上材料",一条都没编。
+> 判据从此**只有一处**(`Transcript::group_holds_quote`),门不再自己写一遍
+> —— 它从前写的是 `group.text(t).contains(quote)`,比记录凭据那套严得多。
 
 **只报不拦** —— 这是它与 `build_report` 那条路的区别:
 
@@ -1491,6 +1541,13 @@ skill/
 | `ffmpeg` | `vidbrief-core::ffmpeg`(自认「拉起外部进程的唯一入口」) | `VIDBRIEF_FFMPEG` | 源视频 → 帧 / wav(都是文件) |
 | `ffprobe` | 同上 | `VIDBRIEF_FFPROBE` | 源视频 → stdout 上的 JSON |
 | `whisper-cli` | `vidbrief-asr::whisper` | `VIDBRIEF_WHISPER_BIN` / `VIDBRIEF_WHISPER_MODEL` / `VIDBRIEF_ASR_LANG` | wav → srt / txt / vtt(都是文件) |
+
+> **外挂怎么找**(2026-09-27,清账三十六):环境变量最硬;没设时,模型按
+> **"项目上次用的那个"** → 约定目录(**先 cwd,再从可执行文件往上退到仓库根**);
+> `whisper-cli` 按 环境变量 → 约定目录(同样两组)→ `PATH`。
+> 为什么要"跟着二进制走":cwd 是个会变的东西,而从别处跑时"外挂解析不出来"会被增量重跑
+> 判成"输入变了" —— 明明能沿用的转录被拉去重算,然后在"跑不起来"上失败(实测踩过两次)。
+> 要**换模型**只有一个正门:显式设 `VIDBRIEF_WHISPER_MODEL`(那是唯一能让指纹合法变的途径)。
 
 三条契约它们都满足(输入输出走文件或 STDIN-STDOUT、无状态、各自有单测)。
 **不再抽一层「插件框架」**:眼下只有一个真正的算法外挂(whisper),没有第二个需求 ——
@@ -1747,7 +1804,7 @@ vidbrief help                                       # 用法
 |------|------|------|------|
 | `list_shots` | 供 | `project_id` | 截图清单(origin/t/是否已校准) |
 | `get_shot` | 供 | `project_id, shot_id, [window]` | **图像内容** + 元数据 + 同期转录 |
-| `get_transcript` | 供 | `project_id, [start, end], [grouped]` | 转录(**默认按组**,§4.5.1;`text` 就是当前有效文本,另带 corrected/uncertain 标记)。要逐段原文给 `grouped: false` |
+| `get_transcript` | 供 | `project_id, [start, end], [grouped]` | 转录(**默认按组**,§4.5.1;`text` 就是当前有效文本,另带 corrected/uncertain 标记)。要逐段原文给 `grouped: false`。**要整份通读**(加断句就得通读)就读项目里那份人读投影 `01_preprocess/transcript.read.md`,别 read/grep `transcript.json`(§4.5:壳贵四五倍) |
 | `search_transcript` | 供 | `project_id, query, [limit]` | 命中分段 |
 | `get_change_curve` | 供 | `project_id, [start, end]` | 变化率曲线 |
 | `list_regions` | 供 | `project_id` | 密集区清单 |
@@ -1756,7 +1813,7 @@ vidbrief help                                       # 用法
 | 工具 | 类型 | 入参 | 出参 |
 |------|------|------|------|
 | `record_shot_check` | 存 | `project_id, shot_id, {match, audio_visual_sync, type_read, issues, confidence, evidence_quote}` | 更新 `shots.json`。`evidence_quote` 是**照抄**的一句转录原文,工具搜到就记下段号,搜不到拒收(§4.6) |
-| `apply_corrections` | 存 | `project_id, [{segment_id, outcome, text?, type?, note?, reason?}], [reviewed], [reviewed_ranges]` | 更新 `transcript.fixed.json` + `transcript.diff.md`;`outcome` ∈ `corrected`(必给 `text` = 改后的整句)/ `punctuated`(必给 `text` = 加了标点之后的整段,**字一个不动**:去掉标点与空白后必须跟原文一字不差)/ `kept`(必给 `note` = 为什么决定不改)/ `uncertain`(必给 `note` = 疑似写法);除 `punctuated` 外都要 `reason`;**一段只能有一条结论**(报两条会静默盖掉前一条);`text` 与原文一字不差会被拒,与原文**只差标点**也会被拒(那一档叫 `punctuated`)。**一批里的毛病一次全报**(不是一条一条蹦 —— 实测靠逐条报错时,模型把 26 条原样重发了三趟)。`reviewed`(逐段点名)与 `reviewed_ranges`(`[{from, to}]` 闭区间)**取并集**,记的是**审过、没问题**的段 —— 不报等于没审,门分不出「看过没问题」和「压根没看」。区间是给 whisper 切碎的长视频准备的:2269 段逐段点名要吐两千多个数字,对判断毫无贡献 |
+| `apply_corrections` | 存 | `project_id, [{segment_id, outcome, text?, type?, note?, reason?}], [reviewed], [reviewed_ranges]` | 更新 `transcript.fixed.json` + `transcript.diff.md`;`outcome` ∈ `corrected`(必给 `text` = 改后的整句)/ `punctuated`(必给 `text` = 加了标点之后的整段,**字一个不动**:去掉标点与空白后必须跟原文一字不差)/ `kept`(必给 `note` = 为什么决定不改)/ `uncertain`(必给 `note` = 疑似写法);除 `punctuated` 外都要 `reason`;**一段只能有一条结论**(报两条会静默盖掉前一条);`text` 与原文一字不差会被拒,与原文**只差标点**也会被拒(那一档叫 `punctuated`)。**一批里的毛病一次全报,而且好的照落**(2026-09-27 晚改:**逐条判生死** —— 没毛病的条目照落盘、照盖核验戳;**只有出问题的那几条被退回**,被退的段**不盖核验戳**,所以门照样拦、漏不掉。以前是整批退回:一条有毛病,几十条(几万 token)原样重发 —— 样本 A 那趟实测 12 次被拒里 47 处只是「一字没加」这一种)。`reviewed`(逐段点名)与 `reviewed_ranges`(`[{from, to}]` 闭区间)**取并集**,记的是**审过、没问题**的段 —— 不报等于没审,门分不出「看过没问题」和「压根没看」。区间是给 whisper 切碎的长视频准备的:2269 段逐段点名要吐两千多个数字,对判断毫无贡献 |
 | `write_note` | 存 | `project_id, path, md, [mode], [count_round]` | 写 `02_calibrate/` 与 `03_summary/` 下的 `.md`(交叉印证、校准日志、笔记)。**有专属工具的文件写不了**:`summary.md` 归 `write_summary`、`transcript.diff.md` 归 `apply_corrections` |
 | `approve` | 存 | `project_id, [note]` | 用户说"这些我知道,就这样过"时记下来,并快照当时的计数与逐条内容摘要 —— 放行**"要用户拍板"那一批**(§6.1.1、§4.2.1)。**不是门的开关**:没核验的它照样拦 |
 | `write_summary` | 存 | `project_id, md` | 落盘 `summary.md`;**先过 `review.calibrate` 那道门**;顺带记下它的内容底账(§6.1.2) |

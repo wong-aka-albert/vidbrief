@@ -158,6 +158,16 @@ pub struct ReviewedRange {
     pub to: u32,
 }
 
+/// 被退回的一条:段号 + 为什么。
+///
+/// 有了它,调用方才能说清"哪些落了、哪些没落" —— 以前是整批退回,
+/// 一条有毛病,几十条(几万 token)跟着重发。
+#[derive(Debug, Clone, Serialize)]
+pub struct RejectedItem {
+    pub segment_id: u32,
+    pub why: String,
+}
+
 /// 纠错的落盘结果。
 #[derive(Debug, Clone, Serialize)]
 pub struct CorrectionOutcome {
@@ -167,8 +177,12 @@ pub struct CorrectionOutcome {
     pub diff_path: PathBuf,
     /// 全稿段数。
     pub total_segments: usize,
-    /// 本次写了几条。
+    /// 本次写了几条(真正落下的;被退回的不算)。
     pub applied: usize,
+    /// 其中**折成「看过、没问题」**的条数(`punctuated` 但一字没加 —— 那一段本来就断过句)。
+    pub folded: usize,
+    /// **被逐条退回的条目**(段号 + 为什么):其余条目已经落地,这些没落地、也没盖核验戳。
+    pub rejected: Vec<RejectedItem>,
     /// 全稿里**改了正文**的段数(累计)。
     pub corrected: usize,
     /// 全稿里**只加了标点 / 断句**的段数(累计,字一个没动)。
@@ -286,55 +300,82 @@ pub fn apply_corrections(
     // 还两次把同一段报了两遍。工具当时只点名**第一条**,整批被拒 → 它把 26 条原样重发
     // → 又被拒(这次是 `uncertain` 没写 `note`)→ 再重发才过。**三趟的 token 全花在
     // "把同一份内容再说一次"上**,而每条毛病本来一句话就说清了。
-    let mut trouble = check_items(items, &fixed);
-    if !trouble.is_empty() {
-        trouble.sort();
-        trouble.dedup();
+    //
+    // # 好的照落,坏的才退(2026-09-27 晚,清账三十九)
+    //
+    // 上面那条"一次列全"解决了"报得少",没解决"退了就全退":一条有毛病,
+    // 整批几十条(几万 token)原样重发。可**每条结论本来就是彼此独立的**(一段一条),
+    // 没有任何理由连坐。所以现在:
+    //
+    // - 有毛病的**逐条退**,连同原因列出来;没毛病的**照落**(落盘 + 盖核验戳);
+    // - 被退的那些段**不盖核验戳** —— 所以门照样会拦("还有没核验的"),
+    //   漏是漏不掉的,只是不必为一条毛病重发一整批;
+    // - **整批都有毛病**时照旧整批退回(什么都没发生,这件事必须显式说)。
+    //   样本 A 那趟实测:12 次被拒里 47 处是"一字没加"这一种,而每次都赔上一整批重发。
+    let trouble = check_items(items, &fixed);
+    let rejected_ids: std::collections::HashSet<u32> = trouble.iter().map(|(id, _)| *id).collect();
+    let accepted: Vec<&CorrectionInput> = items
+        .iter()
+        .filter(|item| !rejected_ids.contains(&item.segment_id))
+        .collect();
+
+    if !trouble.is_empty() && accepted.is_empty() {
+        let mut lines: Vec<String> = trouble.iter().map(|(_, why)| format!("  - {why}")).collect();
+        lines.sort();
+        lines.dedup();
         bail!(
-            "这批结论里有 {} 处要改,一次都列在这儿了(**改完再交一次**即可,别一条一条试):\n\
+            "这批结论里有 {} 处要改(**一条都没落下**,一次都列在这儿了 —— \
+             改完再交一次即可,别一条一条试):\n\
              \n\
              {}\n\
              \n\
              四种 `outcome` 各自要带什么(一次说清):\n\
              - `corrected` —— 必给 `text`(**改后的整句**,不是只写改动的那个词);\
-             `type` 选填;`text` 跟原文一字不差会被拒(要保留原句就换 `kept`),\
+             `type` 选填;`text` 跟原文一字不差会被拒(要保留原句、或要把这一段**退回原文**,都用 `kept`),\
              跟原文只差标点也会被拒(那一档叫 `punctuated`)\n\
              - `punctuated` —— 必给 `text`(**加了标点之后的整段**);\
-             只许往原文里插标点:去掉标点之后必须跟原文一字不差(动了字就用 `corrected`);\
+             只许往**现读法**里插标点:去掉标点之后必须跟现读法一字不差(动了字就用 `corrected`);\
+             一字没加的会被折成「看过、没问题」(不报错 —— 但你不如直接报 `reviewed`);\
              这一档不给 `note` / `reason`\n\
-             - `kept` —— 必给 `note`(为什么决定不改)\n\
+             - `kept` —— 必给 `note`;它的意思是**这一段按原文算**:既包括「原文没问题、不用改」,也包括**撤回前面落下的那一版改动、退回原文**(撤回的理由写进 `note`;撤完还想补标点,再单独报一条 `punctuated` —— 那时现读法已经回到原文了)\n\
              - `uncertain` —— 必给 `note`(疑似是什么写法)\n\
              除 `punctuated` 外都要给 `reason`(依据:画面文字 / 上下文 / 术语表)。\n\
              **一段只能有一条结论**:同一段有几处改动,合并进同一个 `text`。\n\
              `reviewed` / `reviewed_ranges` 报的是**审过、没问题**的那些段,和上面这四个无关。",
-            trouble.len(),
-            trouble
-                .iter()
-                .map(|t| format!("  - {t}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            lines.len(),
+            lines.join("\n")
         );
     }
 
     // "审过"的戳盖在两处:改过的段(改了当然就是审过)+ 调用方点名/圈区间的那批。
     // **先收成一个集合再盖章**:片段几百段时,逐段去 `contains` 一遍是 O(段×报的),
     // 2269 段 × 2269 个 id 就是五百万次比较 —— 换成人手写就是"看着能跑、实测卡住"。
+    //
+    // **被退的那些不进来** —— 它们没落下,盖上戳就等于替一份没写进去的结论签了字。
     let mut touched: std::collections::HashSet<u32> = reviewed.iter().copied().collect();
     for range in ranges {
         touched.extend(range.from..=range.to);
     }
-    for item in items {
+    for item in &accepted {
         touched.insert(item.segment_id);
     }
 
-    for item in items {
+    // 「一字没加」的 `punctuated` 折成**看过、没问题**:不落结论,但它在 `touched` 里,
+    // 下面照样盖核验戳 —— 那一段的实情就是"看了,本来就断过句"。
+    let mut folded = 0usize;
+    for item in &accepted {
         let index = fixed
             .segments
             .iter()
             .position(|s| s.id == item.segment_id)
             .expect("上面刚校验过");
-        let original = fixed.segments[index].text.clone();
-        fixed.segments[index].conclusion = Some(polish(&item.conclusion, &original));
+        // note 的"改动片段"按**现读法**掐:第二次改同一段时,该说的是"从现在的读法改成了什么"
+        let effective = fixed.segments[index].effective_text().to_string();
+        if matches!(&item.conclusion, Conclusion::Punctuated { text } if text.trim() == effective) {
+            folded += 1;
+            continue;
+        }
+        fixed.segments[index].conclusion = Some(polish(&item.conclusion, &effective));
     }
 
     let now = vidbrief_project::now();
@@ -347,19 +388,24 @@ pub fn apply_corrections(
     // 结论进**状态**(`state.bin`);明文那份 `transcript.fixed.json` 退回投影。
     // 顺序要紧:先收状态再写投影,两者同出一源,不会各说各话。
     opened.state_mut().absorb_transcript(&fixed);
-    crate::materials::save_transcript_projection(opened, &fixed)?;
+    crate::materials::save_transcript_projection(&layout, &fixed)?;
     opened.save()?;
 
-    let diff = render_diff(&raw, &fixed);
     let stats = fixed.stats();
-    vidbrief_project::write_atomic_str(&layout.transcript_diff(), &diff)
-        .context("写入 transcript.diff.md 失败")?;
-
+    save_transcript_diff(&layout, &raw, &fixed)?;
     Ok(CorrectionOutcome {
         fixed_path: layout.transcript_fixed(),
         diff_path: layout.transcript_diff(),
         total_segments: fixed.segments.len(),
-        applied: items.len(),
+        applied: accepted.len(),
+        folded,
+        rejected: trouble
+            .iter()
+            .map(|(segment_id, why)| RejectedItem {
+                segment_id: *segment_id,
+                why: why.clone(),
+            })
+            .collect(),
         corrected: stats.corrected,
         punctuated: stats.punctuated,
         kept: stats.kept,
@@ -386,17 +432,31 @@ pub fn apply_corrections(
 ///
 /// 段号不存在的**不在这里报**:那一条由调用方那边统一核(`这些转录段不存在`),
 /// 两处都报会让人以为材料有问题。
-fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+///
+/// 返回 `(段号, 为什么)` —— 段号是给调用方**逐条退**用的:没毛病的那几条照落,
+/// 有毛病的只退它们自己(见 [`apply_corrections`] 里那段注释)。
+fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    let mut seen: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for item in items {
+        *seen.entry(item.segment_id).or_insert(0) += 1;
+    }
+    // 报了两次的段:**这一段的每一条都退**(不能替它猜是哪一条作数),其余条目照落
+    for (id, count) in &seen {
+        if *count > 1 {
+            out.push((
+                *id,
+                format!(
+                    "第 {id} 段报了 {count} 次 —— 一段只能有一条结论,\
+                     把这一段的几处改动**合并进同一个 `text`** 再交一次"
+                ),
+            ));
+        }
+    }
 
     for item in items {
-        if !seen.insert(item.segment_id) {
-            out.push(format!(
-                "第 {} 段报了两次 —— 一段只能有一条结论,把这一段的几处改动**合并进同一个 `text`**",
-                item.segment_id
-            ));
-            continue;
+        if seen[&item.segment_id] > 1 {
+            continue; // 上面已经整段退过了
         }
         let Some(segment) = fixed.segments.iter().find(|s| s.id == item.segment_id) else {
             continue;
@@ -407,64 +467,76 @@ fn check_items(items: &[CorrectionInput], fixed: &Transcript) -> Vec<String> {
         if !matches!(&item.conclusion, Conclusion::Punctuated { .. })
             && item.conclusion.reason().trim().is_empty()
         {
-            out.push(format!(
+            out.push((
+                id,
                 "第 {id} 段没给 `reason`(依据:画面文字 / 上下文 / 术语表)—— \
                  除 `punctuated` 外,每一种结论都要写"
+                    .to_string(),
             ));
         }
         match &item.conclusion {
             Conclusion::Corrected { text, .. } => {
                 if text.trim().is_empty() {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段说改了(`outcome = corrected`),却没给 `text` —— \
                          要的是**改后的整句**(不是只写改动的那个词:那是 `reason` 里的东西);\
                          决定不改就换成 `outcome = kept`"
-                    ));
+                    )));
                 } else if text == &segment.text {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段的 `text` 和原文一字不差 —— 那不叫改;\
-                         要保留原句就换成 `outcome = kept`(并写清为什么决定不改)"
-                    ));
+                         要保留原句就用 `outcome = kept`(并写清为什么决定不改),\
+                         **本意是要把这一段退回原文、撤掉前面落下的那一版改动,也是它**"
+                    )));
                 } else if without_punctuation(text) == without_punctuation(&segment.text) {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段的 `text` 跟原文**只差标点**(字一个没动)—— \
                          这一档有专门的 `outcome = punctuated`,账上要跟'改了字'分开;\
-                         换成它,并把 `note` / `reason` 去掉"
-                    ));
+                         换成它,并把 `note` / `reason` 去掉。\
+                         **本意若是把这一段退回原文(撤掉前面那一版改动),改用 `kept`** —— \
+                         它不给 `text`,报下去那一段就按原文算"
+                    )));
                 }
             }
             Conclusion::Punctuated { text } => {
+                // 比的是**现读法**(有纠错就用纠错后那一版):拿原文来加标点,
+                // 会把刚改好的字**悄悄退回原文** —— 那正是这条判据要拦的。
+                let effective = segment.effective_text();
                 if text.trim().is_empty() {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段说加了断句(`outcome = punctuated`),却没给 `text` —— \
                          要的是**加了标点之后的整段**(不是只给标点)"
-                    ));
-                } else if text == &segment.text {
-                    out.push(format!(
-                        "第 {id} 段标了 `punctuated`,可 `text` 跟原文一字不差 —— 一个字都没加。\
-                         这一段要是没问题,报进 `reviewed` / `reviewed_ranges` 就够,不用单列一条"
-                    ));
-                } else if without_punctuation(text) != without_punctuation(&segment.text) {
-                    out.push(format!(
+                    )));
+                } else if text == effective {
+                    // **一字没加**:这里不报错 —— 调用方把它折成「看过、没问题」。
+                    //
+                    // 为什么不拒:材料**自带标点**时(whisper 对有些视频会吐 ASCII 标点),
+                    // 一整批里能有一二十段"本来就断过句了"。为它们把整批打回去重发,
+                    // 代价是几万 token 的重发,而"这一段不用动"本来就是合法结论。
+                    // (2026-09-27 实测:样本 A 那趟一次性被拒 19 段,全是这种。)
+                } else if without_punctuation(text) != without_punctuation(effective) {
+                    out.push((id, format!(
                         "第 {id} 段标的是「只加标点」(`outcome = punctuated`),可正文里的**字**动了 —— {}。\
-                         改字要用 `outcome = corrected`(那才记 `type` / `note`);\
-                         `punctuated` 只许往原文里插标点",
-                        first_difference(&segment.text, text)
-                    ));
+                         材料里现在是「{}」。改字要用 `outcome = corrected`(那才记 `type` / `note`);\
+                         `punctuated` 只许往**现读法**里插标点。\
+                         **本意若是把这一段退回原文(撤掉前面那一版改动),用 `kept`**",
+                        first_difference(effective, text),
+                        shorten(effective),
+                    )));
                 }
             }
             Conclusion::Kept { note, .. } => {
                 if note.trim().is_empty() {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段决定不改(`outcome = kept`),却没写 `note`(为什么决定不改)"
-                    ));
+                    )));
                 }
             }
             Conclusion::Uncertain { note, .. } => {
                 if note.trim().is_empty() {
-                    out.push(format!(
+                    out.push((id, format!(
                         "第 {id} 段标了存疑(`outcome = uncertain`),却没写 `note`(疑似是什么写法)"
-                    ));
+                    )));
                 }
             }
         }
@@ -583,6 +655,23 @@ fn shorten(text: &str) -> String {
     out
 }
 
+/// 把**对照表**按当前状态重写一遍(不碰状态、不盖核验戳)。
+///
+/// 它和 `transcript.fixed.json` / `transcript.read.md` 一样是**投影**,但这三份里
+/// 只有它从前是在 `apply_corrections` 里顺手写的 —— 于是改了口径(2026-09-28:时刻
+/// 从 `m:ss` 换成秒)之后,老项目里那份还挂着旧写法,得等下一次写材料才更新。
+/// 给 `upgrade` 用:它就是"把明文投影刷成当前版本",三份一起刷才对得上。
+pub fn save_transcript_diff(
+    layout: &vidbrief_project::layout::Layout,
+    raw: &Transcript,
+    fixed: &Transcript,
+) -> Result<std::path::PathBuf> {
+    let diff = render_diff(raw, fixed);
+    vidbrief_project::write_atomic_str(&layout.transcript_diff(), &diff)
+        .context("写入 transcript.diff.md 失败")?;
+    Ok(layout.transcript_diff())
+}
+
 /// 人可核对的对照表。
 fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
     let mut out = String::new();
@@ -618,7 +707,7 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
 
     if stats.rewritten() > 0 {
         out.push_str("## 动了字的\n\n");
-        out.push_str("| # | 时刻 | 原文 | 改后 | 类型 | 说明 | 依据 |\n");
+        out.push_str("| # | 时刻(秒) | 原文 | 改后 | 类型 | 说明 | 依据 |\n");
         out.push_str("|---|------|------|------|------|------|------|\n");
         for seg in &fixed.segments {
             let Some(conclusion) = &seg.conclusion else {
@@ -642,7 +731,7 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {} |\n",
                 seg.id,
-                clock(seg.start),
+                seconds(seg.start),
                 cell(original),
                 after,
                 kind_name(conclusion),
@@ -669,7 +758,7 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
             vidbrief_project::layout::TRANSCRIPT_FIXED_FILE,
             PUNCTUATED_SHOWN.min(punctuated.len()),
         ));
-        out.push_str("| # | 时刻 | 原文 | 加了标点之后 |\n");
+        out.push_str("| # | 时刻(秒) | 原文 | 加了标点之后 |\n");
         out.push_str("|---|------|------|------|\n");
         for seg in punctuated.iter().take(PUNCTUATED_SHOWN) {
             let original = raw
@@ -681,7 +770,7 @@ fn render_diff(raw: &Transcript, fixed: &Transcript) -> String {
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
                 seg.id,
-                clock(seg.start),
+                seconds(seg.start),
                 cell(original),
                 cell(seg.effective_text()),
             ));
@@ -708,13 +797,9 @@ fn kind_name(conclusion: &Conclusion) -> &'static str {
     }
 }
 
-/// `mm:ss.s`,与视图上的时间轴一致。
-fn clock(seconds: f64) -> String {
-    let total = seconds.max(0.0);
-    let minutes = (total / 60.0).floor();
-    let rest = total - minutes * 60.0;
-    format!("{minutes:02.0}:{rest:04.1}")
-}
+/// 时刻口径只有一处:[`crate::materials::seconds`](**材料里一律秒**)。
+/// 这里曾经自己写了一份 `mm:ss.s`,于是同一件事有了两种写法、两个出错的地方。
+use crate::materials::seconds as seconds;
 
 // ── 落盘 ─────────────────────────────────────────────────────────────
 
@@ -1413,7 +1498,7 @@ mod tests {
             ("第 1 段", "却没给 `text`"),
             ("第 2 段", "却没写 `note`"),
             ("第 3 段", "却没写 `note`"),
-            ("第 4 段", "报了两次"),
+            ("第 4 段", "报了 2 次"),
             ("第 5 段", "字**动了"),
             ("第 6 段", "只差标点"),
         ] {
@@ -1426,6 +1511,71 @@ mod tests {
         assert!(
             !fake.layout().transcript_fixed().exists(),
             "整批拒绝时不该落下半个文件"
+        );
+    }
+
+    /// **好的照落,坏的才退** —— 一条有毛病不该连坐整批(那是几万 token 的重发)。
+    #[test]
+    fn a_bad_item_does_not_take_the_whole_batch_down() {
+        let fake = Fake::new("concl-partial").with_transcript(&[
+            (0.0, 2.0, "派森列表"),
+            (2.0, 4.0, "各位好"),
+            (4.0, 6.0, "元祖类型"),
+        ]);
+        let mut opened = fake.open();
+
+        let outcome = apply_corrections(
+            &mut opened,
+            &[
+                // ① 好的:改字
+                CorrectionInput {
+                    segment_id: 1,
+                    conclusion: Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "画面文字".into(),
+                    },
+                },
+                // ② 坏的:说改了却没给 `text`
+                CorrectionInput {
+                    segment_id: 2,
+                    conclusion: Conclusion::Corrected {
+                        text: String::new(),
+                        kind: CorrectionType::Other,
+                        note: String::new(),
+                        reason: "蹦发 → 爆发".into(),
+                    },
+                },
+                // ③ 好的:断句
+                CorrectionInput {
+                    segment_id: 3,
+                    conclusion: Conclusion::Punctuated {
+                        text: "元祖类型。".into(),
+                    },
+                },
+            ],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.applied, 2, "两条好的该落下");
+        assert_eq!(outcome.rejected.len(), 1, "一条坏的该被退");
+        assert_eq!(outcome.rejected[0].segment_id, 2);
+        assert!(outcome.rejected[0].why.contains("却没给 `text`"), "{:?}", outcome.rejected);
+
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.segments[0].effective_text(), "Python 列表");
+        assert_eq!(fixed.segments[2].effective_text(), "元祖类型。");
+        assert!(fixed.segments[1].conclusion.is_none(), "坏的没落结论");
+        assert!(
+            fixed.segments[1].checked_at.is_none(),
+            "**被退的段不盖核验戳** —— 门照样会拦,漏不掉"
+        );
+        assert!(
+            fixed.segments[0].checked_at.is_some() && fixed.segments[2].checked_at.is_some(),
+            "落下的那两条照盖"
         );
     }
 
@@ -1490,6 +1640,9 @@ mod tests {
         let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
         assert!(diff.contains("只加了断句的(1 段)"), "{diff}");
         assert!(diff.contains("加了断句 1 段"), "{diff}");
+        // 时刻列是**秒**(跟投影、JSON、状态同一个数)—— 不再是 `0:00.0` 那种写法
+        assert!(diff.contains("| 1 | 0 | 今天我们来讲一个列表 |"), "{diff}");
+        assert!(diff.contains("| # | 时刻(秒) |"), "表头要写明单位:\n{diff}");
     }
 
     /// 标点里**顺手改了个字** → 拒,并指到具体是第几个字。
@@ -1520,18 +1673,67 @@ mod tests {
         );
     }
 
-    /// 没加任何标点 → 拒(没问题的段报 `reviewed` 就够,不该单列一条)。
+    /// 没加任何标点 → **不再拒**:折成「看过、没问题」,照样盖核验戳。
+    ///
+    /// (材料自带标点时这种段一大把;为它们把整批打回去重发,代价是几万 token。)
     #[test]
-    fn punctuation_that_adds_nothing_is_refused() {
-        let fake = Fake::new("concl-punct-noop").with_transcript(&[(0.0, 2.0, "各位好")]);
+    fn punctuation_that_adds_nothing_folds_into_checked() {
+        let fake = Fake::new("concl-punct-noop").with_transcript(&[(0.0, 2.0, "各位好。")]);
         let mut opened = fake.open();
 
+        let outcome = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Punctuated {
+                    text: "各位好。".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.folded, 1, "一字没加的那条该被折掉");
+        assert_eq!(outcome.punctuated, 0, "折掉的不该算进'加了断句'");
+        assert_eq!(outcome.reviewed, 1, "但它算**看过**");
+
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert!(fixed.segments[0].conclusion.is_none(), "不落结论");
+        assert!(fixed.segments[0].checked_at.is_some(), "要盖核验戳");
+        assert_eq!(fixed.stats().clean, 1, "它就是'看过、没问题'");
+    }
+
+    /// **只加标点要照「现读法」来** —— 拿原文加标点会把刚改好的字悄悄退回去。
+    #[test]
+    fn punctuation_must_follow_the_current_reading_not_the_raw_text() {
+        let fake = Fake::new("concl-punct-revert").with_transcript(&[(0.0, 2.0, "各位好元祖类型")]);
+        let mut opened = fake.open();
+
+        // 先把「元祖」改成「元组」
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "各位好元组类型".into(),
+                    kind: CorrectionType::Terminology,
+                    note: String::new(),
+                    reason: "画面上写着".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // 照着**原文**加标点 → 拒(那等于把「元组」退回「元祖」)
         let err = apply_corrections(
             &mut opened,
             &[CorrectionInput {
                 segment_id: 1,
                 conclusion: Conclusion::Punctuated {
-                    text: "各位好".into(),
+                    text: "各位好,元祖类型。".into(),
                 },
             }],
             &[],
@@ -1539,8 +1741,25 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("一字不差"), "{err}");
-        assert!(err.contains("reviewed"), "要告诉它该报进哪里:{err}");
+        assert!(err.contains("现读法"), "要说清该照哪一版:\n{err}");
+        assert!(err.contains("元组"), "要把现读法摆出来:\n{err}");
+
+        // 照着**现读法**加标点 → 收
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Punctuated {
+                    text: "各位好,元组类型。".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.segments[0].effective_text(), "各位好,元组类型。");
+        assert_eq!(fixed.stats().corrected + fixed.stats().punctuated, 1, "一段只有一条结论");
     }
 
     /// `corrected` 跟原文**只差标点** → 拒,并点名该换成 `punctuated`。
@@ -1567,6 +1786,89 @@ mod tests {
         .to_string();
         assert!(err.contains("只差标点"), "{err}");
         assert!(err.contains("punctuated"), "要告诉它改用哪一个:{err}");
+    }
+
+    /// 「退回原文」得有个去处:两条判据都要点名 `kept`。
+    ///
+    /// 2026-09-28 实测(样本 D 那趟):agent 要把自己前一版改错的字退回原文 ——
+    /// `corrected` 拒它(跟原文一字不差 / 只差标点)、`punctuated` 也拒它(字动了),
+    /// 两条拒词里都没提"退回原文"归哪一档,它只能靠猜试出 `kept`。
+    #[test]
+    fn a_revert_is_pointed_at_kept() {
+        let fake = Fake::new("concl-revert").with_transcript(&[(0.0, 2.0, "加入到我们元祖的观众")]);
+        let mut opened = fake.open();
+        // 先落一条改字(元祖 → 元组)—— 这一条就是后面要撤的那一版
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "用上元组类型的很多的初学者".into(),
+                    kind: CorrectionType::Terminology,
+                    note: "讯 → 训".into(),
+                    reason: "画面文字".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // ① 拿原文当 `corrected` 交:拒,并且**点名这是"退回原文"**
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "加入到我们元祖的观众".into(),
+                    kind: CorrectionType::Terminology,
+                    note: "撤回".into(),
+                    reason: "用户拍板:以原文为准".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("退回原文"), "拒词要说清退回原文归哪儿:{err}");
+        assert!(err.contains("kept"), "{err}");
+
+        // ② 拿原文加标点当 `punctuated` 交:也拒,同样点名 `kept`
+        let err = apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Punctuated {
+                    text: "加入到我们元祖的观众，".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("退回原文"), "{err}");
+        assert!(err.contains("kept"), "{err}");
+
+        // ③ 正路:`kept` 一报,这一段就按原文算(前一版改动被撤掉)
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Kept {
+                    note: "撤回「元组」:用户拍板以原文为准".into(),
+                    reason: "无画面可证,不按同音改".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
+        assert_eq!(fixed.segments[0].effective_text(), "加入到我们元祖的观众");
+        assert_eq!(fixed.stats().corrected, 0, "撤回之后不再算「改了字」");
+        assert_eq!(fixed.stats().kept, 1, "它归的是「这一段按原文算」那一档");
     }
 
     /// `reason` 现在是选填(断句不用给)—— "其余三种必须写"这条就落在工具这边。
@@ -1958,11 +2260,34 @@ mod tests {
         }
     }
 
+    /// 对照表里的时刻跟着材料口径走:**秒**(本文件不再自己写一份 `m:ss` ——
+    /// 那份实现是"先切分钟再四舍五入秒",会印出 `14:60`;同一个口径只留一处,
+    /// 见 [`crate::materials::seconds`])。
     #[test]
-    fn clock_matches_the_timeline_format() {
-        assert_eq!(clock(0.0), "00:00.0");
-        assert_eq!(clock(188.6), "03:08.6");
-        assert_eq!(clock(985.43), "16:25.4");
-        assert_eq!(clock(-1.0), "00:00.0");
+    fn the_diff_table_shows_seconds() {
+        let fake = Fake::new("concl-diff-seconds").with_transcript(&[
+            (899.6, 906.0, "就比方说没有用上元祖类型的很多的初学者朋友"),
+        ]);
+        let mut opened = fake.open();
+        apply_corrections(
+            &mut opened,
+            &[CorrectionInput {
+                segment_id: 1,
+                conclusion: Conclusion::Corrected {
+                    text: "就比方说没有用上元组类型的很多的初学者朋友，".into(),
+                    kind: CorrectionType::Terminology,
+                    note: "浅 → 潜".into(),
+                    reason: "画面文字".into(),
+                },
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
+        // 899.6 秒:旧写法会印成 `14:60`
+        assert!(diff.contains("| 899.6 |"), "时刻要用秒:\n{diff}");
+        assert!(!diff.contains("14:60"), "不该再有那种不存在的时刻:\n{diff}");
     }
 }

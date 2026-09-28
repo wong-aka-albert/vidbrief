@@ -124,8 +124,8 @@ pub struct CorrectionItem {
     /// | `outcome` | 必给 | 说明 |
     /// |-----------|------|------|
     /// | `corrected` | `text`(改后的**整句**) | 改了字 |
-    /// | `punctuated` | `text`(加了标点后的整句) | **只加标点 / 断句**,一个字都不改 |
-    /// | `kept` | `note`(为什么决定不改) | 看过,决定保留原句 |
+    /// | `punctuated` | `text`(加了标点后的整句) | **只加标点 / 断句**(照**现读法**来),一个字都不改 |
+    /// | `kept` | `note`(为什么决定不改 / 为什么撤回) | **这一段按原文算** —— 原文没问题不用改,也包括**撤回前面落的改动、退回原文** |
     /// | `uncertain` | `note`(疑似是什么写法) | 定不了,留给用户裁决 |
     ///
     /// 除 `punctuated` 外都要给 `reason`。**同一段只能有一条结论**:一段里有几处改动,
@@ -135,17 +135,20 @@ pub struct CorrectionItem {
     /// 不是只写改动的那个词(那是 `note` / `reason` 里的东西)。
     ///
     /// - `corrected`:改后的整句。**必须和原文不一样** —— 想保留原句就用 `kept`;
+    ///   **要退回原文(撤掉这一段前面落下的改动)也是 `kept`**,别拿原文来当 `corrected`(会被拒);
     /// - `punctuated`:加了标点之后的整段。**只许插标点** —— 去掉标点与空白之后
-    ///   必须跟原文一字不差(动了字就用 `corrected`,工具会把这两者分开);
-    ///   一个字没加也会被拒(那一段没问题的话,报进 `reviewed` 就够)。
+    ///   必须跟**现读法**一字不差(有纠错就是纠错后那一版;动了字就用 `corrected`,
+    ///   工具会把这两者分开)。一个字没加的会被**折成「看过、没问题」**
+    ///   —— 不报错,但你不如直接报 `reviewed`。
     #[serde(default)]
     pub text: Option<String>,
     /// `outcome = corrected` 时给:错的性质(`homophone` / `terminology` / `number` / `other`)。
     #[serde(default, rename = "type")]
     pub kind: Option<CorrectionTypeArg>,
     /// 改动内容,如 `派森 → Python`。
-    /// **`kept` / `uncertain` 时必给**(前者说为什么不改,后者说疑似是什么写法)——
-    /// 否则这条记录没有信息量。`corrected` 不给就按前后缀差异自动掐出来;
+    /// **`kept` / `uncertain` 时必给**(前者说为什么决定不改、或撤回的是什么,
+    /// 后者说疑似是什么写法)—— 否则这条记录没有信息量。
+    /// `corrected` 不给就按前后缀差异自动掐出来;
     /// `punctuated` **不用给**(标点加在哪儿,`text` 自己说得最清楚)。
     #[serde(default)]
     pub note: Option<String>,
@@ -164,7 +167,7 @@ pub enum CorrectionOutcomeArg {
     Corrected,
     /// **只加了标点 / 断句** —— 一个字都没动(ASR 的输出几乎不带标点,这一档专门记它)。
     Punctuated,
-    /// 看过,**决定保留原句**。
+    /// 看过,**这一段按原文算**:原文没问题不用改,也包括**撤回前面落的改动、退回原文**。
     Kept,
     /// 看过,但定不了 —— 留给用户裁决。
     Uncertain,
@@ -307,14 +310,15 @@ impl VidbriefServer {
                        **四种 `outcome` 各自要带什么(一次说清,别一条一条试)**:\
                        `corrected`(改了字)必给 `text`(**改后的整句**,不是只写改动的那个词)、`type` 选填;\
                        `punctuated`(**只加标点/断句,字一个不动**)必给 `text`(**加了标点之后的整段**)——\
-                       去掉标点与空白后必须跟原文一字不差,动了字就用 `corrected`,一个字没加也会被拒;\
-                       `kept`(看过决定不改)必给 `note`(为什么);\
+                       去掉标点与空白后必须跟**现读法**一字不差(有纠错就是纠错后那一版),\
+                       动了字就用 `corrected`;一个字没加的会被折成「看过、没问题」(不报错);\
+                       `kept`(**这一段按原文算**:原文没问题不用改,**或撤回前面落的改动、退回原文**)必给 `note`;\
                        `uncertain`(定不了)必给 `note`(疑似是什么写法);\
                        除 `punctuated` 外都要给 `reason`(依据)。**同一段只能有一条结论** ——\
                        一段里几处改动合并进同一个 `text`;\
-                       `text` 跟原文一字不差会被拒(那不叫改,要保留原句就换 `kept`),\
+                       `text` 跟原文一字不差会被拒(那不叫改,要保留原句、**或把这一段退回原文**,都换 `kept`),\
                        跟原文只差标点也会被拒(那一档叫 `punctuated`)。\
-                       一批里所有问题**一次全报**给你,改完再交一次即可。\
+                        有毛病的**逐条退回**(其余条目照落,不用重发),一次全报给你 ——\n                       改完**只把退回的那几条**再交一次。\
                        \n\n\
                        **审过、没问题的段用 `reviewed` 报上来**(如 `[1,2,3,…]`);\
                        一整片没问题就用 `reviewed_ranges` 报闭区间(如一条 from 5 to 300),两者取并集;\
@@ -329,33 +333,21 @@ impl VidbriefServer {
         let (mut opened, slot) = self.open_write(&p.project_id).await?;
         let mut items = Vec::with_capacity(p.corrections.len());
         for c in p.corrections {
-            // 四种结论在这里拼成落盘用的那一个枚举 —— 缺件当场退回去,
-            // 而不是让它带着"说要改、文本空着"往下走
+            // 四种结论在这里拼成落盘用的那一个枚举。
+            //
+            // **这里不再逐条挡"缺件"**(2026-09-27 晚):`corrected` 没给 `text` 这种毛病
+            // 由 `apply_corrections` 里的 `check_items` **逐条**退 —— 在这儿一挡,
+            // 整批(几十条、几万 token)就都被拦在门口了,而好的那些本来可以照落。
             let conclusion = match c.outcome {
-                CorrectionOutcomeArg::Corrected => {
-                    let Some(text) = c.text.filter(|t| !t.trim().is_empty()) else {
-                        return Err(failed(format!(
-                            "第 {} 段 `outcome = corrected` 却没给 `text` —— 要保留原句就用 `kept`",
-                            c.segment_id
-                        )));
-                    };
-                    vidbrief_project::Conclusion::Corrected {
-                        text,
-                        kind: c.kind.unwrap_or(CorrectionTypeArg::Other).into(),
-                        note: c.note.unwrap_or_default(),
-                        reason: c.reason,
-                    }
-                }
-                CorrectionOutcomeArg::Punctuated => {
-                    let Some(text) = c.text.filter(|t| !t.trim().is_empty()) else {
-                        return Err(failed(format!(
-                            "第 {} 段 `outcome = punctuated` 却没给 `text` —— \
-                             要的是**加了标点之后的整段**",
-                            c.segment_id
-                        )));
-                    };
-                    vidbrief_project::Conclusion::Punctuated { text }
-                }
+                CorrectionOutcomeArg::Corrected => vidbrief_project::Conclusion::Corrected {
+                    text: c.text.unwrap_or_default(),
+                    kind: c.kind.unwrap_or(CorrectionTypeArg::Other).into(),
+                    note: c.note.unwrap_or_default(),
+                    reason: c.reason,
+                },
+                CorrectionOutcomeArg::Punctuated => vidbrief_project::Conclusion::Punctuated {
+                    text: c.text.unwrap_or_default(),
+                },
                 CorrectionOutcomeArg::Kept => vidbrief_project::Conclusion::Kept {
                     note: c.note.unwrap_or_default(),
                     reason: c.reason,
@@ -383,6 +375,28 @@ impl VidbriefServer {
             vidbrief_ops::apply_corrections(&mut opened, &items, &reviewed, &ranges)
         })
         .await?;
+        // **部分落实**:好的已经落下了、坏的逐条退回 —— 这里返回错误(不是成功),
+        // 因为"还有几条没落"是**必须处理**的事;但话里要说清哪些落了,
+        // 免得它把整批几十条原样重发一遍(那正是这次要省掉的)。
+        if !outcome.rejected.is_empty() {
+            let lines: Vec<String> = outcome
+                .rejected
+                .iter()
+                .map(|r| format!("  - {}", r.why))
+                .collect();
+            return Err(failed(format!(
+                "这批里 **{} 条已经落下**(不用再发);这 **{} 条没落** —— 它们没写进材料,\
+                 也不算「看过」,改完**只把这几条**再交一次:\n\
+                 \n\
+                 {}\n\
+                 \n\
+                 规矩见上面那次报错里的四条(要点:`punctuated` 照**现读法**插标点;\
+                 一字没加的会被折成「看过、没问题」,不用单列)。",
+                outcome.applied,
+                outcome.rejected.len(),
+                lines.join("\n"),
+            )));
+        }
         Ok(attach_warning(json(&outcome)?, slot.warning()))
     }
 

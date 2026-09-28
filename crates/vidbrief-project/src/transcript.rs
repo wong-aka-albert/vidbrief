@@ -618,6 +618,74 @@ fn ends_a_sentence(text: &str) -> bool {
     )
 }
 
+/// 引文的**归一形式**:掐掉空白与标点。空串 → `None`(那样的引文什么都匹配得上)。
+fn quote_needle(quote: &str) -> Option<String> {
+    let needle = without_punctuation(quote.trim());
+    if needle.is_empty() {
+        None
+    } else {
+        Some(needle)
+    }
+}
+
+/// 在这几段里找那句话,返回它**起点**所在段的 id。
+///
+/// **两版都认**(2026-09-27 晚):先按**现读法**找,找不到再按**原文**找。
+///
+/// 为什么:凭据是**当时**抄的,而校准的顺序是"先看图、后改字" —— 先抄下的那句引文,
+/// 等 agent 把转录里那几个字改对之后,就跟现读法对不上了。门于是把 10 张图的凭据
+/// 全判成"对不上材料"(样本 A 那趟实测),而它们一条都没编 ——
+/// 只是被后来的纠错"追认"成了旧写法。判据的本意是"这句**话**真的在材料里"(防编造),
+/// 而原文与现读法**都是材料的真身**。
+fn find_in_group(segs: &[Segment], needle: &str) -> Option<u32> {
+    for raw_only in [false, true] {
+        let Some((joined, starts)) = join_for_quote(segs, raw_only) else {
+            continue;
+        };
+        let Some(at) = joined.find(needle) else {
+            continue;
+        };
+        return Some(
+            starts
+                .iter()
+                .rev()
+                .find(|(offset, _)| *offset <= at)
+                .map(|(_, id)| *id)
+                .unwrap_or(segs[0].id),
+        );
+    }
+    None
+}
+
+/// 把一组的几段拼成**去了标点**的一串,顺带记下每段在串里的起点(字节)。
+///
+/// `raw_only = true` 时读的是 [`Segment::text`](ASR 原文、永不就地改写),
+/// 否则读**现读法** —— 引文比对要两版都试,理由见 [`Transcript::locate_quote`]。
+///
+/// 起点只用来**比大小**(找那句话落在哪一段),不拿来切片 ——
+/// 中文的多字节在这里不构成裸切片风险(AGENTS §1.1)。
+fn join_for_quote(segs: &[Segment], raw_only: bool) -> Option<(String, Vec<(usize, u32)>)> {
+    let mut joined = String::new();
+    let mut starts: Vec<(usize, u32)> = Vec::with_capacity(segs.len());
+    for seg in segs {
+        starts.push((joined.len(), seg.id));
+        let text = if raw_only {
+            seg.text.as_str()
+        } else {
+            seg.effective_text()
+        };
+        for ch in text.chars() {
+            if !is_punctuation(ch) {
+                joined.push(ch);
+            }
+        }
+    }
+    if joined.is_empty() {
+        return None;
+    }
+    Some((joined, starts))
+}
+
 /// 结构化转录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -715,41 +783,15 @@ impl Transcript {
     /// 门会反过来指责一条本来正确的证据(实测:五份材料重审的那一趟,
     /// 旧证据与新标点全是这么撞的)。
     pub fn locate_quote(&self, quote: &str) -> Option<QuoteHit> {
-        let quote = quote.trim();
-        if quote.is_empty() {
-            return None;
-        }
-        let needle = without_punctuation(quote);
-        if needle.is_empty() {
-            return None;
-        }
+        let needle = quote_needle(quote)?;
         for group in self.groups() {
             let segs = match self.segment_slice(&group) {
                 Some(s) => s,
                 None => continue,
             };
-            // 拼串也去标点,两份归一过的串才能逐字对上。每段在**归一串**里的起点
-            // (字节)—— 只用来比大小,**不拿来切片**,所以中文的多字节在这里
-            // 不构成裸切片风险(AGENTS §1.1)。
-            let mut joined = String::new();
-            let mut starts: Vec<(usize, u32)> = Vec::with_capacity(segs.len());
-            for seg in segs {
-                starts.push((joined.len(), seg.id));
-                for ch in seg.effective_text().chars() {
-                    if !is_punctuation(ch) {
-                        joined.push(ch);
-                    }
-                }
-            }
-            let Some(at) = joined.find(&needle) else {
+            let Some(anchor) = find_in_group(segs, &needle) else {
                 continue;
             };
-            let anchor = starts
-                .iter()
-                .rev()
-                .find(|(offset, _)| *offset <= at)
-                .map(|(_, id)| *id)
-                .unwrap_or(group.from);
             return Some(QuoteHit {
                 segment: anchor,
                 group: group.id,
@@ -758,6 +800,20 @@ impl Transcript {
             });
         }
         None
+    }
+
+    /// **这一组里**有没有这句话?(判据与 [`Transcript::locate_quote`] 同一套:
+    /// 不看标点、认**原文与现读法两版**)
+    ///
+    /// 门(`review::bad_evidence`)问的是这个 —— 凭据指的是哪一组,就得在那**一组**里找。
+    /// 从前门自己写了一句 `group.text(t).contains(quote)`,比记录凭据时那套严得多,
+    /// 于是"先看图、后改字"这种正常顺序下,旧引文会被门判成假的(两处各写一份判据的老毛病)。
+    pub fn group_holds_quote(&self, group: &SegmentGroup, quote: &str) -> bool {
+        let Some(needle) = quote_needle(quote) else {
+            return false;
+        };
+        self.segment_slice(group)
+            .is_some_and(|segs| find_in_group(segs, &needle).is_some())
     }
 
     /// 按组取那几段(按 **id** 找首尾,再按**位置**切)。
@@ -1323,6 +1379,31 @@ mod tests {
         assert_eq!(t.locate_quote("今天用一个很短的小样例 过一遍流程").unwrap().segment, 2);
         // 字换了就找不到 —— 松的只是标点,不是字
         assert!(t.locate_quote("今天用一个很短的小例子,过一遍流程").is_none());
+    }
+
+    /// **改过字的段:凭据认两版**(原文 or 现读法)。
+    ///
+    /// 校准的顺序是"先看图、后改字" —— 先抄下的那句引文,等 agent 把字改对之后
+    /// 就跟现读法对不上了。判据的本意是"这句话真的在材料里"(防编造),
+    /// 而原文与现读法**都是材料的真身**,不该因为后来的纠错反过来判它不合格。
+    #[test]
+    fn a_quote_written_before_a_correction_still_resolves() {
+        let mut t = transcript();
+        // 图是照着「小样例」那段看的 → 抄了原文;后来把「小样例」改成了「小案例」
+        t.segments[1].conclusion = Some(corrected("今天用一个很短的小案例过一遍流程"));
+
+        assert_eq!(
+            t.locate_quote("今天用一个很短的小样例过一遍流程").unwrap().segment,
+            2,
+            "抄的是改前的原文,仍该认"
+        );
+        assert_eq!(
+            t.locate_quote("今天用一个很短的小案例过一遍流程").unwrap().segment,
+            2,
+            "改后那一版当然也认"
+        );
+        // 两版都不是 → 照旧不认(编造就该被拦)
+        assert!(t.locate_quote("今天用一个很短的小例子过一遍流程").is_none());
     }
 
     /// 一组落在哪一段上:`group_holding` 反向查。

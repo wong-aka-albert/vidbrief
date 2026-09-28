@@ -43,6 +43,21 @@ fn main() -> anyhow::Result<()> {
         state.segments.len(),
         state.supplements.len()
     );
+    // 结论按种类数一遍 —— 排查"某个变体怎么解成了别的"这类事时,这一行就是判据
+    //(2026-09-27 那次落盘枚举挪号:改字/不改/存疑 三项的数目当场对不上投影)。
+    let mut kinds = std::collections::BTreeMap::new();
+    for seg in state.segments.values() {
+        let kind = match seg.conclusion() {
+            Some(vidbrief_project::Conclusion::Corrected { .. }) => "改了",
+            Some(vidbrief_project::Conclusion::Punctuated { .. }) => "断句",
+            Some(vidbrief_project::Conclusion::Kept { .. }) => "决定不改",
+            Some(vidbrief_project::Conclusion::Uncertain { .. }) => "存疑",
+            None => "看过没问题",
+        };
+        *kinds.entry(kind).or_insert(0usize) += 1;
+    }
+    let shown: Vec<String> = kinds.iter().map(|(k, v)| format!("{k} {v}")).collect();
+    println!("结论  {}", shown.join(" / "));
     println!("底账  {} 份", state.content.len());
     for (rel, print) in &state.content {
         println!("      {rel}  {print:?}");

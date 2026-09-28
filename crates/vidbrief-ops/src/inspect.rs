@@ -382,10 +382,14 @@ pub struct ToolView {
 ///
 /// 代价是三个子进程一起问一次 `--version`(实测合计不到 200ms)——
 /// 换来的是"环境不对当场看见",而不是跑五分钟在转录那一步才炸。
-fn external_tools() -> Vec<ToolView> {
+///
+/// `preferred_model` = **这个项目**上次用的模型名(没有就给 `None`):whisper 那栏要说的是
+/// "这个项目下一趟会用哪个模型",不是"这台机器默认挑哪个" —— 两者会不一样,
+/// 而环境变量没设时 `preprocess` 用的是前者(见 `Config::resolve_preferring`)。
+fn external_tools(preferred_model: Option<&str>) -> Vec<ToolView> {
     let ffmpeg_bin = vidbrief_core::ffmpeg::ffmpeg_bin();
     let ffprobe_bin = vidbrief_core::ffmpeg::ffprobe_bin();
-    let model = vidbrief_asr::whisper::model_display();
+    let model = vidbrief_asr::whisper::model_display_preferring(preferred_model);
     vec![
         ToolView {
             name: "ffmpeg",
@@ -492,8 +496,7 @@ pub fn inspect(arg: &str, opts: &InspectOptions) -> Result<InspectReport> {
     let content_health = if opts.verify {
         Some(HealthView::from(verify_content(&project, &meta, &layout)?))
     } else {
-        None
-    };
+        None    };
 
     Ok(InspectReport {
         project,
@@ -505,8 +508,18 @@ pub fn inspect(arg: &str, opts: &InspectOptions) -> Result<InspectReport> {
         link_health,
         content_health,
         materials: scan_materials(&layout),
-        tools: external_tools(),
+        tools: external_tools(recorded_model(&layout).as_deref()),
     })
+}
+
+/// 这个项目上次用的模型名(`inputs.json` 里那栏;没有记录 / 读不动就是 `None`)。
+///
+/// 体检要说的是"**这个项目**下一趟会用哪个模型" —— 环境变量没设时 `preprocess`
+/// 用的就是这个(见 `vidbrief_asr::Config::resolve_preferring`)。
+fn recorded_model(layout: &Layout) -> Option<String> {
+    crate::inputs::PreprocessInputs::load_optional(layout)
+        .and_then(|p| p.transcript)
+        .map(|t| t.model)
 }
 
 /// 已经打开的项目直接体检(少读一遍 `project.json`)。
@@ -536,7 +549,7 @@ pub fn inspect_opened(opened: &OpenProject, opts: &InspectOptions) -> Result<Ins
         link_health: HealthView::from(link_health),
         content_health,
         materials: scan_materials(layout),
-        tools: external_tools(),
+        tools: external_tools(recorded_model(layout).as_deref()),
     })
 }
 
@@ -547,7 +560,7 @@ mod tests {
     /// 三个外挂都要在名单里,顺序固定 —— 这栏是人对着看的,少一行就少一条线索。
     #[test]
     fn the_tool_list_covers_the_three_externals() {
-        let tools = external_tools();
+        let tools = external_tools(None);
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert_eq!(names, ["ffmpeg", "ffprobe", "whisper"]);
         for tool in &tools {

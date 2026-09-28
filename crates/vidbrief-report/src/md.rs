@@ -110,8 +110,13 @@ pub fn write_markdown(layout: &Layout, report: &Report, images: ImageMode) -> Re
 }
 
 /// `86.0` → `1:26`(分钟:秒,秒补零)。
+///
+/// 这是**给人对着视频看的标签**,不是材料的口径 —— 材料里一律用秒
+/// (`vidbrief_ops::materials::seconds`)。既然只是标签,就不再自成一派:
+/// 先把秒数舍到整秒、**再**拆分钟(原来是先 `as u64` 截断再拆,
+/// 于是 59.9 秒会印成 `0:59`;顺序反过来才对得上页面上的写法)。
 fn format_t(t: f64) -> String {
-    let total = t.max(0.0) as u64;
+    let total = t.max(0.0).round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
 }
 
@@ -119,6 +124,17 @@ fn format_t(t: f64) -> String {
 mod tests {
     use super::*;
     use vidbrief_project::{RelPath, ReportTopic, Shot, ShotCheck, ShotId, ShotOrigin, ShotStatus};
+
+    /// 页面/文章上的时刻标签:**先舍后拆**,不许出现 `0:60` 这种不存在的时刻。
+    #[test]
+    fn the_time_label_never_rounds_into_sixty_seconds() {
+        assert_eq!(format_t(0.0), "0:00");
+        assert_eq!(format_t(86.0), "1:26");
+        assert_eq!(format_t(59.6), "1:00", "59.6 秒是 1 分 00 秒,不是 0:60");
+        assert_eq!(format_t(899.6), "15:00");
+        assert_eq!(format_t(985.43), "16:25");
+        assert_eq!(format_t(-1.0), "0:00");
+    }
 
     fn sample() -> Report {
         let mut r = Report::new();

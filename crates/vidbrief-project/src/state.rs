@@ -61,6 +61,9 @@ pub const MAGIC: &[u8; 9] = b"VDBFSTATE";
 /// - v1 → v2:加 [`ProjectState::content`](材料内容底账)。
 ///   加字段就得 +1:bincode 是**位置编码**,老文件按新结构解会当场报"内容解不开" ——
 ///   而"版本不对"是一句能照做的话(跑 `vidbrief upgrade`),"内容解不开"不是。
+///
+/// **枚举加变体不用 +1,但要加在末尾**:末尾追加不动已有编号,老文件照旧解得对
+/// (见 [`StoredConclusion`] 的注释 —— 插在中间那次真把两个项目的状态读挂了)。
 pub const FORMAT_VERSION: u32 = 2;
 
 /// 文件头长度:magic + 版本(u32)+ 长度(u64)+ sha256(32 字节)。
@@ -242,9 +245,6 @@ enum StoredConclusion {
         note: String,
         reason: String,
     },
-    Punctuated {
-        text: String,
-    },
     Kept {
         note: String,
         reason: String,
@@ -252,6 +252,19 @@ enum StoredConclusion {
     Uncertain {
         note: String,
         reason: String,
+    },
+    /// **加变体只能加在末尾** —— bincode 把变体编号成"第几个"(`u32`),
+    /// 插在中间会把后面几个**整体挪号**:老文件会当场解不开(载荷对不上),
+    /// 或者更糟 —— **解开了,但是解成了另一个变体**。
+    ///
+    /// 2026-09-27 真踩了:加 [`Conclusion::Punctuated`] 时插在第二位,于是
+    /// `Kept`(旧 1)被读成 `Punctuated`(新 1) → 载荷对不上 → 样本 B / 样本 D
+    /// 的 `state.bin` 当场"读不动";而 `Uncertain`(旧 2)被读成 `Kept`(新 2) →
+    /// **不报错**,悄悄变了意思(存疑成了"决定不改")。表现见 [260927-37]。
+    ///
+    /// 所以:顺序一旦定下就是**字节契约**,由 `conclusion_variant_order_is_frozen` 钉着。
+    Punctuated {
+        text: String,
     },
 }
 
@@ -834,6 +847,7 @@ fn broken_message(path: &Path, why: &dyn std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use crate::shots::{Confidence, Evidence, Shot, ShotOrigin};
+    use crate::supplement::Trigger;
     use crate::transcript::{CorrectionType, Segment};
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -841,6 +855,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 内容指纹必须**经得起 JSON 往返**(语义要求,不是实现细节)。
+    ///
+    /// 底账是"写盘那一刻、拿**内存里的值**"算的,门是"读回**文件**之后"算的 ——
+    /// 中间隔着一次 serde_json 的写出 + 读回。而 serde_json 默认的浮点解析是
+    /// **best-effort**:`934.3499999999999` 会读回 `934.35`(差 1~3 个 ULP)。
+    /// 于是同一份内容有了两个指纹,门报"材料跟工具写出去的那次对不上"。
+    ///
+    /// 2026-09-28 在 样本 B 上实测复现:一次 `find_supplement_candidates` 之后
+    /// 门当场就拦;而 `disposition_supplements` 反而放行 —— 因为它的输入本来就
+    /// 取自文件(读回的值),两边同源。
+    ///
+    /// **这条测试在 `cargo test` 里必然绿,别把它当防线**:测试构建的 feature 是
+    /// **并集**,dev-dependency `jsonschema` 已经把 `float_roundtrip` 带进来了,
+    /// 而**发布构建**没有它(那正是当年 bug 只在 release 二进制里露头的原因)。
+    /// 真防线是下面那条盯 manifest 的 [`workspace_manifest_keeps_float_roundtrip`]。
+    #[test]
+    fn the_content_print_survives_a_json_round_trip() {
+        let mut list = SupplementRequests::new(3.0);
+        list.requests.push(SupplementRequest {
+            id: 1,
+            // 组中点:一长串十进制,正好落在会中招的那一档
+            t: 934.3499999999999,
+            segment_id: 307,
+            text: "往下看这里有设置把它点开".into(),
+            trigger: Trigger::DeicticPhrase,
+            nearest_shot: Some(ShotId::new(4).unwrap()),
+            // 与最近一张图的距离:1e-13 量级的残差
+            gap: Some(1.1368683772161603e-13),
+            status: SupplementStatus::Pending,
+            shot_id: None,
+            note: None,
+        });
+        list.requests.push(SupplementRequest {
+            id: 2,
+            t: 11.350000000000023,
+            segment_id: 131,
+            text: "很多人把这两件事混为一谈".into(),
+            trigger: Trigger::Both,
+            nearest_shot: Some(ShotId::new(2).unwrap()),
+            gap: Some(22.350000000000023),
+            status: SupplementStatus::Accepted,
+            shot_id: Some(ShotId::new(30).unwrap()),
+            note: Some("补一张".into()),
+        });
+
+        let before = supplements_print(&list);
+        let text = crate::json::to_pretty_string(&list).unwrap();
+        let back: SupplementRequests = serde_json::from_str(&text).unwrap();
+        let after = supplements_print(&back);
+        assert_eq!(
+            before.digest, after.digest,
+            "同一份内容,写盘前的指纹与读回后的指纹不同 —— 浮点没精确往返"
+        );
+        assert_eq!(
+            back.requests[0].t.to_bits(),
+            list.requests[0].t.to_bits(),
+            "t 必须逐位往返"
+        );
+        assert_eq!(
+            back.requests[0].gap.unwrap().to_bits(),
+            list.requests[0].gap.unwrap().to_bits(),
+            "gap 必须逐位往返"
+        );
+    }
+
+    /// 发布构建必须开着 `serde_json/float_roundtrip` —— **这条才是防线**。
+    ///
+    /// 为什么盯 manifest 而不是盯行为:`cargo test` 的 feature 是**并集**,
+    /// dev-dependency `jsonschema` 自带 `float_roundtrip`,于是上面那条行为测试
+    /// 在测试里永远绿 —— 哪怕发布构建早就退化了(2026-09-28:这个 bug 只在 release
+    /// 二进制里露头、测试全绿,差异就在这儿)。
+    ///
+    /// 少了它,材料指纹会在"写盘前"与"读回后"分叉(算出来的小数差 1~3 个 ULP),
+    /// 门误报"材料跟工具写出去的那次对不上",而 agent 只能靠重发一次写来绕过。
+    #[test]
+    fn workspace_manifest_keeps_float_roundtrip() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("crates/vidbrief-project 的两级父目录就是仓库根")
+            .to_path_buf();
+        let text =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("读 workspace 的 Cargo.toml");
+        // 只看**声明行**(注释行里也会出现这个词,拿整份文本做 contains 会假绿 ——
+        // 第一版就是这么写的,摘掉 feature 它照样通过)
+        let decl = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.starts_with('#') && l.starts_with("serde_json"))
+            .expect("workspace Cargo.toml 里该有一行 serde_json 依赖声明");
+        assert!(
+            decl.contains("float_roundtrip"),
+            "workspace `Cargo.toml` 的 serde_json 声明少了 `float_roundtrip`:\n  {decl}\n\
+             少了它,材料内容指纹会因为浮点解析不精确而分叉\
+             (见同文件的 `the_content_print_survives_a_json_round_trip`)"
+        );
     }
 
     fn check() -> ShotCheck {
@@ -1250,5 +1362,54 @@ mod tests {
         let lines = real.mismatches(Some(&Shots::new()), None, None);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("清单里没有这张图"), "{lines:?}");
+    }
+
+    /// **落盘枚举的变体顺序是字节契约** —— 新变体只能加在末尾。
+    ///
+    /// 这条钉的是 2026-09-27 那次真事故:给 [`StoredConclusion`] 加
+    /// [`Conclusion::Punctuated`] 时插在了第二位,于是
+    /// `Kept`(旧 1)被读成 `Punctuated`(新 1)→ 载荷对不上,样本 B / 样本 D
+    /// 的 `state.bin` 当场"读不动";更阴的是 `Uncertain`(旧 2)被读成 `Kept`(新 2)
+    /// —— **不报错,悄悄变了意思**。
+    ///
+    /// 判据就是**前面那四个字节**(bincode 把变体编号成 u32 小端)。改顺序 = 这里红。
+    #[test]
+    fn conclusion_variant_order_is_frozen() {
+        let index_of = |c: &Conclusion| -> u32 {
+            let bytes = bincode::serialize(&StoredConclusion::from(c)).unwrap();
+            u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        };
+        let corrected = Conclusion::Corrected {
+            text: "派森".into(),
+            kind: CorrectionType::Other,
+            note: String::new(),
+            reason: String::new(),
+        };
+        let punctuated = Conclusion::Punctuated {
+            text: "各位好。".into(),
+        };
+        let kept = Conclusion::Kept {
+            note: String::new(),
+            reason: String::new(),
+        };
+        let uncertain = Conclusion::Uncertain {
+            note: String::new(),
+            reason: String::new(),
+        };
+
+        // 0/1/2 是**历史编号**,一个都不许动;新的只能从 3 往后排。
+        assert_eq!(index_of(&corrected), 0, "corrected 一直是 0");
+        assert_eq!(index_of(&kept), 1, "kept 一直是 1(别插到它前面)");
+        assert_eq!(index_of(&uncertain), 2, "uncertain 一直是 2");
+        assert_eq!(index_of(&punctuated), 3, "punctuated 是后加的,只能排在末尾");
+
+        // `CorrectionType` 也在同一条流里(它是 `Corrected` 的载荷之一),同样只能往后加。
+        let kind_index = |k: CorrectionType| -> u32 {
+            u32::from_le_bytes(bincode::serialize(&k).unwrap()[..4].try_into().unwrap())
+        };
+        assert_eq!(kind_index(CorrectionType::Homophone), 0);
+        assert_eq!(kind_index(CorrectionType::Terminology), 1);
+        assert_eq!(kind_index(CorrectionType::Number), 2);
+        assert_eq!(kind_index(CorrectionType::Other), 3);
     }
 }

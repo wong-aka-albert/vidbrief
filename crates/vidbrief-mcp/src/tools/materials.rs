@@ -164,7 +164,14 @@ impl VidbriefServer {
                        校准前先用它通读一遍找识别错误;报「这些我看过了」时,把组自己的\
                        `from`/`to` 当区间报给 apply_corrections。\
                        **要逐段原文**(已经定位到某一句、要给 corrections 报段号)就给 \
-                       `grouped: false` 配上 `start`/`end`,只看那一小段。",
+                       `grouped: false` 配上 `start`/`end`,只看那一小段。\
+                       \n\n\
+                       **要整份通读**(比如通稿加断句),别去 `read` / `grep` 项目里那份 \
+                       `transcript.json` —— 它是原始材料,JSON 结构壳比正文贵四五倍\
+                       (实测:05 一份正文 5.9k 字的转录,分页读 JSON 花了 153k 字符),\
+                       而且读到的不是现读法。项目里有一份**给人读的投影**:\
+                       `01_preprocess/transcript.read.md` —— 一行一段(段号 · 时刻 · 现读法),\
+                       组头带核验状态,直接 `read` 它就够;那份每次写结论时自动重生成。",
         annotations(title = "读转录", read_only_hint = true)
     )]
     async fn get_transcript(

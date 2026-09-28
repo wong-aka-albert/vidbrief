@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use vidbrief_project::{
-    Health, Layout, Project, ProjectId, ProjectState, SourceLink, VideoMeta, check_source_link,
-    materialize, plan, simplify_path, video_rel_for,
+    Health, Layout, Project, ProjectId, ProjectState, SourceLink, Transcript, VideoMeta,
+    check_source_link, materialize, plan, simplify_path, video_rel_for,
 };
 
 /// 打开(或新建)项目时的统一入口参数。
@@ -334,6 +334,31 @@ pub struct UpgradeOutcome {
 /// 它答的是「这趟算法活儿跑完了没有」,而材料一个字节都没动,答案没变。
 /// 清掉它,`status` 就会报「① 前处理 — 未做」而材料齐全 —— 自相矛盾,
 /// 而且显示上分不出"没跑过"和"跑过、状态被重起过"([260927-16] 记着那次排查)。
+/// 把**三份明文投影**按当前状态重刷一遍(`transcript.fixed.json` / `transcript.read.md` /
+/// `transcript.diff.md`),返回刷了多少段(0 = 没有转录材料)。
+///
+/// 为什么要单独一个函数、还被两条路都调:它们是投影,不进判据,但**口径**这种东西
+/// 恰好只落在它们身上(2026-09-28:材料里的时刻从 `m:ss` 改成秒)。那天实测发现
+/// "已经是最新的"那条早退路径只看版本号,于是回一句"什么都没动" —— 那句话对状态成立,
+/// 对这三份明文不成立:它们还挂着旧写法,而 `upgrade` 的职责就是"把项目对齐到当前版本"。
+fn refresh_projections(
+    layout: &vidbrief_project::layout::Layout,
+    state: &ProjectState,
+) -> Result<usize> {
+    let path = layout.transcript();
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let Ok(raw) = Transcript::load(&path) else {
+        return Ok(0);
+    };
+    let mut merged = raw.clone();
+    state.apply_to_transcript(&mut merged);
+    crate::materials::save_transcript_projection(layout, &merged)?;
+    crate::conclusions::save_transcript_diff(layout, &raw, &merged)?;
+    Ok(merged.segments.len())
+}
+
 pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
     let layout = resolve(arg)?;
     // 自己取锁:这条路要能在"项目打不开"的时候跑,所以不走 `with_write`
@@ -361,11 +386,23 @@ pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
             if changed {
                 state.save(&layout.state_file())?;
             }
-            let note = if changed {
-                Some("已经是最新的:只把内容底账对齐了一遍,核验记录一条都没动。".to_string())
+            // **投影也要跟着当前版本走**:状态是最新的,不代表印出来的那些明文是最新的
+            // (2026-09-28 实测:材料里的时刻从 `m:ss` 改成秒之后,老项目那三份还挂着旧写法,
+            //  而这条路只看版本号,会回一句"什么都没动" —— 那句话对状态成立,对投影不成立)。
+            let refreshed = refresh_projections(&layout, &state)?;
+            let mut note = if changed {
+                "已经是最新的:只把内容底账对齐了一遍,核验记录一条都没动。".to_string()
             } else {
-                Some("已经是最新的:状态文件在,而且读得动,什么都没动。".to_string())
+                "已经是最新的:状态文件在,而且读得动,核验记录一条都没动。".to_string()
             };
+            if refreshed > 0 {
+                note.push_str(&format!(
+                    "三份明文投影按当前口径重刷了一遍({refreshed} 段;\
+                     它们是投影,手改没用,内容只由状态决定)。"
+                ));
+            } else {
+                note.push_str("(没有转录材料,投影没得刷)");
+            }
             return Ok(UpgradeOutcome {
                 project_id: project.id.to_string(),
                 from_version,
@@ -376,7 +413,7 @@ pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
                 approval: state.review.calibrate.is_some(),
                 progress_moved: false,
                 content,
-                note,
+                note: Some(note),
             });
         }
     }
@@ -437,6 +474,12 @@ pub fn upgrade(arg: &str, opts: &UpgradeOptions) -> Result<UpgradeOutcome> {
     state.save(&layout.state_file())?;
     project.save(&layout.project_json())?;
 
+    // **投影跟着状态重写** —— `transcript.fixed.json` 与 `transcript.read.md` 都是
+    // "状态长什么样"的投影,状态都重起了,它们还挂着上一版就是**两处各说各话**:
+    // `--fresh` 清完结论之后,agent 打开那份人读投影会看到"改了 19 段、存疑 4 段",
+    // 而那些结论一条都不在了(2026-09-27 实测:清完场差点照着旧投影往下做)。
+    // 材料没动 —— 动的只是"结论那几栏",而它们本来就是投影。
+    refresh_projections(&layout, &state)?;
     Ok(UpgradeOutcome {
         project_id: project.id.to_string(),
         from_version,
@@ -1143,7 +1186,8 @@ mod tests {
         assert!(s.unchecked.shots.is_empty(), "{s:?}");
         assert_eq!(s.unchecked.segments.len(), 1, "第 2 段还没核验:{s:?}");
 
-        // 幂等:已经是最新的就什么都不做
+        // 幂等:状态与核验记录一条不动(修订号也不再推进)——
+        // 但**明文投影照刷**:它们是"状态长什么样"的投影,口径变了就得跟上。
         let again = upgrade(
             &fake.layout().root().display().to_string(),
             &UpgradeOptions::default(),
@@ -1151,6 +1195,11 @@ mod tests {
         .unwrap();
         assert!(again.note.is_some(), "第二次该什么都不做:{again:?}");
         assert_eq!(again.rev, 8, "什么都不做就不该再推进修订号");
+        assert!(
+            again.note.as_deref().unwrap_or("").contains("投影"),
+            "状态没动,但投影要刷:{:?}",
+            again.note
+        );
     }
 
     /// **底账默认不换**:材料被人手改过时,`upgrade` 只把话说清楚,不替人认下来。
@@ -1333,5 +1382,130 @@ mod tests {
             before.rev,
             after.rev
         );
+    }
+
+    /// **清完结论,投影跟着重写。**
+    ///
+    /// 投影(`transcript.fixed.json` 与那份人读的 `transcript.read.md`)说的是"状态长什么样"。
+    /// 状态重起之后它们还挂着上一版,就是两处各说各话 —— 实测:清完场之后打开那份人读投影,
+    /// 上面还写着"改了 19 段、存疑 4 段",而那些结论一条都不在了。
+    #[test]
+    fn fresh_upgrade_rewrites_the_transcript_projections() {
+        let fake = crate::testkit::Fake::new("upgrade-fresh-projections")
+            .with_transcript(&[(0.0, 2.0, "派森列表"), (2.0, 4.0, "各位好")]);
+        {
+            let mut opened = fake.open();
+            crate::apply_corrections(
+                &mut opened,
+                &[crate::CorrectionInput {
+                    segment_id: 1,
+                    conclusion: vidbrief_project::Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: vidbrief_project::CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "画面文字".into(),
+                    },
+                }],
+                &[2],
+                &[],
+            )
+            .unwrap();
+        }
+        let read_before = std::fs::read_to_string(fake.layout().transcript_read()).unwrap();
+        assert!(
+            read_before.contains("Python 列表"),
+            "先确认投影里真写着结论:\n{read_before}"
+        );
+        assert!(read_before.contains("改了 1"), "{read_before}");
+
+        upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions {
+                fresh: true,
+                accept_material: false,
+            },
+        )
+        .unwrap();
+
+        let read_after = std::fs::read_to_string(fake.layout().transcript_read()).unwrap();
+        assert!(read_after.contains("派森列表"), "该回到原文:\n{read_after}");
+        assert!(!read_after.contains("Python 列表"), "{read_after}");
+        assert!(
+            read_after.contains("改了 0") && read_after.contains("未核验 1 组"),
+            "{read_after}"
+        );
+
+        let fixed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(fake.layout().transcript_fixed()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            fixed["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["conclusion"].is_null()),
+            "纠错稿投影也该跟着清:{fixed}"
+        );
+    }
+
+    /// **不改任何状态的一次 `upgrade`,照样把三份投影刷成当前口径。**
+    ///
+    /// 这条是 2026-09-28 那趟(材料里的时刻从 `m:ss` 换成秒)逼出来的:早退路径只看版本号,
+    /// 于是回一句"什么都没动" —— 那句话对状态成立,对**明文投影**不成立,它们还挂着旧写法。
+    /// 判据就盯这个:把投影手改成过时的样子,跑一次普通 `upgrade`,三份都该按状态重写回来。
+    #[test]
+    fn a_plain_upgrade_refreshes_all_three_projections() {
+        let fake = crate::testkit::Fake::new("upgrade-refresh-projections")
+            .with_transcript(&[(899.6, 906.0, "派森列表")]);
+        {
+            let mut opened = fake.open();
+            crate::apply_corrections(
+                &mut opened,
+                &[crate::CorrectionInput {
+                    segment_id: 1,
+                    conclusion: vidbrief_project::Conclusion::Corrected {
+                        text: "Python 列表".into(),
+                        kind: vidbrief_project::CorrectionType::Terminology,
+                        note: String::new(),
+                        reason: "画面文字".into(),
+                    },
+                }],
+                &[],
+                &[],
+            )
+            .unwrap();
+        }
+
+        // 把三份投影糟蹋成"过时的样子"(旧口径的 `m:ss` 时刻)
+        for path in [
+            fake.layout().transcript_read(),
+            fake.layout().transcript_diff(),
+            fake.layout().transcript_fixed(),
+        ] {
+            std::fs::write(&path, "14:60 旧写法\n").unwrap();
+        }
+
+        let outcome = upgrade(
+            &fake.layout().root().display().to_string(),
+            &UpgradeOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            outcome.note.as_deref().unwrap_or("").contains("投影"),
+            "得说清刷了投影:{:?}",
+            outcome.note
+        );
+
+        let read = std::fs::read_to_string(fake.layout().transcript_read()).unwrap();
+        assert!(!read.contains("14:60"), "投影该按当前口径重写:\n{read}");
+        assert!(read.contains("899.6"), "时刻是秒:\n{read}");
+        assert!(read.contains("Python 列表"), "结论还在:\n{read}");
+
+        let diff = std::fs::read_to_string(fake.layout().transcript_diff()).unwrap();
+        assert!(!diff.contains("14:60") && diff.contains("| 899.6 |"), "{diff}");
+
+        let fixed = std::fs::read_to_string(fake.layout().transcript_fixed()).unwrap();
+        assert!(fixed.contains("Python 列表"), "纠错稿投影也重写了:{fixed}");
     }
 }

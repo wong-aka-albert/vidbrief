@@ -216,8 +216,13 @@ pub fn preprocess(
 
     let previous = PreprocessInputs::load_optional(&layout);
     let now_visual = PreprocessInputs::visual_now(&source_sha256, opts.fps, opts.width);
-    // 这一趟转录会用哪个模型/语言;模型没装就说不清 —— 那半按"重算"算
-    let now_transcript = asr_labels()
+    // 这一趟转录会用哪个模型/语言;模型没装就说不清 —— 那半按"重算"算。
+    // 把上次那个模型名带进去:环境变量没设时优先它(见 `asr_labels` 的说明)。
+    let recorded_model = previous
+        .as_ref()
+        .and_then(|p| p.transcript.as_ref())
+        .map(|t| t.model.clone());
+    let now_transcript = asr_labels(recorded_model.as_deref())
         .map(|(model, language)| PreprocessInputs::transcript_now(&source_sha256, &model, &language));
 
     let visual_why_not = if opts.force {
@@ -306,6 +311,12 @@ pub fn preprocess(
     let transcript = if transcript_reused {
         // 沿用上一次的转录:一段不重跑,核验戳与纠错结论一条不作废
         let t = Transcript::load(&layout.transcript()).context("沿用上次的转录失败")?;
+        // 人读投影顺手刷一次(叠上状态里的结论):老项目升上来时它可能还不存在,
+        // 而"材料没变、这一步秒回"恰恰是 agent 最需要它的时候。
+        // 写不动**不算这趟失败** —— 它是投影,下一次 `apply_corrections` 还会再刷一遍。
+        let mut merged = t.clone();
+        opened.state().apply_to_transcript(&mut merged);
+        let _ = crate::materials::save_transcript_read(&layout, &merged);
         TranscriptOutcome::Done {
             segments: t.segments.len(),
             model: t.model.clone(),
@@ -314,13 +325,13 @@ pub fn preprocess(
         }
     } else if opts.transcribe {
         on_progress(Stage::Transcribing);
-        match vidbrief_asr::transcribe_project(&video, &layout, &meta) {
+        match vidbrief_asr::transcribe_project(&video, &layout, &meta, recorded_model.as_deref()) {
             Ok(Some(t)) => {
                 // 重新转录 = 换了一份原文:旧结论与核验戳对的是旧文本,
                 // 留着它们就是让门替一份已经换掉的文稿背书
                 segment_checks_cleared = opened.state().segments.len();
                 opened.state_mut().segments.clear();
-                crate::materials::save_transcript_projection(opened, &t)?;
+                crate::materials::save_transcript_projection(&layout, &t)?;
                 // 原文换了 → 内容底账跟着换(门的第①条数的就是这份文件里的段)
                 crate::materials::note_transcript_content(opened, &t)?;
                 TranscriptOutcome::Done {
@@ -407,8 +418,12 @@ pub fn preprocess(
 /// 这一趟转录会用哪个模型与语言;模型没装(或配置读不出来)就是 `None`。
 ///
 /// 拿不到不算错误:那半本来就跑不成,判据会给一句「说不清 → 重算」。
-fn asr_labels() -> Option<(String, String)> {
-    let cfg = vidbrief_asr::Config::resolve().ok()?;
+///
+/// `recorded` 是这个项目**上次用的模型名**(`inputs.json` 里那栏;第一次跑就是 `None`)——
+/// 环境变量没设时优先它,免得"这台机器的默认候选"悄悄换掉项目的模型
+/// (见 [`vidbrief_asr::Config::resolve_preferring`]:换了模型 = 那份转录的核验戳与结论全作废)。
+fn asr_labels(recorded: Option<&str>) -> Option<(String, String)> {
+    let cfg = vidbrief_asr::Config::resolve_preferring(recorded).ok()?;
     Some((cfg.model_label(), cfg.language.clone()))
 }
 

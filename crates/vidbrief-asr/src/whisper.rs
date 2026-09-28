@@ -22,12 +22,71 @@ pub struct Config {
     pub threads: Option<u32>,
 }
 
-/// 默认会去找模型的地方(相对当前工作目录)。
+/// 默认会去找模型的地方(相对**当前工作目录**)。
 pub const MODEL_SEARCH: &[&str] = &[
     "tools/whisper/models/ggml-medium.bin",
     "tools/whisper/models/ggml-small.bin",
     "tools/whisper/models/ggml-base.bin",
 ];
+
+/// 这一趟实际会去哪些路径找模型:**先当前工作目录,再可执行文件所在的那棵树**。
+///
+/// # 为什么多一组(2026-09-27)
+///
+/// [`MODEL_SEARCH`] 是相对 cwd 的,而 cwd 是个**会变的东西**:从仓库根跑 CLI 找得到,
+/// 从项目目录(`projects/xxx/`)跑就一个都找不到 —— 于是同一个项目、同一条命令,
+/// 换了个目录就从"沿用上次那份转录"变成"找不到模型,硬失败"(实测踩过两次)。
+///
+/// 加的这一组是**跟着二进制走**的:`target/release/vidbrief.exe` 往上退到仓库根,
+/// 接上同几条相对路径。装到别处、或者把二进制拷走的情况不受影响(那本来就该用
+/// `VIDBRIEF_WHISPER_MODEL` 指路)。
+pub fn model_search() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = MODEL_SEARCH.iter().map(PathBuf::from).collect();
+    if let Some(root) = tree_root_from_exe() {
+        out.extend(MODEL_SEARCH.iter().map(|rel| root.join(rel)));
+    }
+    out
+}
+
+/// 从可执行文件的位置往上找"仓库根"(判据:那底下有 `tools/whisper/models/`)。
+///
+/// 退几级是因为调用方的位置不止一个:`target/release/vidbrief.exe`(祖父是根)、
+/// 测试二进制 `target/debug/deps/xxx.exe`(曾祖父是根)。最多退三级。
+fn tree_root_from_exe() -> Option<PathBuf> {
+    let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for _ in 0..3 {
+        if dir.join("tools/whisper/models").is_dir() {
+            return Some(dir);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// `whisper-cli` 默认会去找的地方(相对 cwd)。
+pub const BIN_SEARCH: &[&str] = &[
+    "tools/whisper/Release/whisper-cli.exe",
+    "tools/whisper/Release/whisper-cli",
+    "tools/whisper/whisper-cli.exe",
+];
+
+/// 这一趟实际会用哪个 `whisper-cli`。
+///
+/// 顺序:`VIDBRIEF_WHISPER_BIN` → [`BIN_SEARCH`](先 cwd,再"跟着二进制走"的那棵树)
+/// → `PATH` 上的 `whisper-cli`(返回 `None`,由调用方退回名字)。
+///
+/// 跟模型那一组(`model_search`)同一个理由:cwd 会变,而**外挂解析不出来会被判成
+/// "输入变了"** → 明明能沿用的转录被拉去重算,然后在"跑不起来"上失败(实测踩过)。
+pub fn bin_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("VIDBRIEF_WHISPER_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    let mut candidates: Vec<PathBuf> = BIN_SEARCH.iter().map(PathBuf::from).collect();
+    if let Some(root) = tree_root_from_exe() {
+        candidates.extend(BIN_SEARCH.iter().map(|rel| root.join(rel)));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
 
 impl Config {
     /// 按"环境变量 → 约定目录"的顺序解析配置。
@@ -40,12 +99,27 @@ impl Config {
     ///
     /// 找不到模型时给出**可照做**的报错,而不是"文件不存在"。
     pub fn resolve() -> Result<Self> {
+        Self::resolve_preferring(None)
+    }
+
+    /// 同 [`Config::resolve`],但**环境变量没设时优先 `preferred` 那个模型**
+    /// (传项目上次用的模型名,如 `ggml-small`)。
+    ///
+    /// # 为什么
+    ///
+    /// 优先级是:环境变量最硬(设了就是用户说了算)→ `preferred` → 约定目录里第一个命中的。
+    /// 中间那一档是 2026-09-27 补的:少了它,"这台机器默认挑哪个模型"会**悄悄**决定
+    /// 一个项目的材料要不要重做 —— 而候选表第一个是 medium([`MODEL_SEARCH`]),
+    /// 一个没人选过的默认值。实测的代价:CLI 少带 `VIDBRIEF_WHISPER_MODEL` 跑了一次
+    /// `preprocess`,当场把"沿用"判成"要重转录"(转录一换,核验戳与结论全部作废)。
+    ///
+    /// 要**换**模型只有一个正门:显式设 `VIDBRIEF_WHISPER_MODEL`。
+    pub fn resolve_preferring(preferred: Option<&str>) -> Result<Self> {
         let model = match std::env::var_os("VIDBRIEF_WHISPER_MODEL") {
             Some(p) => PathBuf::from(p),
-            None => MODEL_SEARCH
-                .iter()
-                .map(PathBuf::from)
-                .find(|p| p.is_file())
+            None => preferred
+                .and_then(model_named)
+                .or_else(first_default_model)
                 .with_context(|| {
                     format!(
                         "找不到 whisper 模型。请设置环境变量 VIDBRIEF_WHISPER_MODEL 指向 ggml 模型,\
@@ -55,7 +129,7 @@ impl Config {
                 })?,
         };
         Ok(Self {
-            bin: std::env::var_os("VIDBRIEF_WHISPER_BIN").map(PathBuf::from),
+            bin: bin_path(),
             model,
             language: std::env::var("VIDBRIEF_ASR_LANG").unwrap_or_else(|_| "zh".to_string()),
             threads: None,
@@ -79,10 +153,12 @@ impl Config {
     }
 }
 
-/// whisper-cli 实际会跑哪一个 —— 给体检看(`VIDBRIEF_WHISPER_BIN` 指的路径,或 `PATH` 上的名字)。
+/// whisper-cli 实际会跑哪一个 —— 给体检看。
+///
+/// 顺序同 [`bin_path`]:环境变量 → 约定目录(含"跟着二进制走"那棵树)→ `PATH` 上的名字。
 pub fn bin_display() -> String {
-    match std::env::var_os("VIDBRIEF_WHISPER_BIN") {
-        Some(p) => PathBuf::from(p).display().to_string(),
+    match bin_path() {
+        Some(p) => p.display().to_string(),
         None => "whisper-cli(PATH 上找)".to_string(),
     }
 }
@@ -96,11 +172,46 @@ pub fn model_display() -> Option<String> {
     if let Some(p) = std::env::var_os("VIDBRIEF_WHISPER_MODEL") {
         return Some(PathBuf::from(p).display().to_string());
     }
-    MODEL_SEARCH
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
+    first_default_model().map(|p| p.display().to_string())
+}
+/// 同 [`model_display`],但**没设环境变量时优先那个名字的模型**(项目上次用的那个)。
+///
+/// 体检要看的是"**这个项目**下一趟会用哪个模型" —— 不是"这台机器默认会挑哪个"。
+pub fn model_display_preferring(preferred: Option<&str>) -> Option<String> {
+    if let Some(p) = std::env::var_os("VIDBRIEF_WHISPER_MODEL") {
+        return Some(PathBuf::from(p).display().to_string());
+    }
+    preferred
+        .and_then(model_named)
+        .or_else(first_default_model)
         .map(|p| p.display().to_string())
+}
+
+/// 约定目录里第一个**真的在**的候选(含"跟着二进制走"的那一组,见 [`model_search`])。
+///
+/// 都不在就是 `None` —— 体检要靠这个 `None` 说清"模型没装",**不要**在这里假装有个默认值。
+fn first_default_model() -> Option<PathBuf> {
+    model_search().into_iter().find(|p| p.is_file())
+}
+
+/// 按**模型名**在约定目录里找模型(`ggml-small` → `tools/whisper/models/ggml-small.bin`)。
+///
+/// 为什么要有它:环境变量没设时,`resolve` 退到"约定目录里第一个命中的",而候选表里
+/// **medium 排第一**([`MODEL_SEARCH`],那是当初拍板的"中文默认 medium")——
+/// 于是一个**没人选过的默认值**会悄悄把项目从 small 换成 medium:3 倍时长,
+/// 而且转录一换,挂在上面的核验戳与结论**全部作废**(实测踩过:CLI 少带环境变量跑了一下
+/// `preprocess`,当场判定"要重转录",随后因为 PATH 上没有 whisper-cli 而失败)。
+/// 所以解析时允许把项目上次用的模型名带进来 —— 见 [`Config::resolve_preferring`]。
+pub fn model_named(label: &str) -> Option<PathBuf> {
+    model_named_in(&model_search(), label)
+}
+
+/// [`model_named`] 的可注入版本(测试用临时目录当"约定目录")。
+fn model_named_in<S: AsRef<std::path::Path>>(search: &[S], label: &str) -> Option<PathBuf> {
+    search
+        .iter()
+        .map(|p| PathBuf::from(p.as_ref()))
+        .find(|p| p.is_file() && p.file_stem().and_then(|s| s.to_str()) == Some(label))
 }
 
 /// 跑一次 `--version`,取带 `version` 的那一行;跑不起来 → `None`。
@@ -109,9 +220,7 @@ pub fn model_display() -> Option<String> {
 /// 它得进步 1 的输入指纹(见 `vidbrief-ops::inputs`),否则增量重跑会把旧转录当新的用。
 /// 版本行走 stdout(whisper.cpp 的 `load_backend:` 那几行走 stderr),两边都扫一遍更稳。
 pub fn version() -> Option<String> {
-    let bin = std::env::var_os("VIDBRIEF_WHISPER_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("whisper-cli"));
+    let bin = bin_path().unwrap_or_else(|| PathBuf::from("whisper-cli"));
     let out = Command::new(bin).arg("--version").output().ok()?;
 
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -228,6 +337,29 @@ mod tests {
             threads: None,
         };
         assert_eq!(cfg.model_label(), "ggml-medium");
+    }
+
+    /// 按**模型名**找回约定目录里的那一份 —— 环境变量没设时,项目上次用的模型优先于
+    /// "候选表第一个命中的"(那个是 medium,一个没人选过的默认值)。
+    #[test]
+    fn a_recorded_model_can_be_found_by_name() {
+        let dir = std::env::temp_dir().join(format!("vidbrief-whisper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("ggml-small.bin");
+        let medium = dir.join("ggml-medium.bin");
+        std::fs::write(&small, b"x").unwrap();
+        std::fs::write(&medium, b"x").unwrap();
+
+        // 候选表里 medium 在前(那是"没得选时"的默认),但按名字找得到 small
+        let search = vec![medium.clone(), small.clone()];
+        assert_eq!(model_named_in(&search, "ggml-small"), Some(small.clone()));
+        assert_eq!(model_named_in(&search, "ggml-medium"), Some(medium.clone()));
+        // 名字对不上 / 文件不在 → 找不到(调用方退回正常解析)
+        assert_eq!(model_named_in(&search, "ggml-large"), None);
+        std::fs::remove_file(&small).unwrap();
+        assert_eq!(model_named_in(&search, "ggml-small"), None);
+        std::fs::remove_file(&medium).unwrap();
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

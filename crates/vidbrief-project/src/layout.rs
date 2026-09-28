@@ -27,6 +27,26 @@ pub const PREPROCESS_DIR: &str = "01_preprocess";
 pub const CHANGE_CURVE_FILE: &str = "01_preprocess/change_curve.json";
 pub const DENSE_REGIONS_FILE: &str = "01_preprocess/dense_regions.json";
 pub const TRANSCRIPT_FILE: &str = "01_preprocess/transcript.json";
+/// 转录的**人读投影**(段号 + 时刻 + 现读法 + 组头)。
+///
+/// # 为什么单独存一份(2026-09-27,清账三十九)
+///
+/// 实测:05 那趟重审里,agent 用宿主的 `read` 工具**分 12 页把 `transcript.json` 整份读完**
+/// (offset 1 → 5601),就为了通读一遍原文去加断句 —— 花了 **153k 字符**,
+/// 而那份 JSON 里真正的中文只有 **5,888 字**(壳占 20 倍:每段都带 id/时间戳/结论栏的结构开销)。
+/// 同一份材料走 `get_transcript` 只要 58k 字符(26 次调用合计)。
+///
+/// 堵是堵不住的:材料是明文,宿主又给了 `read`/`grep`/`shell`,伸手就够着 ——
+/// 所以按这个项目一贯的办法办:**把正门修得比侧门好走**。这份投影就是那个正门:
+/// 一行一段、只有段号 + 时刻 + 现读法(+ 改动标记),读它比读 JSON 便宜四五倍,
+/// 而且读到的**永远是对的**(现读法),不会像读原始 JSON 那样拿到一版没纠错、没断句的旧文。
+///
+/// # 它是投影,不是材料
+///
+/// 与 `workbench.html` 同类:谁都能刷(① 写完转录就刷一次,② 每次落结论再刷),
+/// **没人拿它当判据**(判据在 `state.bin`);手改它不会污染任何东西,下一次写结论就盖回去。
+/// 所以它**不进内容底账** —— 底账记的是材料。
+pub const TRANSCRIPT_READ_FILE: &str = "01_preprocess/transcript.read.md";
 /// 步 1 算法抽出的截图(origin ∈ {dense_region, isolated_peak})。
 pub const SHOTS_REL_DIR: &str = "01_preprocess/shots";
 pub const SHOTS_FILE: &str = "01_preprocess/shots.json";
@@ -145,6 +165,10 @@ impl Layout {
     }
     pub fn transcript(&self) -> PathBuf {
         self.rel(TRANSCRIPT_FILE)
+    }
+    /// 转录的人读投影(`transcript.read.md`)—— 段号 + 时刻 + 现读法。
+    pub fn transcript_read(&self) -> PathBuf {
+        self.rel(TRANSCRIPT_READ_FILE)
     }
     pub fn shots_dir(&self) -> PathBuf {
         self.rel(SHOTS_REL_DIR)
@@ -310,6 +334,7 @@ mod tests {
             CHANGE_CURVE_FILE,
             DENSE_REGIONS_FILE,
             TRANSCRIPT_FILE,
+            TRANSCRIPT_READ_FILE,
             SHOTS_FILE,
             WORKBENCH_FILE,
             PREPROCESS_INPUTS_FILE,

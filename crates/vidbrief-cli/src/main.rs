@@ -57,8 +57,10 @@ Options:
 
 说明:
   outcome 四种:corrected(改了字,必须给 text)/ punctuated(**只加标点 / 断句**,必须给 text,
-  字一个不动:去掉标点后要跟原文一字不差)/ kept(决定保留原句)/ uncertain(定不了,留给人)。
-  **改成跟原文一字不差会被拒收** —— 要保留原句就用 kept;跟原文**只差标点**也会被拒 —— 那是 punctuated。
+  字一个不动:去掉标点后要跟原文一字不差)/ kept(**这一段按原文算**)/ uncertain(定不了,留给人)。
+  **改成跟原文一字不差会被拒收** —— 要保留原句、**或要把这一段退回原文(撤掉前面落的改动)**,
+  都用 kept —— kept 不给 text,报下去那一段就按原文算;跟原文**只差标点**也会被拒 —— 那是 punctuated。
+  撤回之后还想补标点,再单独报一条 punctuated(那时现读法已经回到原文了)。
   reason 除 punctuated 外都要给(依据)。
   reviewed / reviewed_ranges 是「审过、没问题」的段:逐段点名,或整片报一个闭区间,两种取并集。
   不报等于没审,审核门会拦。
@@ -743,6 +745,12 @@ fn cmd_correct(args: &[String]) -> Result<()> {
 
     println!("项目     {id}");
     println!("本次写入 {} 条", outcome.applied);
+    if outcome.folded > 0 {
+        println!(
+            "           其中 {} 条本来就断过句(折成「看过、没问题」,没落结论)",
+            outcome.folded
+        );
+    }
     println!(
         "全稿     {} 段:改了 {} 段 / 加了断句 {} 段 / 决定不改 {} 段 / 存疑未改 {} 段 / 合计动过 {} 段",
         outcome.total_segments,
@@ -755,6 +763,23 @@ fn cmd_correct(args: &[String]) -> Result<()> {
     println!("核验过   {} 段", outcome.reviewed);
     println!("纠错稿   {}", outcome.fixed_path.display());
     println!("对照表   {}", outcome.diff_path.display());
+    // 部分落实:好的已经落盘,坏的逐条退回 —— 说清哪一条为什么,再以非零退出
+    if !outcome.rejected.is_empty() {
+        eprintln!();
+        eprintln!(
+            "退回     {} 条(其余 {} 条已经落盘,不用再发):",
+            outcome.rejected.len(),
+            outcome.applied
+        );
+        for item in &outcome.rejected {
+            // `why` 里本来就带着段号(「第 N 段…」),别再拼一遍
+            eprintln!("           {}", item.why);
+        }
+        bail!(
+            "这批没全落下:{} 条被退(原因见上)。改完**只把这几条**再交一次",
+            outcome.rejected.len()
+        );
+    }
     Ok(())
 }
 
@@ -1102,30 +1127,17 @@ impl CorrectItem {
             ),
         };
         Ok(match self.outcome.as_str() {
-            "corrected" => {
-                let Some(text) = self.text.filter(|t| !t.trim().is_empty()) else {
-                    bail!(
-                        "第 {} 段 `outcome = corrected` 却没给 `text` —— 要保留原句就用 `kept`",
-                        self.segment_id
-                    );
-                };
-                Conclusion::Corrected {
-                    text,
-                    kind,
-                    note: self.note.unwrap_or_default(),
-                    reason: self.reason,
-                }
-            }
-            "punctuated" => {
-                let Some(text) = self.text.filter(|t| !t.trim().is_empty()) else {
-                    bail!(
-                        "第 {} 段 `outcome = punctuated` 却没给 `text` —— \
-                         要的是加了标点之后的整段",
-                        self.segment_id
-                    );
-                };
-                Conclusion::Punctuated { text }
-            }
+            // **缺件不在这里挡** —— 交给 `apply_corrections` **逐条**退(见那儿的注释):
+            // 在这里一挡,整批几十条就都被拦在门口,而好的那些本来可以照落。
+            "corrected" => Conclusion::Corrected {
+                text: self.text.unwrap_or_default(),
+                kind,
+                note: self.note.unwrap_or_default(),
+                reason: self.reason,
+            },
+            "punctuated" => Conclusion::Punctuated {
+                text: self.text.unwrap_or_default(),
+            },
             "kept" => Conclusion::Kept {
                 note: self.note.unwrap_or_default(),
                 reason: self.reason,
@@ -1537,6 +1549,13 @@ fn run_preprocess(
         TranscriptOutcome::Skipped => println!("转录     已跳过(--no-transcribe)"),
         TranscriptOutcome::Failed { error } => {
             eprintln!("转录     失败:{error}");
+            // **为什么这一趟要重转** —— 失败的时候最需要这句话,而它平时挂在下面
+            // (成功路径里才打)。实测踩过:CLI 少带了 `VIDBRIEF_WHISPER_MODEL`,
+            // 解析到默认候选(medium)、判定"要重转录",随后失败 —— 而屏幕上只有
+            // "转录失败",那句"模型 small → medium"压根没显示出来。
+            if let Some(why) = &report.reuse.transcript_why_not {
+                eprintln!("         转录重跑:{why}");
+            }
             // 差帧图与截图保留,但进度不标完成 —— 重跑一次就能补上
             eprintln!();
             eprintln!("差帧图与截图已保留;转录未完成,**未**标记步 1 为完成。");
