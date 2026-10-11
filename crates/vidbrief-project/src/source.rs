@@ -376,7 +376,7 @@ mod tests {
             "source/video.mp4"
         );
         assert_eq!(
-            video_rel_for(Path::new("D:/videos/第一讲.MKV")).as_str(),
+            video_rel_for(Path::new("D:/videos/lecture.MKV")).as_str(),
             "source/video.mkv"
         );
         // 没扩展名 / 扩展名不合法 → mp4

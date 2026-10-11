@@ -18,7 +18,7 @@
         "preset": {
           "type": "string",
           "enum": ["quick", "teaching", "story", "review", "exec", "custom"],
-          "description": "风格轮廓:快扫版 / 教学版 / 故事版 / 元组版 / 汇报版 / 自定义。**新报告一律要有**;这一栏加进来之前的旧数据可能没有。**它决定怎么填** —— 条数、每条骨架、详略、证据密度;定义见 skill/styles.md 与 get_guide(step=\"styles\")"
+          "description": "风格轮廓:快扫版 / 教学版 / 故事版 / 复盘版 / 汇报版 / 自定义。**新报告一律要有**;这一栏加进来之前的旧数据可能没有。**它决定怎么填** —— 条数、每条骨架、详略、证据密度;定义见 skill/styles.md 与 get_guide(step=\"styles\")"
         },
         "granularity": {
           "type": "string",

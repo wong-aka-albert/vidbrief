@@ -27,13 +27,13 @@
 长知识类视频直接交给多模态大模型总结,有两组矛盾:
 
 1. **成本/上下文矛盾**:整段视频 token 量大(30 分钟约 50 万 token),而绝大部分画面是静止重复信息。
-2. **信息漏失矛盾**:均匀采样(1fps)会漏掉持续 <1s 的关键画面(PPT 翻页、板书切换、演示中的标注);只靠语音转录又丢掉画面独有信息(图表、数值区间、标注线、形态)。
+2. **信息漏失矛盾**:均匀采样(1fps)会漏掉持续 <1s 的关键画面(PPT 翻页、板书切换、演示中的标注);只靠语音转录又丢掉画面独有信息(图表、数值区间、标注线、结构)。
 
 ### 1.2 核心思路
 
 > **算法先粗筛"哪里值得看",agent 再看这些地方,人通过对话把关。**
 
-实测依据(RESEARCH.md 第 5 节):知识类视频的**画面切换点 ≈ 内容切换点**。教学视频里每个案例切换都对应差帧图上的一个峰,且与语音时间戳几乎一一吻合。
+实测依据(RESEARCH.md 第 5 节):知识类视频的**画面切换点 ≈ 内容切换点**。教学类视频里讲者每讲到一个新知识点、画面切换时,都对应差帧图上的一个峰,且与语音时间戳几乎一一吻合。
 
 ---
 
@@ -174,12 +174,12 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
 ```jsonc
 {
   "schema_version": 2,           // 该项目下所有 JSON 的格式版本;不符直接报错,不做静默兼容
-  "id": "demo",              // 同时是目录名;ASCII 小写/数字/-/_
-  "name": "第一讲 开场",        // 人类可读名,可含中文
+  "id": "demo",                  // 同时是目录名;ASCII 小写/数字/-/_
+  "name": "第一讲 开场",          // 人类可读名,可含中文
   "created_at": "2026-09-24T21:00:00+08:00",
   "source": {
     "path": "source/video.mp4",  // 项目内位置
-    "original": "D:/videos/第一讲.mp4",  // 原始绝对路径,纯信息性,不用于访问文件
+    "original": "D:/videos/lecture.mp4",  // 原始绝对路径,纯信息性,不用于访问文件
     "link": "hardlink"           // hardlink | symlink | copy(§4.8)
   },
   "glossary": null               // 术语表,默认 null(关闭)
@@ -343,13 +343,13 @@ M0 定稿时**取消**该文件,以 `01_preprocess/shots.json` 为唯一权威�
   "generated_at": "...",         // fixed 沿用此值,不因纠错而更新
   "segments": [
     { "id": 12, "start": 479.0, "end": 484.0,
-      "text": "这是国内派森教程的第一小节",          // ASR 原文,永不就地改写
+      "text": "这是国内派森教程的第一节",             // ASR 原文,永不就地改写
       "conclusion": {                                   // 五选一的结论,见下
         "outcome": "corrected",
-        "text": "这是国内 Python 教程的第一小节",         // 改后的整句就在结论里面
+        "text": "这是国内 Python 教程的第一节",        // 改后的整句就在结论里面
         "type": "terminology",
         "note": "派森 → Python",
-        "reason": "截图 s008 画面文字为「Python 列表」"
+        "reason": "截图 s008 画面文字为「Python 教程」"
       },
       "checked_at": "2026-09-24T21:20:00+08:00" }       // 模型核验过这一段
   ]
@@ -485,7 +485,7 @@ whisper 按**停顿**切段,不看句子:70 分钟的片子切出 **2269 段**(1
       "check": {                 // agent 通过 record_shot_check 写入;未校准为 null
         "match": true, "audio_visual_sync": true,
         "type_read": "Python 教程 第一节",       // 从画面读到的内容
-        "neighbor_text": "这是国内 Python 教程的第一小节",
+        "neighbor_text": "这是国内 Python 教程的第一节",
         "issues": [], "confidence": "high", "checked_at": "..." } }
   ]
 }
@@ -509,10 +509,10 @@ whisper 按**停顿**切段,不看句子:70 分钟的片子切出 **2269 段**(1
 ```jsonc
 "check": {
   "match": true,
-  "type_read": "深色编辑器截图:右上角函数名「Python 列表」、代码 xx9999",
-  "issues": ["口播的「结构图」在画面上无法确认"],
+  "type_read": "深色编辑器截图:标题栏「Python 教程」、正文是一段列表定义",
+  "issues": ["口播的「列表」在画面上无法确认"],
   "confidence": "high",
-  "evidence": { "segment": 166, "quote": "这是国内 Python 教程的第一小节" },
+  "evidence": { "segment": 166, "quote": "这是国内 Python 教程的第一节" },
   "checked_at": "..."
 }
 ```
@@ -805,7 +805,7 @@ vidbrief upgrade <项目> --fresh   # 什么都不收,状态清零(材料原样�
 1. `ffmpeg -i video.mp4 -ar 16000 -ac 1 -c:a pcm_s16le audio.wav`
 2. `whisper-cli.exe -m ggml-medium.bin -l zh -f audio.wav -otxt -osrt -ovtt -of transcript`
 3. 解析 SRT → `transcript.json`。
-   - 已知局限:中文专有名词必错(实测「达摩院」→「打墨院」、「派森」→「Python」),**由 agent 在步 2 纠错**。
+   - 已知局限:中文专有名词必错(实测「达摩院」→「打墨院」、「Python」→「派森」),**由 agent 在步 2 纠错**。
 
 **③ 预筛选关键截图(纯算法,基于差帧图)**
 - 取**"变化密集区"的代表帧**,而非只取孤立峰值——信息密集段(连续演示、多图快切)在差帧图上表现为一段高值区。
@@ -857,7 +857,7 @@ vidbrief upgrade <项目> --fresh   # 什么都不收,状态清零(材料原样�
 对照是**两条独立路径**:
 
 1. ffmpeg 自带的场景检测(`select='gte(scene,0)'`),阈值 0.15;
-2. `tools/whisper/demo.srt` 里那几个时刻**人在讲什么** —— 每个检出点都落在一次主题切换上。
+2. 人工核对转录:那几个时刻**人在讲什么** —— 每个检出点都落在一次主题切换上。
 
 | 结论 | 数据 |
 |------|------|
@@ -1191,12 +1191,12 @@ vidbrief_ops::with_write(project_id, lock, |opened, lock_note| { … })
 > 转录纠错的活。判据一句话:「这段话配这张图,读的人会不会觉得对不上」。
 > 写死的理由:这种"两种读法都说得通"的字段,实测被两个模型填成了**相反答案**
 > ([260925-20](../devlog/2026-09.md));说法在 schema、工具入参与 P1 三处对齐。
-> 依据(RESEARCH.md 5.5b):单看图会把「样本 15 分钟」臆断成「结构」;图 + 同期转录一起判断,会服从转录、诚实标注"画面无法确认",并主动指出"转录提到 ETC 但画面只有样本"这类矛盾。**这是 agent 的判断,工具只负责把图和文一起递给它。**
+> 依据(RESEARCH.md 5.5b):单看图会把听到的规格臆断成另一个;图 + 同期转录一起判断,会服从转录、诚实标注"画面无法确认",并主动指出"转录提到的对象与画面不符"这类矛盾。**这是 agent 的判断,工具只负责把图和文一起递给它。**
 
 **② 转录核对(把听错的改对 + 把断句加上)**
 - agent 调 `get_transcript` 读全量,自查同音错字/专有名词,用 `apply_corrections` 逐条写回。
-- **优先依据画面文字**:截图里常直接写着正确写法(如「Python 列表」),agent 应把画面文字当纠错基准;上下文语义次之。
-- **术语表默认关闭、可选**:若用户额外提供一份正确写法的领域词表(如 `[样本, PYTHON, 索引, …]`),agent 用它做对照;不给则自行判断。
+- **优先依据画面文字**:截图里常直接写着正确写法(如「Python 教程」),agent 应把画面文字当纠错基准;上下文语义次之。
+- **术语表默认关闭、可选**:若用户额外提供一份正确写法的领域词表(如 `[Python, 元组, 索引, …]`),agent 用它做对照;不给则自行判断。
 - **断句也在这一趟做**(2026-09-27 起):ASR 的输出几乎不带标点(五份实测 4761 段里只有 36 段带句号),
   通读时顺手把标点补上,用 `outcome = punctuated` 报回(§4.5)。它**不改字**,所以账上与"改了字"分开数。
 - 产出 `transcript.fixed.json` + `transcript.diff.md`(人可核对;断句那一节只列前 20 条,全量在纠错稿里)。
@@ -1219,7 +1219,7 @@ agent: → create_project → preprocess          （纯算法,一次做完,几�
          → record_shot_check(每张) 记下判断
          → render_workbench() 把链接给用户
          "11 张看完,改了 4 处转录;链接在这儿,你看一眼"
-用户: 第6张重新截 602 附近;另外"派森"应该是"Python"
+用户: 第6张重新截 602 秒附近;另外"派森"应该是"Python"
 agent: → extract_shot(602) → get_shot(新)【再看】→ 呈现
        → apply_corrections([...]) → 呈现 diff
        → 重渲染
@@ -1374,7 +1374,7 @@ skill/
 
 | 槽 | 形状 | 为什么是这个形状 |
 |----|------|------------------|
-| `preset` | 闭集合:`quick` 快扫版 / `teaching` 教学版 / `story` 故事版 / `review` 元组版 / `exec` 汇报版 / `custom` 自定义 | **它决定"怎么填"**(条数、骨架、详略、证据密度);换风格 = 照另一种轮廓重写一遍 |
+| `preset` | 闭集合:`quick` 快扫版 / `teaching` 教学版 / `story` 故事版 / `review` 复盘版 / `exec` 汇报版 / `custom` 自定义 | **它决定"怎么填"**(条数、骨架、详略、证据密度);换风格 = 照另一种轮廓重写一遍 |
 | `granularity` | 闭集合:`brief` / `standard` / `detailed` | 这一版实到的粒度 —— 预置给默认值,用户点名就改;它**同时决定条数与篇幅** |
 | `tone` | **自由文本**:大白话 / 诙谐 / 讲故事 / 行业腔…… | 语气穷举不了(下周还会有新说法),列不全就别列 —— 但**必须写出来** |
 | `notes` | 可选:给谁看、要不要例子、要不要结论先行 | 用户交代了就写 |
@@ -1408,8 +1408,8 @@ skill/
   每条浮层里逐条列出,交付时也要报这个数。
 - **`t` 必给**(锚点),`shots` / `segments` 是关联,**空数组合法** —— "这条不挂图"是确定的状态,
   不是未知(所以空集合写空数组,不写 null)。
-- **粒度:一条 = 一处值得单独讲的**。视频里逐个讲的案例 / 步骤 / 样本,**每个各占一条** ——
-  各有各的锚点、各有各的画面证据。六张 图表图挤成一张表塞进一条,时间轴上就点不到某一个案例,
+- **粒度:一条 = 一处值得单独讲的**。视频里逐个讲的案例 / 步骤 / 知识点,**每个各占一条** ——
+  各有各的锚点、各有各的画面证据。六张图挤成一张表塞进一条,时间轴上就点不到某一个案例,
   面板里也翻不到"这个案例讲了什么"([260926-13](../devlog/2026-09.md) 实测)。
   这条口径写在 P5 模板正文里,**不做机械校验**:该不该合是内容的判断,
   数一数表格有几行不叫判断(与 §7 同一条:**识别与判断归 agent**)。
@@ -1852,7 +1852,7 @@ vidbrief help                                       # 用法
 ## 12. 典型 agent 会话(端到端)
 
 ```
-用户: 处理 D:\videos\第一讲.mp4
+用户: 处理 D:\videos\lecture.mp4
 agent: → create_project → preprocess                       # 步1 起作业并等它(纯算法)
        # 长视频等不够就再调一次:preprocess(接着等)/ preprocess_progress(看一眼)
        # 跑完了 preprocess_result 取结果
@@ -1860,8 +1860,8 @@ agent: → create_project → preprocess                       # 步1 起作业�
 用户: 看看图对不对
 agent: → list_shots → 对每张 get_shot 【agent 自己看图 + 对照转录】
        → record_shot_check(每张) → render_workbench()
-       "11 张匹配;第 6 张(t=602)画面像结构,同期语音说结构图,存疑"
-用户: 第6张重新截 602 附近;"派森"应为"Python"
+       "11 张匹配;第 6 张(t=602)画面像大纲页,同期语音说结构图,存疑"
+用户: 第6张重新截 602 秒附近;"派森"应为"Python"
 agent: → extract_shot(602) → get_shot(新图)【再看】
        → get_transcript 【自查】→ apply_corrections → 呈现 diff
 用户: 都对,继续
@@ -1947,7 +1947,7 @@ agent: → 带新数据再调一次 build_report(整份替换)→ 重渲染 → 
 | `scripts/describe_frames.py` | **废弃**(识别改由 agent 做);其提示词作 §10.4 参考 |
 | `scripts/describe_frames_with_context.py` | **废弃**;"图文联合"思路已内化为提示模板 P1 |
 | `scripts/build_report.py` | 思路并入 `vidbrief-report`:MD → HTML,图片改相对路径 |
-| `timeline_demo.json` / `report_demo.md` | 实测样例;`fixtures/test_sample.mp4` 保留作回归素材 |
+| `timeline_<项目>.json` / `report_<项目>.md` | 实测样例;`fixtures/test_sample.mp4` 保留作回归素材 |
 | `BRD.md` / `RESEARCH.md` / `WHISPER_SETUP.md` | 文档,已整理至 `docs/` |
 
 ---

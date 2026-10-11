@@ -1525,7 +1525,7 @@ mod tests {
             let entry = opened.state_mut().segment_mut(1);
             entry.set_conclusion(Some(vidbrief_project::Conclusion::Uncertain {
                 note: "元祖 疑为 元组".into(),
-                reason: "系列名".into(),
+                reason: "专有名词".into(),
             }));
             entry.checked_at = Some(vidbrief_project::now());
         }

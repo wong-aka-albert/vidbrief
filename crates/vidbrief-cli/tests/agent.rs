@@ -48,12 +48,12 @@ fn staged(tag: &str) -> Fake {
 
 /// 这份测试用的转录。**故意埋了真实发生过的识别错误**。
 const FAKE_SEGMENTS: &[(f64, f64, &str)] = &[
-    (0.0, 4.8, "各位好,我们今天这期是一个承前启后的内容"),
-    (4.8, 9.6, "对于刚加入到我们元祖的朋友可能不太清楚"),
-    (9.6, 14.0, "为什么我们经常说提前进入这一段"),
+    (0.0, 4.8, "各位好,这一节我们讲三件事"),
+    (4.8, 9.6, "这一周的元祖笔记要写清楚"),
+    (9.6, 14.0, "为什么我们经常要先看总览"),
     (20.0, 24.0, "大家看一下这样的图"),
-    (24.0, 28.0, "这个是负责讲解的张小明"),
-    (40.0, 45.0, "列表和元祖两种数据类型的结构图"),
+    (24.0, 28.0, "这位是负责讲解的张小明老师"),
+    (40.0, 45.0, "这是列表和元祖两种数据类型的结构图"),
 ];
 
 fn project_arg(fake: &Fake) -> String {
@@ -217,7 +217,7 @@ fn p1_calibrate_shots_runs_the_whole_way() {
                 "type_read": "手写夹具的画面",
                 "issues": [],
                 "confidence": "medium",
-                "evidence_quote": "各位好,我们今天这期是一个承前启后的内容",
+                "evidence_quote": "各位好,这一节我们讲三件事",
             }),
         );
     }
@@ -364,7 +364,7 @@ fn p4_summarize_video_tools_all_answer() {
     assert_eq!(first["from"], 1, "第一组该从第 1 段起:{full}");
     assert_eq!(first["to"], 2, "前两段首尾相接、又不满 12 秒,该并成一组:{full}");
     assert!(
-        first["text"].as_str().unwrap_or("").contains("承前启后"),
+        first["text"].as_str().unwrap_or("").contains("三件事"),
         "组的正文该把组里各段接起来:{full}"
     );
     assert_eq!(first["state"], "unchecked", "还没审过的组要说清:{full}");
@@ -479,7 +479,7 @@ fn p4_summarize_video_tools_all_answer() {
     // 把"活干完":给两张图都写回结论、并报告转录都审过了。
     // **这一步不需要任何人签字** —— 全核验完就该放行,这就是"全程托管"那一档。
     for (shot_id, read, quote) in [
-        ("s001", "画面是一张示意图", "各位好,我们今天这期是一个承前启后的内容"),
+        ("s001", "画面是一张示意图", "各位好,这一节我们讲三件事"),
         ("s002", "画面是另一张示例图", "大家看一下这样的图"),
     ] {
         client.tool_text(
@@ -504,7 +504,7 @@ fn p4_summarize_video_tools_all_answer() {
 
     client.tool_text(
         "write_summary",
-        json!({"project_id": proj, "title": "总结", "md": "# 总结\n\n这一段是结果积累充分后的第一段运行。[s001 @0:06]\n"}),
+        json!({"project_id": proj, "title": "总结", "md": "# 总结\n\n这一段讲的是同一件事,放量就在开头。[s001 @0:06]\n"}),
     );
     let after_auto = as_json(&client.tool_text("get_project", json!({"project_id": proj})));
     assert_eq!(
@@ -524,7 +524,7 @@ fn p4_summarize_video_tools_all_answer() {
             "type_read": "画面看不清",
             "issues": ["画面与口播对不上"],
             "confidence": "low",
-            "evidence_quote": "为什么我们经常说提前进入这一段",
+            "evidence_quote": "为什么我们经常要先看总览",
         }),
     );
     let waiting = client.call_tool("write_summary", json!({"project_id": proj, "title": "总结", "md": "# 总结 v2\n"}));
@@ -606,18 +606,18 @@ fn corrections_close_the_loop_and_leave_the_original_alone() {
                 {
                     "segment_id": 2,
                     "outcome": "corrected",
-                    "text": "就比方说没有用上元组类型的很多的初学者朋友",
+                    "text": "这一周的元组笔记要写清楚",
                     "type": "terminology",
                     "note": "元祖 → 元组",
-                    "reason": "上下文语义:这是面向学员的系列课",
+                    "reason": "上下文语义:整段都在讲数据类型",
                 },
                 {
                     "segment_id": 5,
                     "outcome": "corrected",
-                    "text": "这个是负责讲解的张晓明",
+                    "text": "这位是负责讲解的张晓明老师",
                     "type": "terminology",
                     "note": "张小明 → 张晓明",
-                    "reason": "画面文字:编辑器上方写着「张晓明」",
+                    "reason": "画面文字:幻灯片上写着「张晓明」",
                 }
             ]
         }),
@@ -640,7 +640,11 @@ fn corrections_close_the_loop_and_leave_the_original_alone() {
         .collect();
     assert!(texts.iter().any(|t| t.contains("元组")), "{texts:?}");
     assert!(texts.iter().any(|t| t.contains("张晓明")), "{texts:?}");
-    assert!(!texts.iter().any(|t| t.contains("这一周的元祖")), "{texts:?}");
+    // 第 2 段那处听错的「元祖」被改掉了(别的段里提到「元祖」是它本来就在讲的词,不算)
+    assert!(
+        !texts.iter().any(|t| t.contains("这一周的元祖")),
+        "第 2 段该改成「元组」:{texts:?}"
+    );
 
     // **原始转录一个字都没动**
     let now = std::fs::read(&raw_path).expect("原始转录该还在");

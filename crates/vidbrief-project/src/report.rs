@@ -93,7 +93,7 @@ pub enum ReportPreset {
     Teaching,
     /// 故事版:顺着视频时间线一趟讲下来(连着写、少列表)。
     Story,
-    /// 元组版:拿它回看自己的操作(判断 → 证据 → 结果 → 怎么用)。
+    /// 复盘版:拿它回看自己的操作(判断 → 证据 → 结果 → 怎么用)。
     Review,
     /// 汇报版:给没看过视频的人交代(结论 → 影响 → 动作)。
     Exec,
@@ -108,7 +108,7 @@ impl ReportPreset {
             Self::Quick => "快扫版",
             Self::Teaching => "教学版",
             Self::Story => "故事版",
-            Self::Review => "元组版",
+            Self::Review => "复盘版",
             Self::Exec => "汇报版",
             Self::Custom => "自定义",
         }

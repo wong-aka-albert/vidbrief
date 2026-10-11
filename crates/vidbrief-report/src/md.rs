@@ -148,7 +148,7 @@ mod tests {
         r.topics.push(ReportTopic {
             id: 1,
             t: 86.0,
-            title: "切主图".into(),
+            title: "切主窗口".into(),
             body: "这是**正文**。".into(),
             shots: vec![ShotId::new(1).unwrap()],
             segments: vec![4, 5],
@@ -192,7 +192,7 @@ mod tests {
         assert!(md.contains("> 这份报告按「教学版 · 详细 · 大白话」做。"), "{md}");
         assert!(md.contains("> 补充要求:给刚入门的人看"), "{md}");
         assert!(md.contains("# 总述"), "{md}");
-        assert!(md.contains("### 1 · 切主图 (1:26)"), "{md}");
+        assert!(md.contains("### 1 · 切主窗口 (1:26)"), "{md}");
         // 图走相对路径:report.md 在 04_report/ 下,要回两层再进 01_preprocess/
         assert!(
             md.contains("(../01_preprocess/shots/s001_0009.0.jpg)"),

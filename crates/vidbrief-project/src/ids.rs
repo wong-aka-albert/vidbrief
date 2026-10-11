@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn project_id_accepts_and_rejects() {
-        for ok in ["demo", "demo", "a", "a-2", "x_y", "0abc", "a".repeat(64).as_str()] {
+        for ok in ["demo", "sample", "a", "a-2", "x_y", "0abc", "a".repeat(64).as_str()] {
             assert!(ProjectId::new(ok).is_ok(), "应接受:{ok}");
         }
         for bad in [
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn project_id_from_video_stem() {
-        assert_eq!(ProjectId::from_video_stem("Sample4").as_deref(), Some("demo"));
+        assert_eq!(ProjectId::from_video_stem("Sample4").as_deref(), Some("sample4"));
         assert_eq!(ProjectId::from_video_stem("my  video  (final)").as_deref(), Some("my-video-final"));
         assert_eq!(ProjectId::from_video_stem("__init__").as_deref(), Some("init"));
         assert_eq!(ProjectId::from_video_stem("a-").as_deref(), Some("a"));
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(ProjectId::from_video_stem(""), None);
         assert_eq!(ProjectId::from_video_stem("---"), None);
         // 净化结果非空时必须自身合法
-        for stem in ["Sample4", "a-", "--", "中文123abc", "a b c"] {
+        for stem in ["Section4", "a-", "--", "中文123abc", "a b c"] {
             if let Some(id) = ProjectId::from_video_stem(stem) {
                 assert!(ProjectId::new(id.clone()).is_ok(), "净化结果不合法:`{id}`(来自 `{stem}`)");
             }

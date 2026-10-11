@@ -411,7 +411,7 @@ mod tests {
             "D:/videos/demo.mp4",
             SourceLink::Copy,
         );
-        p.glossary = Some(vec!["样本".into(), "PYTHON".into()]);
+        p.glossary = Some(vec!["Python".into(), "索引".into()]);
         let text = crate::json::to_pretty_string(&p).unwrap();
         let back: Project = serde_json::from_str(&text).unwrap();
         assert_eq!(back.glossary.as_ref().unwrap().len(), 2);

@@ -242,6 +242,9 @@ cargo test -p vidbrief-asr --offline -- --ignored --nocapture
 
 **位置**:`docs/devlog/`。**规则**:按月分档,**只追加,不改写历史**。
 
+> 本节讲的是这套流程怎么跑。**本仓库只带格式规范,不带实际记录文件** ——
+> `PLAN.md` 与 `YYYY-MM.md` 属本地开发档案,不入库(见 [`docs/devlog/README.md`](docs/devlog/README.md))。
+
 ### 什么时候写
 
 | 情形 | 条目类型 |

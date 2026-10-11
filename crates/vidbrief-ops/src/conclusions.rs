@@ -1202,7 +1202,7 @@ mod tests {
                     segment_id: 2,
                     conclusion: Conclusion::Uncertain {
                         note: "疑似「元组」".into(),
-                        reason: "上下文在讲培训课程".into(),
+                        reason: "上下文在讲数据类型".into(),
                     },
                 },
             ],
@@ -1231,7 +1231,7 @@ mod tests {
         assert!(diff.contains("派森列表"), "{diff}");
         assert!(diff.contains("Python 列表"), "{diff}");
         assert!(diff.contains("(存疑未改)"), "{diff}");
-        assert!(diff.contains("派森 → Python "), "自动掐出来的改动片段:{diff}");
+        assert!(diff.contains("派森 → Python"), "自动掐出来的改动片段:{diff}");
     }
 
     #[test]
@@ -1655,7 +1655,7 @@ mod tests {
             &mut opened,
             &[CorrectionInput {
                 segment_id: 1,
-                // 把「列表」改成了「例子」 —— 那不叫断句
+                // 把「列表」改成了「例子」—— 那不叫断句
                 conclusion: Conclusion::Punctuated {
                     text: "今天我们来讲一个例子。".into(),
                 },
@@ -1795,7 +1795,7 @@ mod tests {
     /// 两条拒词里都没提"退回原文"归哪一档,它只能靠猜试出 `kept`。
     #[test]
     fn a_revert_is_pointed_at_kept() {
-        let fake = Fake::new("concl-revert").with_transcript(&[(0.0, 2.0, "加入到我们元祖的观众")]);
+        let fake = Fake::new("concl-revert").with_transcript(&[(0.0, 2.0, "这一周的元祖笔记要写清楚")]);
         let mut opened = fake.open();
         // 先落一条改字(元祖 → 元组)—— 这一条就是后面要撤的那一版
         apply_corrections(
@@ -1803,9 +1803,9 @@ mod tests {
             &[CorrectionInput {
                 segment_id: 1,
                 conclusion: Conclusion::Corrected {
-                    text: "用上元组类型的很多的初学者".into(),
+                    text: "这一周的元组笔记要写清楚".into(),
                     kind: CorrectionType::Terminology,
-                    note: "讯 → 训".into(),
+                    note: "祖 → 组".into(),
                     reason: "画面文字".into(),
                 },
             }],
@@ -1820,7 +1820,7 @@ mod tests {
             &[CorrectionInput {
                 segment_id: 1,
                 conclusion: Conclusion::Corrected {
-                    text: "加入到我们元祖的观众".into(),
+                    text: "这一周的元祖笔记要写清楚".into(),
                     kind: CorrectionType::Terminology,
                     note: "撤回".into(),
                     reason: "用户拍板:以原文为准".into(),
@@ -1840,7 +1840,7 @@ mod tests {
             &[CorrectionInput {
                 segment_id: 1,
                 conclusion: Conclusion::Punctuated {
-                    text: "加入到我们元祖的观众，".into(),
+                    text: "这一周的元祖笔记要写清楚，".into(),
                 },
             }],
             &[],
@@ -1866,7 +1866,7 @@ mod tests {
         )
         .unwrap();
         let fixed = Transcript::load(&fake.layout().transcript_fixed()).unwrap();
-        assert_eq!(fixed.segments[0].effective_text(), "加入到我们元祖的观众");
+        assert_eq!(fixed.segments[0].effective_text(), "这一周的元祖笔记要写清楚");
         assert_eq!(fixed.stats().corrected, 0, "撤回之后不再算「改了字」");
         assert_eq!(fixed.stats().kept, 1, "它归的是「这一段按原文算」那一档");
     }
@@ -2276,7 +2276,7 @@ mod tests {
                 conclusion: Conclusion::Corrected {
                     text: "就比方说没有用上元组类型的很多的初学者朋友，".into(),
                     kind: CorrectionType::Terminology,
-                    note: "浅 → 潜".into(),
+                    note: "祖 → 组".into(),
                     reason: "画面文字".into(),
                 },
             }],

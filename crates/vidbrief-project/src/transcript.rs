@@ -1089,7 +1089,7 @@ mod tests {
         let json = r#"{
           "id": 8, "start": 1.0, "end": 2.0, "text": "元祖类型",
           "corrected_text": null,
-          "correction": {"type": "uncertain", "note": "元祖 疑为 元组", "reason": "系列名"},
+          "correction": {"type": "uncertain", "note": "元祖 疑为 元组", "reason": "专有名词"},
           "checked_at": "2026-09-24T21:20:00+08:00"
         }"#;
         let seg: Segment = serde_json::from_str(json).unwrap();

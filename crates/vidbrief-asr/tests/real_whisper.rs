@@ -7,8 +7,8 @@
 //! cargo test -p vidbrief-asr --offline -- --ignored --nocapture
 //! ```
 //!
-//! 输入用 `tools/whisper/sample_zh.wav` —— 那正是 `demo.srt` 等实测凭据的来源,
-//! 所以"跑出来的东西像不像中文"是有基准的。
+//! 输入音频**不入库**:自备一段中文语音(16kHz 单声道 wav)放到
+//! `tools/whisper/sample_zh.wav` 即可跑;当年那几份实测凭据就是这么来的。
 
 use std::path::{Path, PathBuf};
 

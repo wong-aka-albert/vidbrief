@@ -14,12 +14,12 @@
         "match": true,
         "audio_visual_sync": true,
         "type_read": "Python 列表 结构图",
-        "neighbor_text": "好我们切到主图了",
+        "neighbor_text": "好我们切到主窗口了",
         "issues": [],
         "confidence": "high",
         "evidence": {
           "segment": 4,
-          "quote": "好我们切到主图了"
+          "quote": "好我们切到主窗口了"
         },
         "checked_at": "2026-09-24T21:12:30+08:00"
       }

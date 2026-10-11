@@ -472,7 +472,7 @@ fn writer_output_validates_against_the_schemas() {
         r"E:\videos\demo.mp4",
         SourceLink::Copy,
     );
-    project.glossary = Some(vec!["样本".into()]);
+    project.glossary = Some(vec!["Python".into()]);
 
     // 顺便验证时间戳确实没有小数秒 —— 这一条是这次运行真实踩出来的
     let meta_json = serde_json::to_value(&meta).unwrap();

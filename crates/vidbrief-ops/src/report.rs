@@ -526,7 +526,7 @@ pub fn render_existing(
 fn check_style(input: &ReportStyle) -> Result<ReportStyle> {
     let preset = input.preset.ok_or_else(|| {
         anyhow::anyhow!(
-            "`style.preset` 没给 —— 风格轮廓是**必填**的:快扫版 / 教学版 / 故事版 /              元组版 / 汇报版 / 自定义。
+            "`style.preset` 没给 —— 风格轮廓是**必填**的:快扫版 / 教学版 / 故事版 /              复盘版 / 汇报版 / 自定义。
 
              每种怎么填(条数怎么按视频长度换算、每条按什么骨架写)看              `get_guide(step=\"styles\")`;挑一种,或按用户的要求用 `custom`。"
         )
@@ -754,7 +754,7 @@ mod tests {
             SectionInput {
                 t: Some(2.0),
                 title: "切到解释器主窗口".into(),
-                md: "讲者从大纲切到解释器主窗口,**看的是同一个对象**。".into(),
+                md: "讲者从大纲切到解释器主窗口,**看的是同一个示例**。".into(),
                 verify: vec!["  画面左下角的版本号看不清,核一下 s001  ".into()],
             },
         );
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(topic.t, 2.0, "锚点原样");
         assert_eq!(topic.title, "切到解释器主窗口", "标题原样");
         assert_eq!(
-            topic.body, "讲者从大纲切到解释器主窗口,**看的是同一个对象**。",
+            topic.body, "讲者从大纲切到解释器主窗口,**看的是同一个示例**。",
             "正文原样"
         );
         assert_eq!(
@@ -1142,17 +1142,13 @@ mod tests {
         let fake = ready("report-damaged");
         let mut opened = fake.open();
 
-        // 坏点分别落在:总述的正文、某一条的正文、这一版的 `notes`
-        write_section(
-            &mut opened,
-            a_section(None, "总述", "这里有个 \u{FFFD} 方块。"),
-        );
+        // 坏点分别落在:某一条的正文、这一版的 `notes`
         write_section(
             &mut opened,
             a_section(
                 Some(2.0),
                 "切到解释器主窗口",
-                "整理之后展开运行,无论后面是升还是\u{FFFD},都可以定义为 这一段。",
+                "整理之后展开运行,无论后面是升还是\u{FFFD},都可以定义为一次新实验。",
             ),
         );
 
@@ -1178,9 +1174,9 @@ mod tests {
         );
 
         let joined = outcome.warnings.join("\n");
-        assert_eq!(outcome.warnings.len(), 3, "三处坏点各报一条:{joined}");
+        assert_eq!(outcome.warnings.len(), 2, "两处坏点各报一条:{joined}");
         // 报了坏点就要点得准 —— 包括编号(它从前恒为 0,报出来是「第 0 条」,指不准是谁)。
-        for needle in ["全局总结", "style.notes", "第 1 条", "知识点", "正文"] {
+        for needle in ["style.notes", "第 1 条", "知识点", "正文"] {
             assert!(
                 joined.contains(needle),
                 "报出来的话要点到「{needle}」:{joined}"

@@ -144,7 +144,7 @@ Options:
                            **内容不从这里进**:报告页由步 3 的分段
                            (03_summary/sections.json)组装 —— 一条 = 一个带时刻的段。
                            `style` 是必填的:preset 是 quick(快扫版)/ teaching(教学版)/
-                           story(故事版)/ review(元组版)/ exec(汇报版)/ custom,
+                           story(故事版)/ review(复盘版)/ exec(汇报版)/ custom,
                            granularity 只能是 brief(概括)/ standard(标准)/ detailed(详细),
                            tone 是自由文本(大白话 / 诙谐 / 讲故事 / 行业腔……)。
       --format <both|html|md>
@@ -249,7 +249,7 @@ Options:
 
 Examples:
   vidbrief init D:/videos/demo.mp4
-  vidbrief init D:/videos/第一讲.mp4 -n demo -t \"第一讲 开场\"
+  vidbrief init D:/videos/lecture.mp4 -n lecture -t \"第一讲 开场\"
   vidbrief init demo.mp4 -p D:/proj/demo
 
 说明:
@@ -1237,7 +1237,7 @@ impl ReportStyleBody {
             "exec" => vidbrief_project::ReportPreset::Exec,
             "custom" => vidbrief_project::ReportPreset::Custom,
             other => anyhow::bail!(
-                "style.preset 只能是 quick(快扫版)/ teaching(教学版)/ story(故事版)/                  review(元组版)/ exec(汇报版)/ custom(自定义),收到 `{other}`                 
+                "style.preset 只能是 quick(快扫版)/ teaching(教学版)/ story(故事版)/                  review(复盘版)/ exec(汇报版)/ custom(自定义),收到 `{other}`                 
 轮廓怎么填看 skill/styles.md,或 get_guide(step=\"styles\")"
             ),
         };

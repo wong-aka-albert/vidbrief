@@ -61,7 +61,7 @@ fn the_command_line_twin_writes_through_the_same_door() {
           "text": "这是国内 Python 教程的第一小节",
           "type": "terminology",
           "note": "派森 → Python",
-          "reason": "画面上的标题写着「Python 列表」"
+          "reason": "画面上的标题写着「Python 教程」"
         }
       ],
       "reviewed": [2]

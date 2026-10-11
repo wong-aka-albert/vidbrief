@@ -7,7 +7,8 @@
 > 📐 完整设计见 **[docs/DESIGN.md](./docs/DESIGN.md)**
 > 🧾 项目材料格式(JSON Schema + 示例)见 **[docs/schema/](./docs/schema/)**
 > 📋 需求背景见 [docs/BRD.md](./docs/BRD.md) · 技术核实与实测见 [docs/RESEARCH.md](./docs/RESEARCH.md) · 本地 Whisper 见 [docs/WHISPER_SETUP.md](./docs/WHISPER_SETUP.md)
-> 📝 开发过程记录见 [docs/devlog/](./docs/devlog/)
+> 🧭 里程碑与关键决策见 **[docs/CHANGELOG.md](./docs/CHANGELOG.md)**
+> 📝 开发过程怎么记:格式与检索约定见 [docs/devlog/README.md](./docs/devlog/README.md)(本仓库只带规范,不带实际记录文件)
 
 ## 三条铁律
 

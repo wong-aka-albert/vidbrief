@@ -36,7 +36,7 @@ use crate::server::VidbriefServer;
 #[serde(deny_unknown_fields)]
 pub struct StyleParam {
     /// 风格轮廓(**先看 `get_guide(step="styles")`**):`quick` 快扫版 / `teaching` 教学版 /
-    /// `story` 故事版 / `review` 元组版 / `exec` 汇报版 / `custom` 自定义。
+    /// `story` 故事版 / `review` 复盘版 / `exec` 汇报版 / `custom` 自定义。
     /// **它决定"怎么填"** —— 条数、每条骨架、详略、证据密度都跟着它走;
     /// 换风格就是照另一种轮廓重写一遍,不是把语气词换一换。
     pub preset: PresetParam,
@@ -63,7 +63,7 @@ pub enum PresetParam {
     Teaching,
     /// 故事版:顺着视频时间线一趟讲下来(连着写、少列表)。
     Story,
-    /// 元组版:拿它回看自己的操作(判断 → 证据 → 结果 → 怎么用)。
+    /// 复盘版:拿它回看自己的操作(判断 → 证据 → 结果 → 怎么用)。
     Review,
     /// 汇报版:给没看过视频的人交代(结论 → 影响 → 动作)。
     Exec,

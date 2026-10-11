@@ -487,7 +487,7 @@ pub fn effective_transcript_optional(
 /// `corrected_text`(改后),读哪一个由调用方自己拿主意 —— 而契约层明写着
 /// 「所有下游都应通过 `effective_text` 取文本,**否则纠错就白做了**」。
 /// 把这条规矩留给每个调用方遵守,等于没有规矩:M4 联调时,`get_transcript`
-/// 返回的 `text` 里仍是「张小明」,而同一份材料在 `get_shot` 的同期转录里
+/// 返回的 `text` 里仍是「派森」,而同一份材料在 `get_shot` 的同期转录里
 /// 已经是改后的 —— **同一个工具集,两种说法**。
 ///
 /// 原始文本不会因此丢掉:它一直在 `01_preprocess/transcript.json` 里(永不就地改写),
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn shot_detail_carries_the_window_of_transcript_around_it() {
         let fake = Fake::new("materials-detail")
-            .with_transcript(&[(0.0, 2.0, "开场"), (8.0, 12.0, "这里说的是样本")])
+            .with_transcript(&[(0.0, 2.0, "开场"), (8.0, 12.0, "这里说的是列表")])
             .with_shot(1, 9.0);
         let opened = fake.open();
 
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(detail.window_start, 3.0, "3.0 = 9.0 - 6.0,不该被夹到 0");
         assert_eq!(detail.window_end, 15.0);
         // 只有落在窗口里的那段该出现
-        assert!(detail.transcript.contains("样本"), "{}", detail.transcript);
+        assert!(detail.transcript.contains("列表"), "{}", detail.transcript);
         assert!(!detail.transcript.contains("开场"), "{}", detail.transcript);
     }
 
@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn search_is_case_insensitive_and_trims() {
         let fake = Fake::new("materials-search")
-            .with_transcript(&[(0.0, 2.0, "看 PYTHON 的数据变化"), (2.0, 4.0, "再看样本")]);
+            .with_transcript(&[(0.0, 2.0, "看 PYTHON 的语法"), (2.0, 4.0, "再看列表")]);
         let opened = fake.open();
 
         let hit = transcript_search(&opened, " python ", 10).unwrap();

@@ -5,8 +5,11 @@
 /tools/whisper/models/
 /tools/whisper/Release/
 
-# 大体积中间产物(可由源视频重新生成)
-/tools/whisper/demo.wav
+# 音频样本与转录产物(不入库;自备素材)
+/tools/whisper/*.wav
+/tools/whisper/*.txt
+/tools/whisper/*.srt
+/tools/whisper/*.vtt
 
 review.md
 
