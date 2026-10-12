@@ -275,7 +275,7 @@ rg '^### \[' docs/devlog/ -g '[0-9]*.md'      # 列出全部条目
 rg '^### \[.*\] 决策' docs/devlog/ -g '[0-9]*.md'   # 按类型(换 决策/进度/问题/计划变更)
 rg '\*\*标签\*\*.*并发' docs/devlog/ -g '[0-9]*.md' # 按标签
 rg '端口' docs/devlog/ -g '[0-9]*.md'          # 按关键词
-rg '提交.*1a2b3c4' docs/devlog/ -g '[0-9]*.md' # 反查 # 反查:某 commit 对应哪条
+rg '提交.*1a2b3c4' docs/devlog/ -g '[0-9]*.md' # 反查:某 commit 对应哪条
 ```
 
 > `-g '[0-9]*.md'` 用于排除 devlog README 里的格式示例行,避免噪声。
