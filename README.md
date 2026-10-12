@@ -9,6 +9,11 @@
 ![MCP](https://img.shields.io/badge/MCP-stdio-blue)
 ![Platform](https://img.shields.io/badge/verified-Windows-lightgrey)
 
+![vidbrief 工作台:左列是视频与四层共轴时间轴,右列是按变化密集区取的代表帧](docs/images/workbench.png)
+
+*上图:`preprocess` 跑完一段 8 分 44 秒的录屏之后的工作台 —— 21 个变化密集区、21 张代表帧、199 段转录。
+点右侧任一张图,会跳回视频那一刻;这条时间轴把差帧图、密集区、截图、转录四层对在同一条轴上。*
+
 ## 为什么要它
 
 30 分钟的知识类视频里,最关键的信息大量**只在画面上**:图表、标注、幻灯片、演示操作。
@@ -223,6 +228,7 @@ VIDBRIEF_REAL_PROJECT=/path/to/projects/<id> cargo test -p vidbrief-cli -- --ign
 | `VIDBRIEF_FFPROBE` | ffprobe 可执行文件 | `PATH` 上的 `ffprobe` |
 | `VIDBRIEF_WHISPER_BIN` | whisper-cli 可执行文件 | 见上「放在哪」 |
 | `VIDBRIEF_WHISPER_MODEL` | ggml 模型文件 | 依次找 `tools/whisper/models/ggml-{medium,small,base}.bin` |
+| `VIDBRIEF_ASR_LANG` | 转录语言(原样传给 whisper 的 `-l`) | `zh` |
 | `VIDBRIEF_VIEW_REGISTRY` | 本地查看服务的登记目录(多会话 / CI 各用一份,互不干扰) | 系统临时目录下的 `vidbrief-view` |
 | `VIDBRIEF_REGEN_SKILL=1` | 按"活的工具表"重写 `skill/tools.md`(开发用) | 关 |
 | `VIDBRIEF_REAL_VIDEO` | **只在测试里用**:真实长视频路径 | 未设(相关测试跳过) |
