@@ -171,9 +171,11 @@ pub fn ensure_running() -> Result<u16> {
     // `127.0.0.1:0` —— 只监听回环,端口交给操作系统挑
     let server = Server::http("127.0.0.1:0")
         .map_err(|e| anyhow::anyhow!("无法启动本地查看服务:{e}"))?;
-    let port = match server.server_addr() {
-        tiny_http::ListenAddr::IP(addr) => addr.port(),
-    };
+    let port = server
+        .server_addr()
+        .to_ip()
+        .context("本地查看服务返回了非 TCP 监听地址")?
+        .port();
 
     let running = Running {
         port: std::sync::atomic::AtomicU16::new(port),
@@ -204,9 +206,11 @@ pub fn ensure_running() -> Result<u16> {
 pub fn run_in_this_process(port: u16, mounts: Vec<(String, PathBuf)>) -> Result<u16> {
     let addr = format!("127.0.0.1:{port}");
     let server = Server::http(&addr).map_err(|e| anyhow::anyhow!("无法监听 {addr}:{e}"))?;
-    let port = match server.server_addr() {
-        tiny_http::ListenAddr::IP(addr) => addr.port(),
-    };
+    let port = server
+        .server_addr()
+        .to_ip()
+        .context("本地查看服务返回了非 TCP 监听地址")?
+        .port();
 
     let mut table = BTreeMap::new();
     for (id, root) in mounts {
